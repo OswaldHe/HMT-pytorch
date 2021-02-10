@@ -1,5 +1,4 @@
 import logging
-import random
 from pathlib import Path
 
 import t5
@@ -7,58 +6,15 @@ import tensorflow.compat.v1 as tf
 
 import horovod.torch as hvd
 import torch
-from t5.models.hf_model import tokens_to_batches
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
+
+from data_utils import T5PretrainingDataset
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def dataset_fn(shards, split=None, shuffle_files=False):
-    if shuffle_files:
-        random.shuffle(shards)
-    dataset = tf.data.TextLineDataset(shards)
-    return dataset
-
-
-def text_preprocessor(ds):
-    return ds.map(lambda text: {'targets': text})
-
-
-DEFAULT_OUTPUT_FEATURES = {
-    "inputs": t5.seqio.Feature(
-        vocabulary=t5.data.get_default_vocabulary(), add_eos=True,
-        required=False),
-    "targets": t5.seqio.Feature(
-        vocabulary=t5.data.get_default_vocabulary(), add_eos=True)
-}
-
-
-class T5Dataset(IterableDataset):
-    def __init__(self, shards, batch_size):
-        self.sequence_length = {"inputs": 32, "targets": 32}
-        self.shards = shards
-        self.batch_size = batch_size
-        self.task = t5.data.Task("span_corruption",
-                                 splits=[],
-                                 dataset_fn=lambda split, shuffle_files: dataset_fn(self.shards, split, shuffle_files),
-                                 text_preprocessor=[text_preprocessor],
-                                 token_preprocessor=t5.data.preprocessors.span_corruption,
-                                 output_features=list(DEFAULT_OUTPUT_FEATURES.keys()),
-                                 metric_fns=[])
-        self.tfdataset = self.task.get_dataset(split='', sequence_length=self.sequence_length)
-        self.tfdataset = tokens_to_batches(self.tfdataset,
-                                           sequence_length=self.sequence_length,
-                                           batch_size=self.batch_size,
-                                           output_features=list(DEFAULT_OUTPUT_FEATURES.keys()))
-
-    def __iter__(self):
-        # todo: make dataset infinite?
-        for x in self.tfdataset:
-            yield x
 
 
 if __name__ == '__main__':
@@ -78,16 +34,14 @@ if __name__ == '__main__':
     # absolute path to shards
     shards = [str(data_path / sh) for sh in shards]
 
-    t5dataset = T5Dataset(shards, batch_size=2)
+    t5dataset = T5PretrainingDataset(shards, batch_size=2)
 
     # fails to work if num_workes > 0 cause we are using tf.datasets
     dl = DataLoader(t5dataset, num_workers=0, batch_size=None)
     vocab = t5.data.get_default_vocabulary()
 
-    print(f'from dataloader {hvd.local_rank()}:')
     k = 0
     last_el = None
-
     for x in dl:
         last_el = x
         k += 1
