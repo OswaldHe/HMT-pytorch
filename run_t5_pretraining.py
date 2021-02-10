@@ -35,6 +35,8 @@ def validate(iter):
 
 
 if __name__ == '__main__':
+    # run with horovod:
+    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
     args = parser.parse_args()
     hvd.init()
     torch.cuda.set_device(hvd.local_rank())
