@@ -4,13 +4,13 @@ from pathlib import Path
 
 import t5
 import tensorflow.compat.v1 as tf
-tf.config.set_visible_devices([], 'GPU')
 
-import horovod.torch as hvd 
+import horovod.torch as hvd
 import torch
 from t5.models.hf_model import tokens_to_batches
 from torch.utils.data import DataLoader, IterableDataset
 
+tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
