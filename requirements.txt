@@ -1,5 +1,8 @@
-tfds_nightly==4.2.0.dev202102080106
 tensorflow==2.4.0
 torch==1.5.0
+numpy==1.19.4
+horovod==0.21.0
+tensorflow_io==0.17.0
+tqdm==4.49.0
+transformers==4.0.1
 t5==0.8.1
-tensorflow_datasets==4.2.0
