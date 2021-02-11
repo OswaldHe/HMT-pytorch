@@ -1,8 +1,10 @@
 import random
+import json
 
 import t5
 import torch
 import tensorflow.compat.v1 as tf
+import tensorflow_io as tfio
 from t5.models.hf_model import tokens_to_batches
 from torch.utils.data import IterableDataset
 
@@ -18,6 +20,14 @@ def text_preprocessor(ds):
     return ds.map(lambda text: {'targets': text})
 
 
+def jsonl_preprocessor(ds):
+    specs = {
+        "text": tf.TensorSpec(tf.TensorShape([]), tf.string),
+        "title": tf.TensorSpec(tf.TensorShape([]), tf.string),
+    }
+    return ds.map(lambda text: {'targets': tfio.experimental.serialization.decode_json(text, specs)['text']})
+
+
 DEFAULT_OUTPUT_FEATURES = {
     "inputs": t5.seqio.Feature(
         vocabulary=t5.data.get_default_vocabulary(), add_eos=True,
@@ -28,15 +38,16 @@ DEFAULT_OUTPUT_FEATURES = {
 
 
 class T5PretrainingDataset(IterableDataset):
-    def __init__(self, shards, batch_size, inputs_len=32, targets_len=32):
+    def __init__(self, shards, batch_size, text_preprocessor=text_preprocessor, inputs_len=32, targets_len=32):
         self.sequence_length = {"inputs": inputs_len, "targets": targets_len}
         self.shards = shards
         self.batch_size = batch_size
+        self.text_preprocessor = text_preprocessor
         self.task = t5.data.Task("span_corruption",
                                  splits=[],
                                  dataset_fn=lambda split, shuffle_files: sharded_dataset_fn(self.shards, split,
                                                                                             shuffle_files),
-                                 text_preprocessor=[text_preprocessor],
+                                 text_preprocessor=[self.text_preprocessor],
                                  token_preprocessor=t5.data.preprocessors.span_corruption,
                                  output_features=list(DEFAULT_OUTPUT_FEATURES.keys()),
                                  metric_fns=[])
