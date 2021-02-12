@@ -1,5 +1,4 @@
 import random
-import json
 
 import t5
 import torch
@@ -21,9 +20,11 @@ def text_preprocessor(ds):
 
 
 def jsonl_preprocessor(ds):
+    """
+    parse single line in jsonl file, extracts field `text`
+    """
     specs = {
-        "text": tf.TensorSpec(tf.TensorShape([]), tf.string),
-        "title": tf.TensorSpec(tf.TensorShape([]), tf.string),
+        "text": tf.TensorSpec(tf.TensorShape([]), tf.string)
     }
     return ds.map(lambda text: {'targets': tfio.experimental.serialization.decode_json(text, specs)['text']})
 
