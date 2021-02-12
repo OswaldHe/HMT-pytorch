@@ -34,9 +34,14 @@ parser.add_argument('--base_model', type=str, default='t5-base',
                     help='base model name (from huggingface) (default: t5-base)')
 parser.add_argument('--lr', type=float, default=5e-05, help='learning rate (default: 5e-05)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
+parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                    help='number of batches to accumulate gradients for each worker; it multiplies total batch size.')
 parser.add_argument('--iters', type=int, default=100, help='number of iterations to train (default: 100).')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
+
+parser.add_argument('--fp16-allreduce', action='store_true', default=False,
+                    help='use fp16 compression during allreduce')
 
 
 def validate(iter):
@@ -103,12 +108,17 @@ if __name__ == '__main__':
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
+    # Horovod: (optional) compression algorithm.
+    compression = hvd.Compression.fp16 if args.fp16_allreduce else hvd.Compression.none
+
     # Horovod: wrap optimizer with DistributedOptimizer.
     optimizer = hvd.DistributedOptimizer(optimizer,
                                          named_parameters=model.named_parameters(),
-                                         compression=hvd.Compression.none,
+                                         compression=compression,
                                          op=hvd.Average,
-                                         gradient_predivide_factor=1.0)
+                                         gradient_predivide_factor=1.0,
+                                         backward_passes_per_step=args.gradient_accumulation_steps,
+                                         )
 
     # train loop
     pbar = None
