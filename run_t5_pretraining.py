@@ -30,16 +30,19 @@ parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
 
+# model args
 parser.add_argument('--base_model', type=str, default='t5-base',
                     help='base model name (from huggingface) (default: t5-base)')
+parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
+parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
+parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
+
+# training args
 parser.add_argument('--lr', type=float, default=5e-05, help='learning rate (default: 5e-05)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
 parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                     help='number of batches to accumulate gradients for each worker; it multiplies total batch size.')
 parser.add_argument('--iters', type=int, default=100, help='number of iterations to train (default: 100).')
-parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
-parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
-
 parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 
@@ -100,9 +103,15 @@ if __name__ == '__main__':
         assert_vocabs(tokenizer)
 
     model = T5ForConditionalGeneration(config=T5Config.from_pretrained(args.base_model))
-    model = model.cuda()
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    if args.init_checkpoint:
+        # todo: load iteration number?
+        checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        logger.info(f'Model was loaded from: {args.init_checkpoint}')
+    model = model.cuda()
 
     # Horovod: broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
