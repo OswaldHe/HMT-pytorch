@@ -3,7 +3,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import importlib
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 import horovod.torch as hvd
@@ -17,6 +16,7 @@ from tqdm import tqdm
 from transformers import T5Config, T5Tokenizer
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
+from utils import get_cls_by_name
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 
@@ -110,8 +110,7 @@ if __name__ == '__main__':
     if hvd.local_rank() == 0:
         assert_vocabs(t5tokenizer)
 
-    module_name, cls_name = args.model_cls.split(':')  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
-    model_cls = getattr(importlib.import_module(module_name), cls_name)
+    model_cls = get_cls_by_name(args.model_cls)  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
     if hvd.local_rank() == 0:
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
