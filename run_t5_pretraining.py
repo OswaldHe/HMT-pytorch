@@ -40,9 +40,10 @@ parser.add_argument('--target_seq_len', type=int, default=128, help='target sequ
 # training args
 parser.add_argument('--lr', type=float, default=5e-05, help='learning rate (default: 5e-05)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
+parser.add_argument('--iters', type=int, default=100,
+                    help='number of training steps (i.e., gradient updates) (default: 100).')
 parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                     help='number of batches to accumulate gradients for each worker; it multiplies total batch size.')
-parser.add_argument('--iters', type=int, default=100, help='number of iterations to train (default: 100).')
 parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 
@@ -81,7 +82,7 @@ if __name__ == '__main__':
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
         tb_writer = SummaryWriter(log_dir=args.model_path)
 
-    # specify datasets
+    # get dataset shards
     data_path = Path(args.data_path).expanduser().absolute()
     shards = list(sorted([sh.name for sh in data_path.glob('*.jsonl')]))
     # split shards across workers, drop remainders
@@ -91,22 +92,25 @@ if __name__ == '__main__':
     # absolute path to shards
     shards = [str(data_path / sh) for sh in shards]
 
-    t5dataset = T5PretrainingDataset(shards, batch_size=args.batch_size, text_preprocessor=jsonl_preprocessor,
+    per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
+
+    t5dataset = T5PretrainingDataset(shards, batch_size=per_worker_batch_size, text_preprocessor=jsonl_preprocessor,
                                      inputs_len=args.input_seq_len, targets_len=args.target_seq_len)
     # fails to work if num_workes > 0 cause we are using tf.datasets
     t5dataloader = DataLoader(t5dataset, num_workers=0, batch_size=None, **kwargs)
 
     # define model
-    config = T5Config.from_pretrained(args.base_model)
-    tokenizer = T5Tokenizer.from_pretrained(args.base_model)
+    t5config = T5Config.from_pretrained(args.base_model)
+    t5tokenizer = T5Tokenizer.from_pretrained(args.base_model)
     if hvd.local_rank() == 0:
-        assert_vocabs(tokenizer)
+        assert_vocabs(t5tokenizer)
 
-    model = T5ForConditionalGeneration(config=T5Config.from_pretrained(args.base_model))
+    model = T5ForConditionalGeneration(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     if args.init_checkpoint:
         # todo: load iteration number?
+        # todo: use iteration number to restore position in dataset?
         checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -140,21 +144,32 @@ if __name__ == '__main__':
         for batch in t5dataloader:
             if i >= args.iters:
                 break
+            # move batch data to gpu
+            for k in batch:
+                batch[k] = batch[k].cuda()
             # train step
             optimizer.zero_grad()
-            outputs = model(input_ids=batch['inputs'].cuda(),
-                            attention_mask=batch['inputs_mask'].cuda(),
-                            labels=batch['targets'].cuda())
-            outputs.loss.backward()
-            losses += [outputs.loss.detach().item()]
+            batch_loss = 0
+            # iterations over sub-batches (for gradient accumulation)
+            for j in range(0, len(batch['inputs']), args.batch_size):
+                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
+                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                labels=batch['targets'][j: j + args.batch_size])
+                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+                loss = outputs.loss / args.gradient_accumulation_steps
+                batch_loss += loss.detach().item()
+                loss.backward()
+            losses += [batch_loss]
             optimizer.step()
 
             # logging / validation
             if i % args.log_interval == 0:
                 mean_loss = np.mean(losses)
                 if hvd.local_rank() == 0:
+                    # log train loss
                     logger.info(f'step: {i}/{args.iters} loss: {mean_loss:.4f}')
                     tb_writer.add_scalar('loss/train', mean_loss, i)
+                    # log learning rate
                     for j, param_group in enumerate(optimizer.param_groups):
                         tb_writer.add_scalar(f'lr/param_group_{j}', param_group['lr'], i)
                 losses = []
@@ -162,10 +177,13 @@ if __name__ == '__main__':
 
             # saving model
             if i % args.save_interval == 0 and hvd.local_rank() == 0:
+                save_path = f'{args.model_path}/model_{i}.pth'
                 torch.save({
                             "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict()
-                           }, f'{args.model_path}/model_{i}.pth')
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "iteration": i,
+                           }, save_path)
+                logger.info(f'Model was saved to {save_path}')
 
             i += 1
             if hvd.local_rank() == 0:
