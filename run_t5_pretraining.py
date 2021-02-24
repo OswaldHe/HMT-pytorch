@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import importlib
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 import horovod.torch as hvd
@@ -13,7 +14,7 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from transformers import T5Config, T5ForConditionalGeneration, T5Tokenizer
+from transformers import T5Config, T5Tokenizer
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
 
@@ -33,6 +34,9 @@ parser.add_argument('--save_interval', type=int, default=5000, help='save model 
 # model args
 parser.add_argument('--base_model', type=str, default='t5-base',
                     help='base model name (from huggingface) (default: t5-base)')
+parser.add_argument('--model_cls', type=str, default='transformers:T5ForConditionalGeneration',
+                    help='model class name to use (default: transformers:T5ForConditionalGeneration)')
+
 parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
@@ -72,6 +76,7 @@ if __name__ == '__main__':
     # create model_path and save configuration, init tensorboard logs
     tb_writer = None
     if hvd.local_rank() == 0:
+        # todo: if model path exists and there is config file, write new config file
         model_path = Path(args.model_path)
         if not model_path.exists():
             Path(model_path).mkdir(parents=True)
@@ -105,12 +110,17 @@ if __name__ == '__main__':
     if hvd.local_rank() == 0:
         assert_vocabs(t5tokenizer)
 
-    model = T5ForConditionalGeneration(config=t5config)
+    module_name, cls_name = args.model_cls.split(':')  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
+    model_cls = getattr(importlib.import_module(module_name), cls_name)
+    if hvd.local_rank() == 0:
+        logger.info(f'Using model class: {model_cls}')
+    model = model_cls(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     if args.init_checkpoint:
         # todo: load iteration number?
         # todo: use iteration number to restore position in dataset?
+        # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
         checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
