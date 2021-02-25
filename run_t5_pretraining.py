@@ -34,6 +34,7 @@ parser.add_argument('--save_interval', type=int, default=5000, help='save model 
 # model args
 parser.add_argument('--base_model', type=str, default='t5-base',
                     help='base model name (from huggingface) (default: t5-base)')
+parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: None)')
 parser.add_argument('--model_cls', type=str, default='transformers:T5ForConditionalGeneration',
                     help='model class name to use (default: transformers:T5ForConditionalGeneration)')
 
@@ -105,7 +106,13 @@ if __name__ == '__main__':
     t5dataloader = DataLoader(t5dataset, num_workers=0, batch_size=None, **kwargs)
 
     # define model
-    t5config = T5Config.from_pretrained(args.base_model)
+    if not args.model_cfg:
+        t5config = T5Config.from_pretrained(args.base_model)
+    else:
+        t5config = T5Config.from_json_file(args.model_cfg)
+        # todo: get tokenizer from config
+        logger.warning(f'Model configuration was taken from {args.model_cfg}, but tokenizer from {args.base_model}')
+    # define tokenizer
     t5tokenizer = T5Tokenizer.from_pretrained(args.base_model)
     if hvd.local_rank() == 0:
         assert_vocabs(t5tokenizer)
