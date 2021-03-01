@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import platform
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 import horovod.torch as hvd
@@ -85,6 +86,7 @@ if __name__ == '__main__':
         args_dict['ENV'] = {}
         for env_var in ['CUDA_VISIBLE_DEVICES']:
             args_dict['ENV'][env_var] = os.environ.get(env_var, '')
+        args_dict['MACHINE'] = platform.node()
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
         tb_writer = SummaryWriter(log_dir=args.model_path)
 
