@@ -20,6 +20,12 @@ from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
 from utils import get_cls_by_name
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
+# limit cpu threads for tf
+# tf.config.threading.set_intra_op_parallelism_threads(1)
+# tf.config.threading.set_inter_op_parallelism_threads(1)
+
+# limit # of CPU threads to be used per pytorch worker, otherwise it will use all cpus and throttle gpus
+torch.set_num_threads(4)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -68,7 +74,7 @@ if __name__ == '__main__':
     if hvd.local_rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
 
-    kwargs = {'pin_memory': False}
+    kwargs = {'pin_memory': True}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
     # issues with Infiniband implementations that are not fork-safe
     if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
