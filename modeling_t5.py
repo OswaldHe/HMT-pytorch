@@ -1378,8 +1378,8 @@ class T5CDQAttention(nn.Module):
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        # cd_* are shared for all cd heads, todo: bias=True?
-        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=False)
+        # cd_* are shared for all cd heads
+        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=True)
         # todo: make less parameters in cd_w
         self.cd_w = nn.Linear(self.d_model * 2, self.d_model, bias=False)
 
@@ -1565,9 +1565,8 @@ class T5CDQAttention(nn.Module):
                 P.view(batch_size, self.cdq_n_heads, 1, self.d_model).repeat(1, 1, seq_length, 1),
                 hidden_states.view(batch_size, 1, -1, self.d_model).repeat(1, self.cdq_n_heads, 1, 1)
             ], dim=-1)
-        # input to cd_q is from [-1;1] when input to q is not restricted
-        # cd_query_states might have diffent scale compared to query_states
-        # todo: add bias to cd_q layer?
+        # input to cd_q is from [-1;1] while input to q is not restricted to these values
+        # cd_query_states might have diffent scale compared to query_states -> cd_q will use bias
         cd_query_states = self.cd_q(torch.tanh(self.cd_w(PH)))  # (bs, n_heads, seq_len, dim_per_head)
 
         # get query states
@@ -1603,11 +1602,10 @@ class T5CDQAttention(nn.Module):
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
         scores += position_bias
-        cd_scores += position_bias  # todo: not to use position bias?
+        cd_scores += position_bias  # todo: not to use position bias? idk, makes sense to use it..
         # attn_weights: (batch_size, n_heads, seq_length, key_length)
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(scores)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
-        cd_scores += position_bias  # todo: fix: remove repeated addition
         cd_attn_weights = F.softmax(cd_scores.float(), dim=-1).type_as(cd_scores)
         cd_attn_weights = F.dropout(cd_attn_weights, p=self.dropout, training=self.training)
 
