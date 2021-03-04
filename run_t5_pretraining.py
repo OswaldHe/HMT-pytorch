@@ -17,7 +17,7 @@ from tqdm import tqdm
 from transformers import T5Config, T5Tokenizer
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
-from utils import get_cls_by_name
+from utils import get_cls_by_name, get_git_hash_commit
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 # limit cpu threads for tf
@@ -61,6 +61,7 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
 
 
 def validate(iter):
+    # todo: model.eval()
     if hvd.local_rank() == 0:
         logger.info(f'start validation at iter {iter}')
 
@@ -93,6 +94,7 @@ if __name__ == '__main__':
         for env_var in ['CUDA_VISIBLE_DEVICES']:
             args_dict['ENV'][env_var] = os.environ.get(env_var, '')
         args_dict['MACHINE'] = platform.node()
+        args_dict['COMMIT'] = get_git_hash_commit()
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
         tb_writer = SummaryWriter(log_dir=args.model_path)
 
@@ -166,6 +168,7 @@ if __name__ == '__main__':
     losses = []
     while i < args.iters:
         for batch in t5dataloader:
+            model.train()
             if i >= args.iters:
                 break
             # move batch data to gpu
