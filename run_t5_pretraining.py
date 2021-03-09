@@ -166,10 +166,10 @@ if __name__ == '__main__':
 
     i = 0
     losses = []
-    while i < args.iters:
+    while i <= args.iters:
         for batch in t5dataloader:
             model.train()
-            if i >= args.iters:
+            if i > args.iters:
                 break
             # move batch data to gpu
             for k in batch:
