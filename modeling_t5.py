@@ -1379,7 +1379,7 @@ class T5CDQAttention(nn.Module):
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # cd_* are shared for all cd heads
-        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=True)
+        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=False)
         # todo: make less parameters in cd_w
         self.cd_w = nn.Linear(self.d_model * 2, self.d_model, bias=False)
 
@@ -1566,7 +1566,7 @@ class T5CDQAttention(nn.Module):
                 hidden_states.view(batch_size, 1, -1, self.d_model).repeat(1, self.cdq_n_heads, 1, 1)
             ], dim=-1)
         # input to cd_q is from [-1;1] while input to q is not restricted to these values
-        # cd_query_states might have diffent scale compared to query_states -> cd_q will use bias
+        # cd_query_states might have diffent scale compared to query_states -> try cd_q with bias to restore scale
         cd_query_states = self.cd_q(torch.tanh(self.cd_w(PH)))  # (bs, n_heads, seq_len, dim_per_head)
 
         # get query states
