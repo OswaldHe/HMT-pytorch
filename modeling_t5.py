@@ -1379,7 +1379,7 @@ class T5CDQAttention(nn.Module):
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # cd_* are shared for all cd heads
-        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=False)
+        self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=True)
         # todo: make less parameters in cd_w
         self.cd_w = nn.Linear(self.d_model * 2, self.d_model, bias=False)
 
