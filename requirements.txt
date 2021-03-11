@@ -6,3 +6,5 @@ tensorflow_io==0.17.0
 tqdm==4.49.0
 transformers==4.0.1
 t5==0.8.1
+# for training with deeppavlov and tf2.0 tensorboard support
+git+https://github.com/deepmipt/DeepPavlov.git@feat/tf2_tensorboard
