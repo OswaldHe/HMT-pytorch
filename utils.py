@@ -1,5 +1,10 @@
 import importlib
+import json
 import subprocess
+from pathlib import Path
+
+import torch
+from transformers import T5Config, T5Tokenizer
 
 
 def get_cls_by_name(name: str) -> type:
@@ -17,3 +22,31 @@ def get_cls_by_name(name: str) -> type:
 
 def get_git_hash_commit() -> str:
     return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+
+
+def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True):
+    path = Path(path)
+    cfg = json.load((path / 'config.json').open('r'))
+    model_cfg = Path(t5_configs_path) / cfg['model_cfg']
+    model_cls = get_cls_by_name(cfg['model_cls'])
+    if check_commit:
+        assert cfg['COMMIT'] == get_git_hash_commit(), f"expected commit {cfg['COMMIT']}, " \
+                                                       f"but current is {get_git_hash_commit()}"
+    # take latest checkpoint
+    if checkpoint is None:
+        checkpoint = list(sorted(path.glob('*.pth'), key=lambda x: x.stat().st_ctime))[-1]
+
+    if model_cfg is None:
+        t5config = T5Config.from_pretrained(cfg['base_model'])
+    else:
+        t5config = T5Config.from_json_file(model_cfg)
+
+    t5tokenizer = T5Tokenizer.from_pretrained(cfg['base_model'])
+
+    model = model_cls(config=t5config)
+
+    state_dict = torch.load(str(checkpoint), map_location='cpu')
+    model.load_state_dict(state_dict["model_state_dict"])
+    print(f'Model was loaded from: {checkpoint}')
+    model.eval()
+    return model, t5tokenizer
