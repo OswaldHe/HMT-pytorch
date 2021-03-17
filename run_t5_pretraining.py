@@ -181,6 +181,7 @@ if __name__ == '__main__':
             for j in range(0, len(batch['inputs']), args.batch_size):
                 outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
                                 attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                # todo: use decoder_attention mask!
                                 labels=batch['targets'][j: j + args.batch_size])
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = outputs.loss / args.gradient_accumulation_steps
