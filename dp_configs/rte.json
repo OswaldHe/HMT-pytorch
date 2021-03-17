@@ -1,0 +1,98 @@
+{
+  "dataset_reader": {
+    "class_name": "dp:T5DatasetReader",
+    "name": "glue_rte_v002",
+    "train": "train",
+    "valid": "validation",
+    "test": "test"
+  },
+  "dataset_iterator": {
+    "class_name": "dp:T5DatasetIterator",
+    "shuffle": false,
+    "seed": 42
+  },
+  "chainer": {
+    "in": ["x"],
+    "in_y": ["y"],
+    "pipe": [
+      {
+        "class_name": "dp:TorchTransformersPreprocessor",
+        "id": "preprocessor",
+        "vocab_file": "t5-base",
+        "do_lower_case": false,
+        "max_seq_length": 32,
+        "reduce_pad": true,
+        "in": ["x"],
+        "out": ["x_features"]
+      },
+      {
+        "in": ["y"],
+        "out": ["y_features"],
+        "ref": "preprocessor"
+      },
+      {
+        "class_name": "dp:T5Text2TextModel",
+        "pretrained_model": "./runs/base_wiki_enc_cdq_fixed_pos_wo_tanh/",
+        "t5_configs_path": "/home/kuratov/t5-experiments/",
+        "check_commit": false,
+        "max_generation_len": 10,
+        "save_path": "{MODEL_PATH}/model",
+        "load_path": "{MODEL_PATH}/model",
+        "optimizer": "AdamW",
+        "optimizer_parameters": {
+          "lr": 2e-05
+        },
+        "learning_rate_drop_patience": 10,
+        "learning_rate_drop_div": 2.0,
+        "in": ["x_features"],
+        "in_y": ["y_features"],
+        "out": ["y_pred"]
+      },
+      {
+        "in": ["y_pred"],
+        "out": ["y_pred_id"],
+        "class_name": "dp:T5Text2TextPostprocessor",
+        "task": "glue_rte_v002",
+        "id": "postprocessor"
+      },
+      {
+        "in": ["y"],
+        "out": ["y_id"],
+        "ref": "postprocessor"
+      }
+    ],
+    "out": ["y_pred", "y_pred_id"]
+  },
+  "train": {
+    "batch_size": 10,
+    "metrics": [
+      {
+        "name": "accuracy",
+        "inputs": ["y_id", "y_pred_id"]
+      }
+
+    ],
+    "validation_patience": 10,
+    "val_every_n_epochs": 15,
+    "log_every_n_epochs": 1,
+    "show_examples": false,
+    "validate_first": false,
+    "evaluation_targets": ["train", "valid"],
+    "class_name": "torch_trainer",
+    "tensorboard_log_dir": "{MODEL_PATH}/",
+    "pytest_max_batches": 2
+  },
+  "metadata": {
+    "imports": ["dp"],
+    "variables": {
+      "ROOT_PATH": "~/.deeppavlov",
+      "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
+      "MODEL_PATH": "./runs/classifiers/t5_rte",
+      "BASE_MODEL": "bert-base-cased"
+    },
+    "requirements": [
+      "{DEEPPAVLOV_PATH}/requirements/pytorch.txt",
+      "{DEEPPAVLOV_PATH}/requirements/transformers.txt"
+    ]
+  }
+}
