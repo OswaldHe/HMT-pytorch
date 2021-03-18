@@ -20,7 +20,7 @@
         "id": "preprocessor",
         "vocab_file": "t5-base",
         "do_lower_case": false,
-        "max_seq_length": 32,
+        "max_seq_length": 256,
         "reduce_pad": true,
         "in": ["x"],
         "out": ["x_features"]
@@ -42,7 +42,7 @@
         "optimizer_parameters": {
           "lr": 2e-05
         },
-        "learning_rate_drop_patience": 10,
+        "learning_rate_drop_patience": 5,
         "learning_rate_drop_div": 2.0,
         "in": ["x_features"],
         "in_y": ["y_features"],
@@ -64,7 +64,7 @@
     "out": ["y_pred", "y_pred_id"]
   },
   "train": {
-    "batch_size": 10,
+    "batch_size": 8,
     "metrics": [
       {
         "name": "accuracy",
@@ -72,9 +72,9 @@
       }
 
     ],
-    "validation_patience": 10,
-    "val_every_n_epochs": 15,
-    "log_every_n_epochs": 1,
+    "validation_patience": 15,
+    "val_every_n_batches": 250,
+    "log_every_n_batches": 100,
     "show_examples": false,
     "validate_first": false,
     "evaluation_targets": ["train", "valid"],
