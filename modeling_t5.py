@@ -720,18 +720,19 @@ class T5PreTrainedModel(PreTrainedModel):
             if module.has_relative_attention_bias:
                 module.relative_attention_bias.weight.data.normal_(mean=0.0, std=factor * ((d_model) ** -0.5))
 
-    def _shift_right(self, input_ids):
-        decoder_start_token_id = self.config.decoder_start_token_id
+    def _shift_right(self, input_ids, insert_token_id=None):
+        if insert_token_id is None:
+            insert_token_id = self.config.decoder_start_token_id
         pad_token_id = self.config.pad_token_id
 
         assert (
-            decoder_start_token_id is not None
+            insert_token_id is not None
         ), "self.model.config.decoder_start_token_id has to be defined. In T5 it is usually set to the pad_token_id. See T5 docs for more information"
 
         # shift inputs to the right
         shifted_input_ids = input_ids.new_zeros(input_ids.shape)
         shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
-        shifted_input_ids[..., 0] = decoder_start_token_id
+        shifted_input_ids[..., 0] = insert_token_id
 
         assert pad_token_id is not None, "self.model.config.pad_token_id has to be defined."
         # replace possible -100 values in labels by `pad_token_id`
@@ -1261,6 +1262,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
             # get decoder inputs from shifting lm labels to the right
             decoder_input_ids = self._shift_right(labels)
+            # fixed: decoder_attention_mask should also be shifted if labels are shifted
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
 
         # If decoding with past key value states, only the last tokens
         # should be given as an input
