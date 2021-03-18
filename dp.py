@@ -55,11 +55,13 @@ class TorchTransformersPreprocessor(Component):
                  max_seq_length: int = 512,
                  return_tokens: bool = False,
                  reduce_pad: bool = False,
+                 truncation: str = 'longest_first',
                  **kwargs) -> None:
         self.max_seq_length = max_seq_length
         self.return_tokens = return_tokens
         self.reduce_pad = reduce_pad
         self.padding_strategy = 'longest' if reduce_pad else 'max_length'
+        self.truncation = truncation
 
         if Path(vocab_file).is_file():
             vocab_file = str(expand_path(vocab_file))
@@ -80,6 +82,7 @@ class TorchTransformersPreprocessor(Component):
         # use batch encode plus and reduce paddings
         batch = self.tokenizer.batch_encode_plus(batch_text_or_text_pairs=batch_text, add_special_tokens=True,
                                                  max_length=self.max_seq_length, padding=self.padding_strategy,
+                                                 truncation=self.truncation,
                                                  return_attention_mask=True, return_tensors='pt')
 
         if 'token_type_ids' not in batch:
