@@ -9,3 +9,4 @@ t5==0.8.1
 # for training with deeppavlov and tf2.0 tensorboard support
 git+https://github.com/deepmipt/DeepPavlov.git@feat/tf2_tensorboard
 datasets==1.1.3
+tfds-nightly==4.2.0.dev202103150106
