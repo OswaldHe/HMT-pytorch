@@ -17,7 +17,7 @@
   "model_type": "t5",
   "n_positions": 512,
   "num_heads": 12,
-  "num_cdq_heads": 6,
+  "num_cdq_heads": 12,
   "num_layers": 12,
   "output_past": true,
   "pad_token_id": 0,
