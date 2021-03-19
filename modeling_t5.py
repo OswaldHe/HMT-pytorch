@@ -698,7 +698,8 @@ class T5PreTrainedModel(PreTrainedModel):
             key_value_proj_dim = self.config.d_kv
             n_heads = self.config.num_heads - self.config.num_cdq_heads
             n_cdq_heads = self.config.num_cdq_heads
-            module.q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
+            if n_heads > 0:
+                module.q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
             module.k.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
             module.v.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
             module.o.weight.data.normal_(mean=0.0, std=factor * (((n_heads + n_cdq_heads) * key_value_proj_dim) ** -0.5))
@@ -1404,7 +1405,7 @@ class T5CDQAttention(nn.Module):
         self.o = nn.Linear((self.n_heads + self.cdq_n_heads) * self.key_value_proj_dim, self.d_model, bias=False)
 
         if self.has_relative_attention_bias:
-            self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
+            self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_shared_heads)
         self.pruned_heads = set()
 
     def prune_heads(self, heads):
@@ -1520,7 +1521,7 @@ class T5CDQAttention(nn.Module):
 
         def shape(states):
             """  projection """
-            return states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+            return states.view(batch_size, -1, self.n_shared_heads, self.key_value_proj_dim).transpose(1, 2)
 
         def unshape(states):
             """  reshape """
