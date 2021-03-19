@@ -696,12 +696,13 @@ class T5PreTrainedModel(PreTrainedModel):
         elif isinstance(module, T5CDQAttention):
             d_model = self.config.d_model
             key_value_proj_dim = self.config.d_kv
-            n_heads = self.config.num_heads // 2
+            n_heads = self.config.num_heads - self.config.num_cdq_heads
+            n_cdq_heads = self.config.num_cdq_heads
             module.q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
             module.k.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
             module.v.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
-            module.o.weight.data.normal_(mean=0.0, std=factor * ((n_heads * key_value_proj_dim) ** -0.5))
-            module.T.weight.data.normal_(mean=0.0, std=factor * (n_heads * d_model ** -0.5))
+            module.o.weight.data.normal_(mean=0.0, std=factor * (((n_heads + n_cdq_heads) * key_value_proj_dim) ** -0.5))
+            module.T.weight.data.normal_(mean=0.0, std=factor * (n_cdq_heads * d_model ** -0.5))
             module.W_t.weight.data.normal_(mean=0.0, std=factor * ((d_model * d_model) ** -0.5))
             module.cd_q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
             module.cd_w.weight.data.normal_(mean=0.0, std=factor * ((d_model * 2 * d_model)) ** -0.5)
@@ -1375,13 +1376,16 @@ class T5CDQAttention(nn.Module):
         self.key_value_proj_dim = config.d_kv
         # half of the attention heads are regular attention heads
         # another half of the attention heads uses context-dependent Q
-        self.n_heads = config.num_heads // 2
-        self.cdq_n_heads = config.num_heads // 2
+        self.n_heads = config.num_heads - config.num_cdq_heads
+        self.cdq_n_heads = config.num_cdq_heads
+        # we share W_key, W_values, W_outputs matrices for regular and cdq attention
+        self.n_shared_heads = self.n_heads if self.n_heads == self.cdq_n_heads else self.cdq_n_heads
         self.dropout = config.dropout_rate
-        self.inner_dim = self.n_heads * self.key_value_proj_dim
+        self.inner_dim = self.n_shared_heads * self.key_value_proj_dim
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
-        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        if self.n_heads > 0:
+            self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # cd_* are shared for all cd heads
         self.cd_q = nn.Linear(self.d_model, self.key_value_proj_dim, bias=False)
         # todo: make less parameters in cd_w
@@ -1397,7 +1401,7 @@ class T5CDQAttention(nn.Module):
         self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # self.o is applied to concatenation of regular MHA and CDQ-MHA
-        self.o = nn.Linear(self.inner_dim * 2, self.d_model, bias=False)
+        self.o = nn.Linear((self.n_heads + self.cdq_n_heads) * self.key_value_proj_dim, self.d_model, bias=False)
 
         if self.has_relative_attention_bias:
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
@@ -1574,7 +1578,8 @@ class T5CDQAttention(nn.Module):
         cd_query_states = self.cd_q(self.cd_w(PH))  # (bs, n_heads, seq_len, dim_per_head)
 
         # get query states
-        query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
+        if self.n_heads > 0:
+            query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
         # get key/value states
         key_states = project(
             hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
@@ -1584,9 +1589,10 @@ class T5CDQAttention(nn.Module):
         )
 
         # compute scores
-        scores = torch.matmul(
-            query_states, key_states.transpose(3, 2)
-        )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+        if self.n_heads > 0:
+            scores = torch.matmul(
+                query_states, key_states.transpose(3, 2)
+            )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
         cd_scores = torch.matmul(cd_query_states, key_states.transpose(3, 2))
 
         if position_bias is None:
@@ -1605,22 +1611,29 @@ class T5CDQAttention(nn.Module):
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
-        scores += position_bias
+        if self.n_heads > 0:
+            scores += position_bias
+            attn_weights = F.softmax(scores.float(), dim=-1).type_as(scores)
+            attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+        else:
+            attn_weights = None
+
         cd_scores += position_bias  # todo: not to use position bias? idk, makes sense to use it..
         # attn_weights: (batch_size, n_heads, seq_length, key_length)
-        attn_weights = F.softmax(scores.float(), dim=-1).type_as(scores)
-        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         cd_attn_weights = F.softmax(cd_scores.float(), dim=-1).type_as(cd_scores)
         cd_attn_weights = F.dropout(cd_attn_weights, p=self.dropout, training=self.training)
 
         # Mask heads if we want to
-        if head_mask is not None:
+        if head_mask is not None and self.n_heads > 0:
             # head_mask only for regular MHA
             attn_weights = attn_weights * head_mask
 
-        attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
         cd_attn_output = unshape(torch.matmul(cd_attn_weights, value_states))  # (batch_size, seq_length, dim)
-        attn_output = self.o(torch.cat([attn_output, cd_attn_output], dim=-1))
+        if self.n_heads > 0:
+            attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+            attn_output = self.o(torch.cat([attn_output, cd_attn_output], dim=-1))
+        else:
+            attn_output = self.o(cd_attn_output)
 
         present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
