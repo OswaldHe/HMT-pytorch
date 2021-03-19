@@ -32,7 +32,7 @@
       },
       {
         "class_name": "dp:T5Text2TextModel",
-        "pretrained_model": "./runs/base_wiki_enc_cdq_fixed_pos_wo_tanh/",
+        "pretrained_model": "{PRETRAINED_PATH}",
         "t5_configs_path": "/home/kuratov/t5-experiments/",
         "check_commit": false,
         "max_generation_len": 10,
@@ -64,7 +64,7 @@
     "out": ["y_pred", "y_pred_id"]
   },
   "train": {
-    "batch_size": 8,
+    "batch_size": 32,
     "metrics": [
       {
         "name": "accuracy",
@@ -87,7 +87,8 @@
     "variables": {
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
-      "MODEL_PATH": "./runs/classifiers/t5_rte",
+      "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
+      "MODEL_PATH": "{PRETRAINED_PATH}/rte_bs_32",
       "BASE_MODEL": "bert-base-cased"
     },
     "requirements": [
