@@ -132,18 +132,19 @@ class T5Text2TextModel(TorchModel):
 
         # need to support:
         # * loading of default model from huggingface
-        # * custom model from experiments (with custom configs and model implementations) 
+        # * custom model from experiments (with custom configs and model implementations)
         if self.pretrained_model in T5_PRETRAINED_MODEL_ARCHIVE_LIST:
             # load default models from HF
             from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
             self.model = T5ForConditionalGeneration.from_pretrained(self.pretrained_model)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model)
         elif Path(self.pretrained_model).is_file():
             # load model from HF Transformers configuration file, with random weights
             raise NotImplementedError
         elif Path(self.pretrained_model).is_dir():
             # model from experiments - one folder one model with configuration file and possible multiple checkpoints
             from utils import load_experiment
-            self.model, self.tokenizer = load_experiment(self.pretrained_model, t5_configs_path=self.t5_configs_path, 
+            self.model, self.tokenizer = load_experiment(self.pretrained_model, t5_configs_path=self.t5_configs_path,
                                                          checkpoint=self.checkpoint, check_commit=self.check_commit)
         else:
             raise RuntimeError("Could not get model to be loaded.")
@@ -202,8 +203,6 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        log.info(f'{loss.item()}')
-
         return {'loss': loss.item()}
 
     def __call__(self, features: List[InputFeatures]) -> List[str]:
@@ -220,7 +219,6 @@ class T5Text2TextModel(TorchModel):
         predictions = [self.tokenizer.decode(tokens).replace('<pad>', '').replace('</s>', '').strip()
                        for tokens in predicted_tokens]
 
-        log.info(f'{predictions}')
         return predictions
 
 
