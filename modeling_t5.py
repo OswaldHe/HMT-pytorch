@@ -703,7 +703,7 @@ class T5PreTrainedModel(PreTrainedModel):
             module.k.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
             module.v.weight.data.normal_(mean=0.0, std=factor * (d_model ** -0.5))
             module.o.weight.data.normal_(mean=0.0, std=factor * (((n_heads + n_cdq_heads) * key_value_proj_dim) ** -0.5))
-            module.T.weight.data.normal_(mean=0.0, std=factor * (n_cdq_heads * d_model ** -0.5))
+            module.T.weight.data.normal_(mean=0.0, std=factor * ((n_cdq_heads * d_model) ** -0.5))
             module.W_t.weight.data.normal_(mean=0.0, std=factor * ((d_model * d_model) ** -0.5))
             module.cd_q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
             module.cd_w.weight.data.normal_(mean=0.0, std=factor * ((d_model * 2 * d_model)) ** -0.5)
