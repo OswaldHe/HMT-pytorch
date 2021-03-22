@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional, Union, Dict
+from typing import List, Sequence, Tuple, Optional, Union, Dict
 from pathlib import Path
 
 
@@ -35,12 +35,20 @@ log = logging.getLogger(__name__)
 class T5DatasetReader(DatasetReader):
 
     def read(self, data_path: str, name: Optional[str] = None, train: str = 'train', valid: Optional[str] = None,
-             test: Optional[str] = None, **kwargs):
+             test: Optional[str] = None, train_task: Optional[str] = None, **kwargs):
         split_mapping = {'train': train, 'valid': valid, 'test': test}
         # filter unused splits
         split_mapping = {el: split_mapping[el] for el in split_mapping if split_mapping[el]}
         t5task = t5.data.get_mixture_or_task(name)
-        return {k: t5task.get_dataset(split=v, sequence_length=None, shuffle=False) for k, v in split_mapping.items()}
+        data = {}
+        if train_task is not None:
+            t5_train_task = t5.data.get_mixture_or_task(train_task)
+            data['train'] = t5_train_task.get_dataset(split=split_mapping['train'], sequence_length=None, shuffle=False)
+            del split_mapping['train']
+
+        data = dict(**data, **{k: t5task.get_dataset(split=v, sequence_length=None, shuffle=False)
+                               for k, v in split_mapping.items()})
+        return data
 
 
 class T5DatasetIterator(DataLearningIterator):
