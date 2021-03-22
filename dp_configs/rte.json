@@ -8,7 +8,7 @@
   },
   "dataset_iterator": {
     "class_name": "dp:T5DatasetIterator",
-    "shuffle": false,
+    "shuffle": true,
     "seed": 42
   },
   "chainer": {
@@ -88,7 +88,7 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/rte_bs_32",
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/rte/bs_32",
       "BASE_MODEL": "bert-base-cased"
     },
     "requirements": [
