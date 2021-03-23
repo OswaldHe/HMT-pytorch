@@ -1,7 +1,7 @@
 {
   "dataset_reader": {
     "class_name": "dp:T5DatasetReader",
-    "name": "glue_rte_v002",
+    "name": "{TASK}",
     "train": "train",
     "valid": "validation",
     "test": "test"
@@ -52,7 +52,7 @@
         "in": ["y_pred"],
         "out": ["y_pred_id"],
         "class_name": "dp:T5Text2TextPostprocessor",
-        "task": "glue_rte_v002",
+        "task": "{TASK}",
         "id": "postprocessor"
       },
       {
@@ -70,7 +70,6 @@
         "name": "accuracy",
         "inputs": ["y_id", "y_pred_id"]
       }
-
     ],
     "validation_patience": 15,
     "val_every_n_batches": 250,
@@ -88,7 +87,8 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/glue/rte/bs_32",
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/qnli/bs_32",
+      "TASK": "glue_qnli_v002",
       "BASE_MODEL": "bert-base-cased"
     },
     "requirements": [
