@@ -1,7 +1,7 @@
 {
   "dataset_reader": {
     "class_name": "dp:T5DatasetReader",
-    "name": "glue_rte_v002",
+    "name": "{TASK}",
     "train": "train",
     "valid": "validation",
     "test": "test"
@@ -52,7 +52,7 @@
         "in": ["y_pred"],
         "out": ["y_pred_id"],
         "class_name": "dp:T5Text2TextPostprocessor",
-        "task": "glue_rte_v002",
+        "task": "{TASK}",
         "id": "postprocessor"
       },
       {
@@ -64,8 +64,12 @@
     "out": ["y_pred", "y_pred_id"]
   },
   "train": {
-    "batch_size": 32,
+    "batch_size": 20,
     "metrics": [
+      {
+        "name": "f1_score_with_invalid",
+        "inputs": ["y_id", "y_pred_id"]
+      },
       {
         "name": "accuracy",
         "inputs": ["y_id", "y_pred_id"]
@@ -87,7 +91,8 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/glue/rte/bs_32/"
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/qqp/bs_20",
+      "TASK": "glue_qqp_v002"
     },
     "requirements": [
       "{DEEPPAVLOV_PATH}/requirements/pytorch.txt",
