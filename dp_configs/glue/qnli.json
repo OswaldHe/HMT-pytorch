@@ -88,8 +88,7 @@
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
       "MODEL_PATH": "{PRETRAINED_PATH}/glue/qnli/bs_32",
-      "TASK": "glue_qnli_v002",
-      "BASE_MODEL": "bert-base-cased"
+      "TASK": "glue_qnli_v002"
     },
     "requirements": [
       "{DEEPPAVLOV_PATH}/requirements/pytorch.txt",

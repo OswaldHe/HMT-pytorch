@@ -87,8 +87,7 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/glue/sst2/bs_32/",
-      "BASE_MODEL": "bert-base-cased"
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/sst2/bs_32/"
     },
     "requirements": [
       "{DEEPPAVLOV_PATH}/requirements/pytorch.txt",

@@ -1,10 +1,11 @@
-from typing import List, Sequence, Tuple, Optional, Union, Dict
+from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
 
 
 import t5
-from t5.data.tasks import TaskRegistry
-from t5.data.mixtures import MixtureRegistry
+from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be imported before any usage of tasks
+from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
+from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
 
 import torch
 
@@ -15,6 +16,7 @@ from deeppavlov.core.models.component import Component
 from deeppavlov.core.data.dataset_reader import DatasetReader
 from deeppavlov.core.data.data_learning_iterator import DataLearningIterator
 from deeppavlov.core.models.torch_model import TorchModel
+from deeppavlov.core.common.metrics_registry import register_metric
 
 # list of official t5 models
 from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST
@@ -221,7 +223,8 @@ class T5Text2TextModel(TorchModel):
             predicted_tokens = self.model.generate(**_input, max_length=self.max_generation_len)
             predicted_tokens = predicted_tokens.cpu().numpy().tolist()
 
-        # warning: conversion from indices to tokens should be done we the same vocabulary as in pipeline (currently we use only HFT tokenizer)
+        # warning: conversion from indices to tokens should be done we the same vocabulary as in pipeline
+        # (currently we use only HFT tokenizer)
         # but we might use post-processor from t5tasks in next pipeline step
         # or just self.tokenizer.decode(tokens, skip_special_tokens=True)?
         predictions = [self.tokenizer.decode(tokens).replace('<pad>', '').replace('</s>', '').strip()
@@ -236,3 +239,9 @@ class T5Text2TextPostprocessor(Component):
 
     def __call__(self, predictions: List[str]):
         return [self.postprocess_fn(p) for p in predictions]
+
+
+@register_metric('f1_score_with_invalid')
+def f1_score_with_invalid(y_true, y_predicted) -> float:
+    # used by qqp, mrpc
+    return t5_f1_score_with_invalid(y_true, y_predicted)['f1'] / 100.0

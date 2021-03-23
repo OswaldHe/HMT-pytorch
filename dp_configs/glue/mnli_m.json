@@ -90,8 +90,7 @@
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
       "MODEL_PATH": "{PRETRAINED_PATH}/glue/mnli_mm/bs_32",
       "TASK": "glue_mnli_matched_v002",
-      "TRAIN_TASK": "glue_mnli_v002",
-      "BASE_MODEL": "bert-base-cased"
+      "TRAIN_TASK": "glue_mnli_v002"
     },
     "requirements": [
       "{DEEPPAVLOV_PATH}/requirements/pytorch.txt",
