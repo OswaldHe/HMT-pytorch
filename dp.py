@@ -204,18 +204,19 @@ class T5Text2TextModel(TorchModel):
         input_y['input_ids'] -= (1 - input_y['attention_mask']) * 100
 
         self.optimizer.zero_grad()
-        # todo: debug
+        # todo: refactor sub-batches are used in __call__ and train_on_batch
         # todo: full batch goes to gpu, mb only sub-batch?
-        if self.sub_batch_size is None:
-            self.sub_batch_size = batch_size
+        sub_batch_size = self.sub_batch_size
+        if sub_batch_size is None:
+            sub_batch_size = batch_size
 
         batch_loss = 0
-        n_gradient_acc_steps = max(1, batch_size // self.sub_batch_size)
-        for i in range(0, batch_size, self.sub_batch_size):
-            outputs = self.model(input_ids=input_x['input_ids'][i: i + self.sub_batch_size],
-                                 attention_mask=input_x['attention_mask'][i: i + self.sub_batch_size],
-                                 labels=input_y['input_ids'][i: i + self.sub_batch_size],
-                                 decoder_attention_mask=input_y['attention_mask'][i: i + self.sub_batch_size])
+        n_gradient_acc_steps = max(1, batch_size // sub_batch_size)
+        for i in range(0, batch_size, sub_batch_size):
+            outputs = self.model(input_ids=input_x['input_ids'][i: i + sub_batch_size],
+                                 attention_mask=input_x['attention_mask'][i: i + sub_batch_size],
+                                 labels=input_y['input_ids'][i: i + sub_batch_size],
+                                 decoder_attention_mask=input_y['attention_mask'][i: i + sub_batch_size])
             loss = outputs.loss / n_gradient_acc_steps
             batch_loss += loss.detach().item()
             loss.backward()
@@ -233,10 +234,14 @@ class T5Text2TextModel(TorchModel):
         _input = self._build_input(features)
         batch_size = len(_input['input_ids'])
 
+        sub_batch_size = self.sub_batch_size
+        if sub_batch_size is None:
+            sub_batch_size = batch_size
+
         predicted_tokens = []
         with torch.no_grad():
-            for i in range(0, batch_size, self.sub_batch_size):
-                batch_input = {k: _input[k][i: i + self.sub_batch_size] for k in _input}
+            for i in range(0, batch_size, sub_batch_size):
+                batch_input = {k: _input[k][i: i + sub_batch_size] for k in _input}
                 p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
                 p_batch_tokens = p_batch_tokens.cpu().numpy().tolist()
                 predicted_tokens += p_batch_tokens
