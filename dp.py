@@ -7,6 +7,7 @@ from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be impo
 from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
 
+import tensorflow.compat.v1 as tf
 import torch
 
 from transformers.data.processors.utils import InputFeatures
@@ -32,6 +33,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 # log = logging.getLogger('deeppavlov')
 log = logging.getLogger(__name__)
+
+tf.config.set_visible_devices([], 'GPU')
 
 
 class T5DatasetReader(DatasetReader):
@@ -124,6 +127,7 @@ class T5Text2TextModel(TorchModel):
                  clip_norm: Optional[float] = None,
                  check_commit: bool = True,
                  max_generation_len: int = 128,
+                 sub_batch_size: Optional[int] = None,
                  **kwargs):
         self.pretrained_model = pretrained_model
         self.t5_configs_path = t5_configs_path
@@ -131,6 +135,7 @@ class T5Text2TextModel(TorchModel):
         self.check_commit = check_commit
         self.max_generation_len = max_generation_len
         self.clip_norm = clip_norm
+        self.sub_batch_size = sub_batch_size
         # super().__init__ calls self.load()
         super().__init__(optimizer=optimizer,
                          optimizer_parameters=optimizer_parameters,
@@ -194,17 +199,26 @@ class T5Text2TextModel(TorchModel):
     def train_on_batch(self, features: List[InputFeatures], labels: List[InputFeatures]) -> Dict:
         input_x = self._build_input(features)
         input_y = self._build_input(labels)
+        batch_size = len(input_x['input_ids'])
 
         input_y['input_ids'] -= (1 - input_y['attention_mask']) * 100
 
         self.optimizer.zero_grad()
+        # todo: debug
+        # todo: full batch goes to gpu, mb only sub-batch?
+        if self.sub_batch_size is None:
+            self.sub_batch_size = batch_size
 
-        outputs = self.model(input_ids=input_x['input_ids'],
-                             attention_mask=input_x['attention_mask'],
-                             labels=input_y['input_ids'],
-                             decoder_attention_mask=input_y['attention_mask'])
-        loss = outputs.loss
-        loss.backward()
+        batch_loss = 0
+        n_gradient_acc_steps = max(1, batch_size // self.sub_batch_size)
+        for i in range(0, batch_size, self.sub_batch_size):
+            outputs = self.model(input_ids=input_x['input_ids'][i: i + self.sub_batch_size],
+                                 attention_mask=input_x['attention_mask'][i: i + self.sub_batch_size],
+                                 labels=input_y['input_ids'][i: i + self.sub_batch_size],
+                                 decoder_attention_mask=input_y['attention_mask'][i: i + self.sub_batch_size])
+            loss = outputs.loss / n_gradient_acc_steps
+            batch_loss += loss.detach().item()
+            loss.backward()
 
         if self.clip_norm:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
@@ -213,15 +227,19 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        return {'loss': loss.item()}
+        return {'loss': batch_loss}
 
     def __call__(self, features: List[InputFeatures]) -> List[str]:
-
         _input = self._build_input(features)
+        batch_size = len(_input['input_ids'])
 
+        predicted_tokens = []
         with torch.no_grad():
-            predicted_tokens = self.model.generate(**_input, max_length=self.max_generation_len)
-            predicted_tokens = predicted_tokens.cpu().numpy().tolist()
+            for i in range(0, batch_size, self.sub_batch_size):
+                batch_input = {k: _input[k][i: i + self.sub_batch_size] for k in _input}
+                p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
+                p_batch_tokens = p_batch_tokens.cpu().numpy().tolist()
+                predicted_tokens += p_batch_tokens
 
         # warning: conversion from indices to tokens should be done we the same vocabulary as in pipeline
         # (currently we use only HFT tokenizer)
