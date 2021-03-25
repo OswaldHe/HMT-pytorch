@@ -172,6 +172,10 @@ class T5Text2TextModel(TorchModel):
                          optimizer_parameters=optimizer_parameters,
                          **kwargs)
 
+        if self.lr_scheduler_name:
+            self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_name)(
+                self.optimizer, **self.lr_scheduler_parameters)
+
     def load(self, fname=None):
         if fname is not None:
             self.load_path = fname
@@ -227,6 +231,9 @@ class T5Text2TextModel(TorchModel):
             _input[elem] = torch.stack(_input[elem], dim=0).to(self.device)
         return _input
 
+    def _get_learning_rates(self):
+        return {f'lr/param_group_{j}': param_group['lr'] for j, param_group in enumerate(self.optimizer.param_groups)}
+
     def train_on_batch(self, features: List[InputFeatures], labels: List[InputFeatures]) -> Dict:
         input_x = self._build_input(features)
         input_y = self._build_input(labels)
@@ -259,7 +266,7 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        return {'loss': batch_loss}
+        return {**{'loss': batch_loss}, **self._get_learning_rates()}
 
     def __call__(self, features: List[InputFeatures]) -> List[str]:
         _input = self._build_input(features)
