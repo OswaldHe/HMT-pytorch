@@ -133,13 +133,14 @@ if __name__ == '__main__':
     model = model_cls(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
+    init_iteration = 0
     if args.init_checkpoint:
-        # todo: load iteration number?
         # todo: use iteration number to restore position in dataset?
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
         checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        init_iteration = checkpoint.get('iteration', 0)
         logger.info(f'Model was loaded from: {args.init_checkpoint}')
     model = model.cuda()
 
@@ -160,11 +161,12 @@ if __name__ == '__main__':
                                          )
 
     # train loop
+    i = init_iteration
     pbar = None
     if hvd.local_rank() == 0:
         pbar = tqdm(total=args.iters)
+        pbar.update(i)
 
-    i = 0
     losses = []
     while i <= args.iters:
         for batch in t5dataloader:
@@ -181,6 +183,7 @@ if __name__ == '__main__':
             for j in range(0, len(batch['inputs']), args.batch_size):
                 outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
                                 attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                # todo: use decoder_attention mask!
                                 labels=batch['targets'][j: j + args.batch_size])
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = outputs.loss / args.gradient_accumulation_steps
