@@ -34,7 +34,7 @@
         "pretrained_model": "{PRETRAINED_PATH}",
         "t5_configs_path": "/home/kuratov/t5-experiments/",        
         "check_commit": false,
-        "sub_batch_size": 16,
+        "sub_batch_size": 32,
         "max_generation_len": 10,
         "save_path": "{MODEL_PATH}/model",
         "load_path": "{MODEL_PATH}/model",
