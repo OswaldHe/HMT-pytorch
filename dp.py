@@ -40,25 +40,56 @@ tf.config.set_visible_devices([], 'GPU')
 class T5DatasetReader(DatasetReader):
 
     def read(self, data_path: str, name: Optional[str] = None, train: str = 'train', valid: Optional[str] = None,
-             test: Optional[str] = None, train_task: Optional[str] = None, **kwargs):
+             test: Optional[str] = None, train_task: Optional[str] = None, shuffle=False, **kwargs):
         split_mapping = {'train': train, 'valid': valid, 'test': test}
         # filter unused splits
         split_mapping = {el: split_mapping[el] for el in split_mapping if split_mapping[el]}
         t5task = t5.data.get_mixture_or_task(name)
         data = {}
+
+        def _get_dataset(task, split):
+            if 'copy_pretokenized' in t5task.get_dataset.__code__.co_varnames:
+                return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle, copy_pretokenized=True)
+            return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle)
+
         if train_task is not None:
             t5_train_task = t5.data.get_mixture_or_task(train_task)
-            data['train'] = t5_train_task.get_dataset(split=split_mapping['train'], sequence_length=None, shuffle=False)
+            data['train'] = _get_dataset(t5_train_task, split_mapping['train'])
             del split_mapping['train']
 
-        data = dict(**data, **{k: t5task.get_dataset(split=v, sequence_length=None, shuffle=False)
-                               for k, v in split_mapping.items()})
+        data = dict(**data, **{k: _get_dataset(t5task, v) for k, v in split_mapping.items()})
         return data
 
 
 class T5DatasetIterator(DataLearningIterator):
     def preprocess(self, data, *args, **kwargs):
         return [(x['inputs_pretokenized'].numpy().decode('utf8'), x['targets_pretokenized'].numpy().decode('utf8')) for x in data]
+
+
+class T5TFDatasetIterator(DataLearningIterator):
+
+    def __init__(self, data, **kwargs):
+        self.data = data
+
+    def _preprocess(self, x):
+        return x['inputs_pretokenized'].numpy().decode('utf8'), x['targets_pretokenized'].numpy().decode('utf8')
+
+    def gen_batches(self, batch_size: int, data_type: str = 'train', **kwargs):
+        i = 0
+        batch_x, batch_y = (), ()
+        # hm, islice is too slow for getting batches from tf.Dataset
+        for sample in self.data[data_type]:
+            x, y = self._preprocess(sample)
+            batch_x += (x,)
+            batch_y += (y,)
+            i += 1
+            if i == batch_size:
+                yield batch_x, batch_y
+                i = 0
+                batch_x, batch_y = (), ()
+
+    def get_instances(self, data_type: str = 'train'):
+        raise NotImplementedError
 
 
 class TorchTransformersPreprocessor(Component):
