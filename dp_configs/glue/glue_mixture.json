@@ -40,10 +40,14 @@
         "load_path": "{MODEL_PATH}/model",
         "optimizer": "AdamW",
         "optimizer_parameters": {
-          "lr": 2e-05
+          "lr": 2e-05,
+          "weight_decay": 1e-03
         },
-        "learning_rate_drop_patience": 5,
-        "learning_rate_drop_div": 2.0,
+        "lr_scheduler": "StepLR",
+        "lr_scheduler_parameters": {
+          "step_size": 100000,
+          "gamma": 0.5
+        },
         "in": ["x_features"],
         "in_y": ["y_features"],
         "out": ["y_pred"]
@@ -52,10 +56,11 @@
     "out": ["y_pred"]
   },
   "train": {
+    "max_batches": 250000,
     "batch_size": 32,
     "log_every_n_batches": 250,
     "log_on_k_batches": 50,
-    "save_every_n_batches": 500,
+    "save_every_n_batches": 5000,
     "metrics": [],
     "show_examples": false,
     "validate_first": false,
