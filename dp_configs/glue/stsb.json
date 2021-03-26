@@ -67,7 +67,7 @@
     "batch_size": 32,
     "metrics": [
       {
-        "name": "matthews_correlation",
+        "name": "pearson_correlation",
         "inputs": ["y_id", "y_pred_id"]
       },
       {
