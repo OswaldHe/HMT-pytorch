@@ -88,7 +88,7 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/glue/mnli_mm/bs_32",
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/mnli_m/bs_32",
       "TASK": "glue_mnli_matched_v002",
       "TRAIN_TASK": "glue_mnli_v002"
     },

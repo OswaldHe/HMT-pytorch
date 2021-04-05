@@ -67,11 +67,7 @@
     "batch_size": 32,
     "metrics": [
       {
-        "name": "pearson_correlation",
-        "inputs": ["y_id", "y_pred_id"]
-      },
-      {
-        "name": "spearman_correlation",
+        "name": "matthews_correlation",
         "inputs": ["y_id", "y_pred_id"]
       }
     ],
