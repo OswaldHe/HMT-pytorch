@@ -31,7 +31,14 @@ config: `./dp_configs/glue/glue_mixture.json`
 
 Use `save_every_n_batches` parameter to save the model, set `metrics: []` and `evaluation_targets: []`.
 
-Evaluation for mixtures is not implemented. To evaluate fine-tuned model on GLUE tasks each evaluation should be run seperately, e.g., modify `load_path` in base configs for GLUE tasks and run `evaluation` step.
+Evaluation for all checkpoints in `mixture_model` folder, saves best checkpoints and evaluation results:
+```bash
+export CUDA_VISIBLE_DEVICES=0; python evaluate_mixture_model.py \
+        --mixture_model ./runs/small_wiki_bs_128/glue/mixture/bs_128 \
+        --pretrained_checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task_configs_path ./dp_configs/glue \
+        --save_best
+```
 
 ### Prepare submission for GLUE Leaderboard:
 **TBD**
