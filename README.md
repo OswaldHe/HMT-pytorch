@@ -3,13 +3,36 @@
 ## Pre-training
 ### T5-small baseline
 ```bash
-export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraining.py --batch_size 32 --gradient_accumulation_steps 2 --save_interval 100000 --log_interval 500 --iters 1100000 --data_path ~/data/ThePile/Wikipedia/preprocessed_shards --model_path ./runs/small_wiki_bs_128 --input_seq_len 512 --target_seq_len 192 --lr 5e-05 --model_cfg ./t5configs/t5-small.json
+export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraining.py \
+        --batch_size 32 \
+        --gradient_accumulation_steps 2 \
+        --save_interval 100000 \
+        --log_interval 500 \
+        --iters 1100000 \
+        --data_path ~/data/ThePile/Wikipedia/preprocessed_shards \
+        --model_path ./runs/small_wiki_bs_128 \
+        --input_seq_len 512 \
+        --target_seq_len 192 \
+        --lr 5e-05 \
+        --model_cfg ./t5configs/t5-small.json
 ```
 
 ### T5-base with custom layers:
 and continue interrupted training
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3; horovodrun --gloo -np 4 python run_t5_pretraining.py --batch_size 8 --gradient_accumulation_steps 4 --save_interval 75000 --log_interval 500 --iters 1000000 --data_path ~/data/ThePile/Wikipedia/preprocessed_shards --model_path ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh --input_seq_len 512 --target_seq_len 192 --lr 5e-05 --model_cls modeling_t5:T5ForConditionalGeneration --model_cfg t5configs/t5-base-only-cdQ.json --init_checkpoint ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh/model_150000.pth
+export CUDA_VISIBLE_DEVICES=0,1,2,3; horovodrun --gloo -np 4 python run_t5_pretraining.py \
+        --batch_size 8 \
+        --gradient_accumulation_steps 4 \
+        --save_interval 75000 \
+        --log_interval 500 \
+        --iters 1000000 --data_path ~/data/ThePile/Wikipedia/preprocessed_shards \
+        --model_path ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh \
+        --input_seq_len 512 \
+        --target_seq_len 192 \
+        --lr 5e-05 \
+        --model_cls modeling_t5:T5ForConditionalGeneration \
+        --model_cfg t5configs/t5-base-only-cdQ.json \
+        --init_checkpoint ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh/model_150000.pth
 ```
 
 ## Fine-tuning with DeepPavlov
@@ -24,21 +47,39 @@ means that full batch of size `batch_size` will be splited on two sub-batches of
 ### Fine-tuning on GLUE
 Base configuration files are at `./dp_configs/glue`
 
-**TBD**: prepare script for fine-tuning on all GLUE tasks for pre-trained model
+Fine-tuning and evaluation could be done with command:
+```bash
+export CUDA_VISIBLE_DEVICES=6; python evaluate_model.py single \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/glue \
+        --suffix bs_32/run_0 \
+        --train-batch-size 32
+```
+`pretrained-checkpoint` is a path to pretrained checkpoint that would be trained and evaluated, `task-config` is a
+folder with DP configs (or single DP config), `suffix` would be appended to a model path. Check `evaluate_model.py` for
+more details.
 
 #### GLUE mixture from T5
 config: `./dp_configs/glue/glue_mixture.json`
 
 Use `save_every_n_batches` parameter to save the model, set `metrics: []` and `evaluation_targets: []`.
 
-Evaluation for all checkpoints in `mixture_model` folder, saves best checkpoints and evaluation results:
+Evaluation for all checkpoints in `checkpoint` folder, saves best checkpoints and evaluation results:
 ```bash
-export CUDA_VISIBLE_DEVICES=0; python evaluate_mixture_model.py \
-        --mixture_model ./runs/small_wiki_bs_128/glue/mixture/bs_128 \
-        --pretrained_checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
-        --task_configs_path ./dp_configs/glue \
-        --save_best
+export CUDA_VISIBLE_DEVICES=0; python evaluate_model.py mixture \
+        --checkpoint ./runs/small_wiki_bs_128/glue/mixture/bs_128/ \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/glue \
+        --save-best
 ```
+
+#### Collecting results
+To get the best scores for all fine-tuned models and tasks run:
+```bash
+python evaluate_model.py collect-metrics \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth --clean > report.txt
+```
+use `--clean` option to delete all models checkpoints except the best ones for each task.
 
 ### Prepare submission for GLUE Leaderboard:
 **TBD**
