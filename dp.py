@@ -35,6 +35,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 log = logging.getLogger(__name__)
 
 tf.config.set_visible_devices([], 'GPU')
+torch.set_num_threads(4)
 
 
 class T5DatasetReader(DatasetReader):
