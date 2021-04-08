@@ -1,0 +1,327 @@
+import json
+import logging
+import re
+import shutil
+from copy import copy
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+import typer
+from deeppavlov import evaluate_model, train_model
+from tqdm import tqdm
+
+from utils import expand_dp_path
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+pd.options.mode.chained_assignment = None
+
+app = typer.Typer()
+
+
+def evaluate_checkpoint(pretrained_checkpoint: str,
+                        task_config_path: str,
+                        eval_batch_size: int = 64,
+                        train: bool = False,
+                        suffix: str = '',
+                        finetuned_model_path: Optional[str] = None,
+                        train_batch_size: Optional[int] = None,
+                        train_subbatch_size: Optional[int] = None) -> dict:
+    """Evaluate checkpoint on  folder on tasks from `task_config_path`
+
+    Args:
+        pretrained_checkpoint (str): path to pretrained model
+        task_config_path (str): path to DP config with task (e.g., from GLUE) to evaluate on
+        eval_batch_size (int, optional): batch size for validation. Defaults to 64.
+        train (bool, optional): Set to True to train `pretrained_checkpoint` on task, set to False to evaluate
+            `finetuned_model_path`. Defaults to False.
+        suffix (str, optional): suffix to append to MODEL_PATH, e.g., `bs_32/run_0`. Defaults to ''.
+        finetuned_model_path (Optional[str], optional): Path to already finetuned model to evaluate. Defaults to None.
+        train_batch_size (Optional[int], optional): Train batch size. Defaults to None, uses value from task config.
+        train_subbatch_size (Optional[int], optional): Train subbatch size. Defaults to None, uses value from task
+            config.
+
+    Returns:
+        dict: evaluation results and meta-info
+    """
+    assert not (train ^ (finetuned_model_path is None)), f'train: {train}, finetuned_model_path: {finetuned_model_path}'
+    pretrained_checkpoint = Path(pretrained_checkpoint).resolve()
+    finetuned_model_path = Path(finetuned_model_path).resolve() if finetuned_model_path else None
+    task_config_path = Path(task_config_path).resolve()
+    task_name = task_config_path.stem
+    if task_config_path.parent.stem != 'dp_configs':
+        task_name = f'{task_config_path.parent.stem}/{task_name}'
+    config = json.load(task_config_path.open('r'))
+
+    config['train']['evaluation_targets'] = ['valid']
+    config['metadata']['variables']['PRETRAINED_PATH'] = str(pretrained_checkpoint.parent)
+    if train:
+        config['metadata']['variables']['MODEL_PATH'] = '{PRETRAINED_PATH}/' + task_name + '/' + suffix
+        config['chainer']['pipe'][2]['checkpoint'] = '{PRETRAINED_PATH}/' + str(pretrained_checkpoint.name)
+        if train_batch_size:
+            config['train']['batch_size'] = train_batch_size
+        if train_subbatch_size:
+            config['chainer']['pipe'][2]['sub_batch_size'] = train_subbatch_size
+        # save config
+        model_path = expand_dp_path(config['metadata']['variables']['MODEL_PATH'], config['metadata']['variables'])
+        model_path.mkdir(parents=True, exist_ok=True)
+        json.dump(config, (model_path / 'config.json').open('w'), indent=2)
+        _ = train_model(config)
+    else:
+        finetuned_model_config = json.load((finetuned_model_path.parent / 'config.json').open('r'))
+        config['chainer']['pipe'][2] = copy(finetuned_model_config['chainer']['pipe'][2])
+        config['metadata']['variables']['MODEL_PATH'] = finetuned_model_config['metadata']['variables']['MODEL_PATH']
+        config['chainer']['pipe'][2]['load_path'] = '{MODEL_PATH}/' + str(finetuned_model_path.name.split('.')[0])
+    config['train']['tensorboard_log_dir'] = None
+    config['train']['batch_size'] = eval_batch_size
+    config['chainer']['pipe'][2]['sub_batch_size'] = eval_batch_size
+
+    metrics = evaluate_model(config)
+    load_path = expand_dp_path(config['chainer']['pipe'][2]['load_path'], config['metadata']['variables'])
+
+    if not finetuned_model_path:
+        finetuned_model_path = load_path
+    return {'pretrained_model': pretrained_checkpoint.parent.name,
+            'pretrained_checkpoint': pretrained_checkpoint.name,
+            'finetuned_model': str(finetuned_model_path.relative_to(pretrained_checkpoint.parent).parent),
+            'finetuned_checkpoint': finetuned_model_path.name,
+            'task': task_name,
+            **{f'{split}_{m}': metrics[split][m] for split in metrics for m in metrics[split]}
+            }
+
+
+def evaluate_mixture_model(mixture_model: str,
+                           pretrained_checkpoint: str,
+                           task_configs_path: str,
+                           eval_batch_size: int = 64) -> pd.DataFrame:
+    """Evaluate every checkpoint in `mixture_model` folder on tasks from `task_configs_path`, except mixture task.
+
+    Args:
+        mixture_model (str): path to folder with mixture model checkpoints
+        pretrained_checkpoint (str): checkpoint file that was used as initialization for model trained on mixture task
+        task_configs_path (str): path to folder with DeepPavlov configuration files with tasks to evaluate on
+        eval_batch_size (int, optional): Batch size to use for evaluation. Defaults to 64.
+
+    Returns:
+        pd.DataFrame: evaluation results
+    """
+    mixture_model = Path(mixture_model).resolve()
+    pretrained_checkpoint = Path(pretrained_checkpoint).resolve()
+    task_configs_path = Path(task_configs_path).resolve()
+    task_configs = [task for task in task_configs_path.glob('*json') if 'mixture' not in task.name]
+
+    results = []
+    for checkpoint in tqdm(sorted(mixture_model.glob('*.pth.tar'), key=lambda x: x.stat().st_ctime)[::-1]):
+        for config_path in task_configs:
+            eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size,
+                                               finetuned_model_path=checkpoint)
+            eval_results['is_mixture'] = True
+            results += [eval_results]
+
+    return pd.DataFrame(results)
+
+
+@app.command()
+def mixture(checkpoint: Path = typer.Option(...),
+            task_config: Path = typer.Option(...),
+            pretrained_checkpoint: Path = typer.Option(...),
+            eval_batch_size: int = typer.Option(64),
+            save_best: bool = typer.Option(False),
+            ):
+    """eval finetuned mixture checkpoint on each task independently
+    """
+    checkpoints = [checkpoint]
+    checkpoints_dir = checkpoint.parent
+    if checkpoint.is_dir():
+        checkpoints = sorted(checkpoint.glob('*.pth.tar'), key=lambda x: x.stat().st_ctime)[::-1]
+        checkpoints_dir = checkpoint
+        logger.info(f'starting to evaluate {len(checkpoints)} checkpoints from {checkpoint} on tasks:')
+    else:
+        logger.info(f'starting to evaluate checkpoint {checkpoint} on tasks:')
+
+    task_configs = [task_config]
+    if task_config.is_dir():
+        task_configs = [task for task in task_config.glob('*json') if 'mixture' not in task.name]
+
+    for task in task_configs:
+        logger.info(f'\t{task.name}')
+
+    results = []
+    with tqdm(total=len(checkpoints) * len(task_configs), smoothing=0.0) as pbar:
+        for checkpoint in checkpoints:
+            for config_path in task_configs:
+                eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size,
+                                                   finetuned_model_path=checkpoint)
+                eval_results['is_mixture'] = True
+                results += [eval_results]
+                pbar.update()
+    # todo: write results line by line as soon as we get them?
+    results = pd.DataFrame(results)
+    results.to_csv(checkpoints_dir / 'metrics.csv')
+
+    if save_best:
+        (checkpoints_dir / 'best_ckpts').mkdir(exist_ok=True)
+        metrics = [c for c in results.columns if 'valid' in c]
+        best_checkpoints = []
+        with (checkpoints_dir / 'report.txt').open('w') as fout:
+            for task in results['task'].unique():
+                task_results = results[results['task'] == task]
+                best_run = task_results.sort_values(metrics, ascending=False).dropna(axis=1, how='all').iloc[0]
+                fout.write(f'{task}:\n')
+                for m in [k for k in best_run.keys() if 'valid' in k]:
+                    fout.write(f'\t{m}: {best_run[m]}\n')
+                best_checkpoints += [best_run["finetuned_checkpoint"]]
+                fout.write(f'\tbest_checkpoint: {best_run["finetuned_checkpoint"]}\n')
+        for ckpt in set(best_checkpoints):
+            shutil.copy(checkpoints_dir / ckpt, checkpoints_dir / 'best_ckpts' / ckpt)
+
+    logger.info('eval mixture - DONE')
+    return results
+
+
+@app.command()
+def single(task_config: Path = typer.Option(...),
+           pretrained_checkpoint: Path = typer.Option(...),
+           suffix: str = typer.Option(''),
+           eval_batch_size: int = typer.Option(64),
+           train_batch_size: Optional[int] = typer.Option(None),
+           train_subbatch_size: Optional[int] = typer.Option(None),
+           ):
+    """train&eval pretrained_checkpoint on each task independently
+    """
+    # todo: add running multiple trainings on several gpus
+    logger.info(f'starting to train/eval {pretrained_checkpoint} on tasks:')
+    task_configs = [task_config]
+    if task_config.is_dir():
+        task_configs = [task for task in task_config.glob('*json') if 'mixture' not in task.name]
+
+    for task in task_configs:
+        logger.info(f'\t{task.name}')
+
+    train_subbatch_size = train_batch_size if not train_subbatch_size else train_subbatch_size
+
+    results = []
+    for config_path in tqdm(task_configs, smoothing=0.0):
+        eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size, suffix=suffix,
+                                           train=True,
+                                           train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
+                                           )
+        eval_results['is_mixture'] = False
+        pd.DataFrame([eval_results]).to_csv(pretrained_checkpoint.parent /
+                                            eval_results['finetuned_model'] / 'metrics.csv')
+        results += [eval_results]
+
+    logger.info('train/eval single - DONE')
+    return pd.DataFrame(results)
+
+
+def get_name_and_run(s):
+    model_name = ''
+    run = 0
+    g1, g2, g3 = re.match(r'(.*)/run_(\d+)|(.*)', s).groups()
+    if g1:
+        model_name = g1
+        run = int(g2)
+    else:
+        model_name = g3
+    return model_name, run
+
+
+@app.command()
+def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
+                    clean: bool = typer.Option(False)):
+    """collect all metrics from all experiments for exact pretrained checkpoint
+    """
+    logger.info(f'collecting metrics for {pretrained_checkpoint}')
+    results = None
+    for m in pretrained_checkpoint.parent.rglob('metrics.csv'):
+        m = pd.read_csv(m, index_col=0)
+        # to be compatible with deprecated format of metrics.csv
+        m = m.rename({
+                    'mixture_model': 'finetuned_model',
+                    'mixture_checkpoint': 'finetuned_checkpoint'
+                    }, axis=1)
+        if results is None:
+            results = m
+        else:
+            results = results.append(m, ignore_index=True, sort=False)
+
+    # take results for only one pretrained_checkpoint
+    results = results[results['pretrained_checkpoint'] == pretrained_checkpoint.name]
+    # add fintuned model ckpt_path
+    results['ckpt_path'] = results['pretrained_model'] + '/' + results['finetuned_model']
+    results['ckpt_path'] += '/' + results['finetuned_checkpoint']
+    results['ckpt_path'] = results['ckpt_path'].apply(lambda x: x + '.pth.tar' if x.endswith('model') else x)
+    metrics = [c for c in results.columns if 'valid' in c]
+    best_models = []
+    for task in results['task'].unique():
+        task_results = results[(results['task'] == task)]
+        task_results['finetuned_model_name'] = task_results['finetuned_model'].apply(lambda x: get_name_and_run(x)[0])
+        task_results['finetuned_model_run'] = task_results['finetuned_model'].apply(lambda x: get_name_and_run(x)[1])
+        task_results = task_results.dropna(axis=1, how='all')
+        task_metrics = sorted(list(set(task_results.columns) & set(metrics)))
+        best_run = task_results.sort_values(task_metrics, ascending=False).iloc[0]
+
+        def _take_best_by_metrics(data):
+            return data.sort_values(task_metrics, ascending=False).iloc[0]
+
+        # take max for each run (in mixtures we take the best checkpoint)
+        task_results = task_results.groupby(['finetuned_model_name', 'finetuned_model_run'])[task_metrics].agg(
+            _take_best_by_metrics)
+        # take avg between runs
+        task_results = task_results.groupby(['finetuned_model_name']).agg(['mean', 'std'])
+        print(f'task: {task}')
+        print('models:')
+        for i in range(len(task_results)):
+            print(f'\t{task_results.iloc[i].name}')
+            for m in task_metrics:
+                print(f"\t\t{m}: {task_results.iloc[i][m]['mean']:.5f}+-{task_results.iloc[i][m]['std']:.5f}")
+        print('\nbest_run:')
+        print('\tfinetuned_model:', best_run['finetuned_model'])
+        print('\tfinetuned_checkpoint:', best_run['finetuned_checkpoint'])
+        best_models += [best_run['ckpt_path']]
+        for m in task_metrics:
+            print(f"\t{m}: {best_run[m]}")
+        print('-'*75)
+
+    if clean:
+        for dir in pretrained_checkpoint.parent.iterdir():
+            for p in dir.rglob('*.pth*'):
+                if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' in str(p):
+                    if not any(str(p).endswith(bm) for bm in best_models):
+                        logger.info(f'  DELETE   - {p}')
+                        p.unlink()
+                    else:
+                        logger.info(f'KEEP BEST  - {p}')
+                else:
+                    logger.info(f'   SKIP    - {p}')
+        logger.info('checkpoints cleaned, saved only the best')
+
+    logger.info('collecting metrics - DONE')
+
+
+if __name__ == '__main__':
+    """
+    examples:
+
+    training pretrained_checkpoint on each glue task independently and evaluating:
+    export CUDA_VISIBLE_DEVICES=6; python evaluate_model.py single \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/glue \
+        --suffix bs_32/run_0 \
+        --train-batch-size 32
+
+    evaluating checkpoint (trained on all tasks as mixture) on each glue task:
+    export CUDA_VISIBLE_DEVICES=0; python evaluate_model.py mixture \
+        --checkpoint ./runs/small_wiki_bs_128/glue/mixture/bs_128/ \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/glue \
+        --save-best
+
+    python evaluate_model.py collect-metrics \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth > report.txt
+    """
+    app()

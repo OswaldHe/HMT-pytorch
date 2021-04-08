@@ -24,6 +24,15 @@ def get_git_hash_commit() -> str:
     return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
 
 
+def expand_dp_path(path, variables):
+    """Expand paths from DeepPavlov configs, uses variables from config's metadata.
+    """
+    while '{' in path and '}' in path:
+        path = path.format(**variables)
+    path = Path(path).expanduser()
+    return path
+
+
 def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True):
     path = Path(path)
     cfg = json.load((path / 'config.json').open('r'))
