@@ -6,6 +6,7 @@ import t5
 from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be imported before any usage of tasks
 from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
+import transformers
 
 import tensorflow.compat.v1 as tf
 import torch
@@ -202,8 +203,15 @@ class T5Text2TextModel(TorchModel):
 
         self.model.to(self.device)
 
-        self.optimizer = getattr(torch.optim, self.optimizer_name)(
-            self.model.parameters(), **self.optimizer_parameters)
+        if hasattr(torch.optim, self.optimizer_name):
+            optimizer_cls = getattr(torch.optim, self.optimizer_name)
+        elif hasattr(transformers.optimization, self.optimizer_name):
+            optimizer_cls = getattr(transformers.optimization, self.optimizer_name)
+        else:
+            raise RuntimeError(f'Optimizer {self.optimizer_name} was not found')
+        log.info(f'Using optimizer {optimizer_cls}')
+        self.optimizer = optimizer_cls(self.model.parameters(), **self.optimizer_parameters)
+
         if self.lr_scheduler_name is not None:
             self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_name)(
                 self.optimizer, **self.lr_scheduler_parameters)
@@ -267,7 +275,9 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        return {**{'loss': batch_loss}, **self._get_learning_rates()}
+        learning_rates = {k: v for k, v in self._get_learning_rates().items() if v is not None}
+
+        return {**{'loss': batch_loss}, **learning_rates}
 
     def __call__(self, features: List[InputFeatures]) -> List[str]:
         _input = self._build_input(features)
