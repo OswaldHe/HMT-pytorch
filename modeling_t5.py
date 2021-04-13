@@ -746,10 +746,12 @@ class T5PreTrainedModel(PreTrainedModel):
 
 
 class T5Stack(T5PreTrainedModel):
-    def __init__(self, config, embed_tokens=None):
+    def __init__(self, config, embed_tokens=None, memory_tokens=None):
         super().__init__(config)
 
         self.embed_tokens = embed_tokens
+        self.memory_tokens = memory_tokens
+        self.num_memory_tokens = config.num_memory_tokens if hasattr(config, 'num_memory_tokens') else 0
         self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList(
@@ -811,6 +813,13 @@ class T5Stack(T5PreTrainedModel):
 
         batch_size, seq_length = input_shape
 
+        if self.memory_tokens is not None:
+            # used in encoder
+            seq_length += self.num_memory_tokens
+            inputs_embeds = torch.cat([self.memory_tokens.repeat(batch_size, 1, 1), inputs_embeds], dim=1)
+            if attention_mask is not None:
+                attention_mask = F.pad(attention_mask, (self.num_memory_tokens, 0), value=1)
+
         # required mask seq length can be calculated via length of past
         mask_seq_length = past_key_values[0][0].shape[2] + seq_length if past_key_values is not None else seq_length
 
@@ -826,6 +835,8 @@ class T5Stack(T5PreTrainedModel):
             encoder_attention_mask = torch.ones(
                 batch_size, encoder_seq_length, device=inputs_embeds.device, dtype=torch.long
             )
+        elif self.is_decoder and self.num_memory_tokens > 0 and encoder_attention_mask is not None:
+            encoder_attention_mask = F.pad(encoder_attention_mask, (self.num_memory_tokens, 0), value=1)
 
         # initialize past_key_values with `None` if past does not exist
         if past_key_values is None:
@@ -1161,11 +1172,15 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         self.model_dim = config.d_model
 
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
+        self.num_memory_tokens = config.num_memory_tokens if hasattr(config, 'num_memory_tokens') else 0
+        if self.num_memory_tokens > 0:
+            self.memory_tokens = nn.Parameter(
+                torch.randn(config.num_memory_tokens, config.d_model) * config.initializer_factor)
 
         encoder_config = copy.deepcopy(config)
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
+        self.encoder = T5Stack(encoder_config, self.shared, self.memory_tokens)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
