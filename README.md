@@ -14,7 +14,8 @@ export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraini
         --input_seq_len 512 \
         --target_seq_len 192 \
         --lr 5e-05 \
-        --model_cfg ./t5configs/t5-small.json
+        --model_cfg ./t5configs/t5-small.json \
+        --model_cls modeling_t5:T5ForConditionalGeneration
 ```
 
 ### T5-base with custom layers:
