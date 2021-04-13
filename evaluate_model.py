@@ -10,6 +10,7 @@ import pandas as pd
 import typer
 from deeppavlov import evaluate_model, train_model
 from tqdm import tqdm
+from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST
 
 from utils import expand_dp_path
 
@@ -48,7 +49,11 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
         dict: evaluation results and meta-info
     """
     assert not (train ^ (finetuned_model_path is None)), f'train: {train}, finetuned_model_path: {finetuned_model_path}'
-    pretrained_checkpoint = Path(pretrained_checkpoint).resolve()
+    hf_model = False
+    if str(pretrained_checkpoint) not in T5_PRETRAINED_MODEL_ARCHIVE_LIST:
+        pretrained_checkpoint = Path(pretrained_checkpoint).resolve()
+    else:
+        hf_model = True
     finetuned_model_path = Path(finetuned_model_path).resolve() if finetuned_model_path else None
     task_config_path = Path(task_config_path).resolve()
     task_name = task_config_path.stem
@@ -57,10 +62,16 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
     config = json.load(task_config_path.open('r'))
 
     config['train']['evaluation_targets'] = ['valid']
-    config['metadata']['variables']['PRETRAINED_PATH'] = str(pretrained_checkpoint.parent)
+    if hf_model:
+        # todo: make more general, without hardcoded ./runs path
+        config['metadata']['variables']['PRETRAINED_PATH'] = str(Path('./runs').resolve() / pretrained_checkpoint)
+        config['chainer']['pipe'][2]['pretrained_model'] = str(pretrained_checkpoint)
+    else:
+        config['metadata']['variables']['PRETRAINED_PATH'] = str(pretrained_checkpoint.parent)
     if train:
         config['metadata']['variables']['MODEL_PATH'] = '{PRETRAINED_PATH}/' + task_name + '/' + suffix
-        config['chainer']['pipe'][2]['checkpoint'] = '{PRETRAINED_PATH}/' + str(pretrained_checkpoint.name)
+        if not hf_model:
+            config['chainer']['pipe'][2]['checkpoint'] = '{PRETRAINED_PATH}/' + str(pretrained_checkpoint.name)
         if train_batch_size:
             config['train']['batch_size'] = train_batch_size
         if train_subbatch_size:
@@ -84,9 +95,14 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
 
     if not finetuned_model_path:
         finetuned_model_path = load_path
-    return {'pretrained_model': pretrained_checkpoint.parent.name,
+    if hf_model:
+        # todo: ./runs hardcoded again
+        finetuned_model = str(finetuned_model_path.relative_to(('./runs' / pretrained_checkpoint).resolve()).parent)
+    else:
+        finetuned_model = str(finetuned_model_path.relative_to(pretrained_checkpoint.parent).parent)
+    return {'pretrained_model': pretrained_checkpoint.parent.name if not hf_model else pretrained_checkpoint.name,
             'pretrained_checkpoint': pretrained_checkpoint.name,
-            'finetuned_model': str(finetuned_model_path.relative_to(pretrained_checkpoint.parent).parent),
+            'finetuned_model': finetuned_model,
             'finetuned_checkpoint': finetuned_model_path.name,
             'task': task_name,
             **{f'{split}_{m}': metrics[split][m] for split in metrics for m in metrics[split]}
@@ -210,8 +226,12 @@ def single(task_config: Path = typer.Option(...),
                                            train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
                                            )
         eval_results['is_mixture'] = False
-        pd.DataFrame([eval_results]).to_csv(pretrained_checkpoint.parent /
-                                            eval_results['finetuned_model'] / 'metrics.csv')
+        if not str(pretrained_checkpoint) in T5_PRETRAINED_MODEL_ARCHIVE_LIST:
+            pd.DataFrame([eval_results]).to_csv(pretrained_checkpoint.parent /
+                                                eval_results['finetuned_model'] / 'metrics.csv')
+        else:
+            pd.DataFrame([eval_results]).to_csv('./runs' / pretrained_checkpoint /
+                                                eval_results['finetuned_model'] / 'metrics.csv')
         results += [eval_results]
 
     logger.info('train/eval single - DONE')
@@ -237,9 +257,14 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
     """
     logger.info(f'collecting metrics for {pretrained_checkpoint}')
     results = None
-    for m in pretrained_checkpoint.parent.rglob('metrics.csv'):
+    if pretrained_checkpoint.is_dir():
+        # e.g., ./runs/t5-small
+        metrics_files = pretrained_checkpoint.rglob('metrics.csv')
+    else:
+        metrics_files = pretrained_checkpoint.parent.rglob('metrics.csv')
+    for m in metrics_files:
         m = pd.read_csv(m, index_col=0)
-        # to be compatible with deprecated format of metrics.csv
+        # rename to be compatible with deprecated format of metrics.csv
         m = m.rename({
                     'mixture_model': 'finetuned_model',
                     'mixture_checkpoint': 'finetuned_checkpoint'
@@ -290,7 +315,7 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
     if clean:
         for dir in pretrained_checkpoint.parent.iterdir():
             for p in dir.rglob('*.pth*'):
-                if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' in str(p):
+                if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' not in str(p):
                     if not any(str(p).endswith(bm) for bm in best_models):
                         logger.info(f'  DELETE   - {p}')
                         p.unlink()
