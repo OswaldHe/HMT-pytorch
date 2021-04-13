@@ -313,7 +313,8 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
         print('-'*75)
 
     if clean:
-        for dir in pretrained_checkpoint.parent.iterdir():
+        to_clean_dir = pretrained_checkpoint if pretrained_checkpoint.is_dir() else pretrained_checkpoint.parent
+        for dir in to_clean_dir.iterdir():
             for p in dir.rglob('*.pth*'):
                 if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' not in str(p):
                     if not any(str(p).endswith(bm) for bm in best_models):
