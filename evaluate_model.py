@@ -252,7 +252,9 @@ def get_name_and_run(s):
 
 @app.command()
 def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
-                    clean: bool = typer.Option(False)):
+                    clean: bool = typer.Option(False),
+                    force: bool = typer.Option(False),
+                    ):
     """collect all metrics from all experiments for exact pretrained checkpoint
     """
     logger.info(f'collecting metrics for {pretrained_checkpoint}')
@@ -300,6 +302,7 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
         task_results = task_results.groupby(['finetuned_model_name']).agg(['mean', 'std'])
         print(f'task: {task}')
         print('models:')
+        task_results = task_results.sort_values([(m, 'mean') for m in task_metrics], ascending=False)
         for i in range(len(task_results)):
             print(f'\t{task_results.iloc[i].name}')
             for m in task_metrics:
@@ -319,7 +322,11 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
                 if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' not in str(p):
                     if not any(str(p).endswith(bm) for bm in best_models):
                         logger.info(f'  DELETE   - {p}')
-                        p.unlink()
+                        delete = False if not force else True
+                        if not force:
+                            delete = typer.confirm("Do you really want to delete?")
+                        if delete:
+                            p.unlink()
                     else:
                         logger.info(f'KEEP BEST  - {p}')
                 else:
