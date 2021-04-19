@@ -6,6 +6,7 @@ import t5
 from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be imported before any usage of tasks
 from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
+from t5.evaluation.metrics import bleu as t5_bleu
 import transformers
 
 import tensorflow.compat.v1 as tf
@@ -42,7 +43,7 @@ torch.set_num_threads(4)
 class T5DatasetReader(DatasetReader):
 
     def read(self, data_path: str, name: Optional[str] = None, train: str = 'train', valid: Optional[str] = None,
-             test: Optional[str] = None, train_task: Optional[str] = None, shuffle=False, **kwargs):
+             test: Optional[str] = None, train_task: Optional[str] = None, shuffle=False, seed=None, **kwargs):
         split_mapping = {'train': train, 'valid': valid, 'test': test}
         # filter unused splits
         split_mapping = {el: split_mapping[el] for el in split_mapping if split_mapping[el]}
@@ -51,8 +52,9 @@ class T5DatasetReader(DatasetReader):
 
         def _get_dataset(task, split):
             if 'copy_pretokenized' in t5task.get_dataset.__code__.co_varnames:
-                return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle, copy_pretokenized=True)
-            return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle)
+                return task.get_dataset(split=split, sequence_length=None, copy_pretokenized=True,
+                                        shuffle=shuffle, seed=seed)
+            return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle, seed=seed)
 
         if train_task is not None:
             t5_train_task = t5.data.get_mixture_or_task(train_task)
@@ -160,6 +162,8 @@ class T5Text2TextModel(TorchModel):
                  clip_norm: Optional[float] = None,
                  check_commit: bool = True,
                  max_generation_len: int = 128,
+                 beam_size: int = 0,
+                 length_penalty: float = 0.4,
                  sub_batch_size: Optional[int] = None,
                  **kwargs):
         self.pretrained_model = pretrained_model
@@ -167,6 +171,8 @@ class T5Text2TextModel(TorchModel):
         self.checkpoint = checkpoint
         self.check_commit = check_commit
         self.max_generation_len = max_generation_len
+        self.beam_size = beam_size
+        self.length_penalty = length_penalty
         self.clip_norm = clip_norm
         self.sub_batch_size = sub_batch_size
         # super().__init__ calls self.load()
@@ -291,7 +297,11 @@ class T5Text2TextModel(TorchModel):
         with torch.no_grad():
             for i in range(0, batch_size, sub_batch_size):
                 batch_input = {k: _input[k][i: i + sub_batch_size] for k in _input}
-                p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
+                if self.beam_size == 0:
+                    p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
+                else:
+                    p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len,
+                                                         num_beams=self.beam_size, length_penalty=self.length_penalty)
                 p_batch_tokens = p_batch_tokens.cpu().numpy().tolist()
                 predicted_tokens += p_batch_tokens
 
@@ -317,3 +327,8 @@ class T5Text2TextPostprocessor(Component):
 def f1_score_with_invalid(y_true, y_predicted) -> float:
     # used by qqp, mrpc
     return t5_f1_score_with_invalid(y_true, y_predicted)['f1'] / 100.0
+
+
+@register_metric('t5_bleu')
+def bleu(y_true, y_predicted) -> float:
+    return t5_bleu(y_true, y_predicted)['bleu']
