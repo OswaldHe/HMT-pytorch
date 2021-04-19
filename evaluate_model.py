@@ -319,8 +319,8 @@ def collect_metrics(pretrained_checkpoint: Path = typer.Option(...),
         to_clean_dir = pretrained_checkpoint if pretrained_checkpoint.is_dir() else pretrained_checkpoint.parent
         for dir in to_clean_dir.iterdir():
             for p in dir.rglob('*.pth*'):
-                if any(str(p).endswith(bm) for bm in results['ckpt_path']) or 'best_ckpts' not in str(p):
-                    if not any(str(p).endswith(bm) for bm in best_models):
+                if any(str(p).endswith(bm) for bm in results['ckpt_path']):
+                    if not any(str(p).endswith(bm) for bm in best_models) and 'best_ckpts' not in str(p):
                         logger.info(f'  DELETE   - {p}')
                         delete = False if not force else True
                         if not force:
