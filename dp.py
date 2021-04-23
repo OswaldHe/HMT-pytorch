@@ -50,18 +50,19 @@ class T5DatasetReader(DatasetReader):
         t5task = t5.data.get_mixture_or_task(name)
         data = {}
 
-        def _get_dataset(task, split):
+        def _get_dataset(task, split, tfds_split):
+            shuffle_split = shuffle if split == 'train' else False
             if 'copy_pretokenized' in t5task.get_dataset.__code__.co_varnames:
-                return task.get_dataset(split=split, sequence_length=None, copy_pretokenized=True,
-                                        shuffle=shuffle, seed=seed)
-            return task.get_dataset(split=split, sequence_length=None, shuffle=shuffle, seed=seed)
+                return task.get_dataset(split=tfds_split, sequence_length=None, copy_pretokenized=True,
+                                        shuffle=shuffle_split, seed=seed)
+            return task.get_dataset(split=tfds_split, sequence_length=None, shuffle=shuffle_split, seed=seed)
 
         if train_task is not None:
             t5_train_task = t5.data.get_mixture_or_task(train_task)
-            data['train'] = _get_dataset(t5_train_task, split_mapping['train'])
+            data['train'] = _get_dataset(t5_train_task, 'train', split_mapping['train'])
             del split_mapping['train']
 
-        data = dict(**data, **{k: _get_dataset(t5task, v) for k, v in split_mapping.items()})
+        data = dict(**data, **{k: _get_dataset(t5task, k, v) for k, v in split_mapping.items()})
         return data
 
 
