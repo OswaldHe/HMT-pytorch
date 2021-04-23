@@ -1176,6 +1176,8 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         if self.num_memory_tokens > 0:
             self.memory_tokens = nn.Parameter(
                 torch.randn(config.num_memory_tokens, config.d_model) * config.initializer_factor)
+        else:
+            self.memory_tokens = None
 
         encoder_config = copy.deepcopy(config)
         encoder_config.use_cache = False
