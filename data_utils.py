@@ -29,17 +29,30 @@ def jsonl_preprocessor(ds):
     return ds.map(lambda text: {'targets': tfio.experimental.serialization.decode_json(text, specs)['text']})
 
 
+DEFAULT_SPM_PATH = "./vocabs/sentencepiece.model"
+DEFAULT_EXTRA_IDS = 100
+
+
+def get_vocabulary(vocab_path=DEFAULT_SPM_PATH):
+    return t5.seqio.SentencePieceVocabulary(vocab_path, DEFAULT_EXTRA_IDS)
+
+
+def get_output_features(vocab_path=DEFAULT_SPM_PATH):
+    return {
+            "inputs": t5.seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True, required=False),
+            "targets": t5.seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True)
+           }
+
+
 DEFAULT_OUTPUT_FEATURES = {
-    "inputs": t5.seqio.Feature(
-        vocabulary=t5.data.get_default_vocabulary(), add_eos=True,
-        required=False),
-    "targets": t5.seqio.Feature(
-        vocabulary=t5.data.get_default_vocabulary(), add_eos=True)
-}
+        "inputs": t5.seqio.Feature(vocabulary=get_vocabulary(), add_eos=True, required=False),
+        "targets": t5.seqio.Feature(vocabulary=get_vocabulary(), add_eos=True)
+    }
 
 
 class T5PretrainingDataset(IterableDataset):
-    def __init__(self, shards, batch_size, text_preprocessor=text_preprocessor, inputs_len=32, targets_len=32):
+    def __init__(self, shards, batch_size, text_preprocessor=text_preprocessor, inputs_len=32, targets_len=32,
+                 vocab_path=DEFAULT_SPM_PATH):
         self.sequence_length = {"inputs": inputs_len, "targets": targets_len}
         self.shards = shards
         self.batch_size = batch_size
@@ -50,13 +63,13 @@ class T5PretrainingDataset(IterableDataset):
                                                                                             shuffle_files),
                                  text_preprocessor=[self.text_preprocessor],
                                  token_preprocessor=t5.data.preprocessors.span_corruption,
-                                 output_features=list(DEFAULT_OUTPUT_FEATURES.keys()),
+                                 output_features=get_output_features(vocab_path),
                                  metric_fns=[])
         self.tfdataset = self.task.get_dataset(split='', sequence_length=self.sequence_length)
         self.tfdataset = tokens_to_batches(self.tfdataset,
                                            sequence_length=self.sequence_length,
                                            batch_size=self.batch_size,
-                                           output_features=list(DEFAULT_OUTPUT_FEATURES.keys()))
+                                           output_features=get_output_features(vocab_path))
 
     def __iter__(self):
         # todo: make dataset infinite?
@@ -66,13 +79,13 @@ class T5PretrainingDataset(IterableDataset):
             yield {k: torch.from_numpy(x[k]).type(torch.long) for k in x}
 
 
-def assert_vocabs(tokenizer):
+def assert_vocabs(tokenizer, vocab_path=DEFAULT_SPM_PATH):
     """Asserts that default vocabulary from t5 repo is the same as HFTransformers tokenizer
 
     Args:
         tokenizer: HuggingFace Transformers tokenizer to check
     """
-    vocab = t5.data.get_default_vocabulary()
+    vocab = get_vocabulary(vocab_path=vocab_path)
     assert vocab.vocab_size == tokenizer.vocab_size
     assert vocab.unk_id == tokenizer.unk_token_id
     assert vocab.eos_id == tokenizer.eos_token_id
