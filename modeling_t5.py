@@ -370,6 +370,7 @@ class T5Attention(nn.Module):
         query_length=None,
         use_cache=False,
         output_attentions=False,
+        output_normalized_attentions=False
     ):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
@@ -471,6 +472,8 @@ class T5Attention(nn.Module):
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
         if output_attentions:
+            if output_normalized_attentions:
+                attn_weights = attn_weights * torch.linalg.norm(value_states, dim=-1).unsqueeze(2)
             outputs = outputs + (attn_weights,)
         return outputs
 
@@ -497,6 +500,7 @@ class T5LayerSelfAttention(nn.Module):
         past_key_value=None,
         use_cache=False,
         output_attentions=False,
+        output_normalized_attentions=False,
     ):
         normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.SelfAttention(
@@ -507,6 +511,7 @@ class T5LayerSelfAttention(nn.Module):
             past_key_value=past_key_value,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_normalized_attentions=output_normalized_attentions
         )
         hidden_states = hidden_states + self.dropout(attention_output[0])
         outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
@@ -535,6 +540,7 @@ class T5LayerCrossAttention(nn.Module):
         use_cache=False,
         query_length=None,
         output_attentions=False,
+        output_normalized_attentions=False
     ):
         normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.EncDecAttention(
@@ -547,6 +553,7 @@ class T5LayerCrossAttention(nn.Module):
             use_cache=use_cache,
             query_length=query_length,
             output_attentions=output_attentions,
+            output_normalized_attentions=output_normalized_attentions
         )
         layer_output = hidden_states + self.dropout(attention_output[0])
         outputs = (layer_output,) + attention_output[1:]  # add attentions if we output them
@@ -576,6 +583,7 @@ class T5Block(nn.Module):
         past_key_value=None,
         use_cache=False,
         output_attentions=False,
+        output_normalized_attentions=False,
         return_dict=True,
     ):
 
@@ -603,6 +611,7 @@ class T5Block(nn.Module):
             past_key_value=self_attn_past_key_value,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_normalized_attentions=output_normalized_attentions
         )
         hidden_states, present_key_value_state = self_attention_outputs[:2]
         attention_outputs = self_attention_outputs[2:]  # Keep self-attention outputs and relative position weights
@@ -626,6 +635,7 @@ class T5Block(nn.Module):
                 query_length=query_length,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
+                output_normalized_attentions=output_normalized_attentions,
             )
             hidden_states = cross_attention_outputs[0]
             # Combine self attn and cross attn key value states
@@ -782,6 +792,7 @@ class T5Stack(T5PreTrainedModel):
         past_key_values=None,
         use_cache=None,
         output_attentions=None,
+        output_normalized_attentions=False,
         output_hidden_states=None,
         return_dict=None,
     ):
@@ -876,6 +887,7 @@ class T5Stack(T5PreTrainedModel):
                 past_key_value=past_key_value,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
+                output_normalized_attentions=output_normalized_attentions,
             )
             # layer_outputs is a tuple with:
             # hidden-states, key-value-states, (self-attention weights), (self-attention position bias), (cross-attention weights), (cross-attention position bias)
@@ -1227,6 +1239,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         labels=None,
         use_cache=None,
         output_attentions=None,
+        output_normalized_attentions=False,
         output_hidden_states=None,
         return_dict=None,
     ):
@@ -1266,6 +1279,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 head_mask=head_mask,
                 output_attentions=output_attentions,
+                output_normalized_attentions=output_normalized_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
@@ -1305,6 +1319,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_normalized_attentions=output_normalized_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -1515,6 +1530,7 @@ class T5CDQAttention(nn.Module):
         query_length=None,
         use_cache=False,
         output_attentions=False,
+        output_normalized_attentions=False,
     ):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
@@ -1657,5 +1673,10 @@ class T5CDQAttention(nn.Module):
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
         if output_attentions:
+            if output_normalized_attentions:
+                v_norms = torch.linalg.norm(value_states, dim=-1).unsqueeze(2)
+                attn_weights = attn_weights * v_norms
+                cd_attn_weights = cd_attn_weights * v_norms
+                # todo: T_attnt_weights normalize by values too?
             outputs = outputs + ((attn_weights, cd_attn_weights, T_attn_weights), )
         return outputs
