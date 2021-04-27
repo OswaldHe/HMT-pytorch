@@ -37,6 +37,8 @@ parser.add_argument('--data_path', type=str, help='path with the sharded data in
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
+parser.add_argument('--working_dir', type=str, default='.',
+                    help='working dir, should be a dir with t5-experiments repo (default: .)')
 
 # model args
 parser.add_argument('--base_model', type=str, default='t5-base',
@@ -74,6 +76,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     hvd.init()
     torch.cuda.set_device(hvd.local_rank())
+    # set current working dir
+    # todo: maybe take path to run_t5_pretraining.py?
+    args.working_dir = str(Path(args.working_dir).expanduser().absolute())
+    os.chdir(args.working_dir)
     if hvd.local_rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
 
