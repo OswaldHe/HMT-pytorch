@@ -48,6 +48,8 @@ parser.add_argument('--model_cls', type=str, default='transformers:T5ForConditio
 parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
+parser.add_argument('--vocab', type=str, default='./vocabs/sentencepiece.model',
+                    help='path to vocabulary file with sentencepiece model (default: ./vocabs/sentencepiece.model)')
 
 # training args
 parser.add_argument('--lr', type=float, default=5e-05, help='learning rate (default: 5e-05)')
@@ -111,7 +113,8 @@ if __name__ == '__main__':
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
 
     t5dataset = T5PretrainingDataset(shards, batch_size=per_worker_batch_size, text_preprocessor=jsonl_preprocessor,
-                                     inputs_len=args.input_seq_len, targets_len=args.target_seq_len)
+                                     inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
+                                     vocab_path=args.vocab)
     # fails to work if num_workes > 0 cause we are using tf.datasets
     t5dataloader = DataLoader(t5dataset, num_workers=0, batch_size=None, **kwargs)
 
@@ -125,7 +128,7 @@ if __name__ == '__main__':
     # define tokenizer
     t5tokenizer = T5Tokenizer.from_pretrained(args.base_model)
     if hvd.local_rank() == 0:
-        assert_vocabs(t5tokenizer)
+        assert_vocabs(t5tokenizer, args.vocab)
 
     model_cls = get_cls_by_name(args.model_cls)  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
     if hvd.local_rank() == 0:
