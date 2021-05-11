@@ -1,6 +1,7 @@
 from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
 
+from overrides import overrides
 
 import t5
 from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be imported before any usage of tasks
@@ -11,6 +12,7 @@ import transformers
 
 import tensorflow.compat.v1 as tf
 import torch
+import horovod.torch as hvd
 
 from transformers.data.processors.utils import InputFeatures
 from transformers import AutoTokenizer
@@ -38,6 +40,8 @@ log = logging.getLogger(__name__)
 
 tf.config.set_visible_devices([], 'GPU')
 torch.set_num_threads(4)
+hvd.init()
+torch.cuda.set_device(hvd.local_rank())
 
 
 class T5DatasetReader(DatasetReader):
@@ -52,10 +56,17 @@ class T5DatasetReader(DatasetReader):
 
         def _get_dataset(task, split, tfds_split):
             shuffle_split = shuffle if split == 'train' else False
+            shard_info = None
+            if hvd.size() > 1:
+                # do we really need sharding if train set is shuffled? - only if we care about real epochs
+                # not all samples might be used in case of multi-gpu validation (max batch_size samples might get lost)
+                log.info(f'Using sharded {split} set with hvd.rank: {hvd.rank()} and hvd.size: {hvd.size()}')
+                shard_info = t5.seqio.ShardInfo(index=hvd.rank(), num_shards=hvd.size())
             if 'copy_pretokenized' in t5task.get_dataset.__code__.co_varnames:
                 return task.get_dataset(split=tfds_split, sequence_length=None, copy_pretokenized=True,
-                                        shuffle=shuffle_split, seed=seed)
-            return task.get_dataset(split=tfds_split, sequence_length=None, shuffle=shuffle_split, seed=seed)
+                                        shuffle=shuffle_split, seed=seed, shard_info=shard_info)
+            return task.get_dataset(split=tfds_split, sequence_length=None, shuffle=shuffle_split, seed=seed,
+                                    shard_info=shard_info)
 
         if train_task is not None:
             t5_train_task = t5.data.get_mixture_or_task(train_task)
@@ -92,6 +103,10 @@ class T5TFDatasetIterator(DataLearningIterator):
                 yield batch_x, batch_y
                 i = 0
                 batch_x, batch_y = (), ()
+
+        # yield remainders
+        if len(batch_x) != 0:
+            yield batch_x, batch_y
 
     def get_instances(self, data_type: str = 'train'):
         raise NotImplementedError
@@ -176,6 +191,7 @@ class T5Text2TextModel(TorchModel):
         self.length_penalty = length_penalty
         self.clip_norm = clip_norm
         self.sub_batch_size = sub_batch_size
+
         # super().__init__ calls self.load()
         super().__init__(optimizer=optimizer,
                          optimizer_parameters=optimizer_parameters,
@@ -184,6 +200,15 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler_name:
             self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_name)(
                 self.optimizer, **self.lr_scheduler_parameters)
+
+        if hvd.size() > 1:
+            # todo: mb remove if hvd.size() > 1 conds
+            log.info('hvd: broadcasting parameters')
+            hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
+            log.info('hvd: broadcasting optimizer parameters')
+            hvd.broadcast_optimizer_state(self.optimizer, root_rank=0)
+            if self.sub_batch_size is not None:
+                raise RuntimeError('hvd and self.sub_batch_size != None are not supported')
 
     def load(self, fname=None):
         if fname is not None:
@@ -239,6 +264,16 @@ class T5Text2TextModel(TorchModel):
                 self.epochs_done = checkpoint.get("epochs_done", 0)
             else:
                 log.info(f"Initilized with specified pretrained_model. Load path {weights_path} does not exist.")
+
+        if hvd.size() > 1:
+            # all workers load model parameters and optimizer state from disk, no broadcasting needed
+            log.info('hvd: creating DistributedOptimizer in load')
+            self.optimizer = hvd.DistributedOptimizer(self.optimizer,
+                                                      named_parameters=self.model.named_parameters(),
+                                                      op=hvd.Average,
+                                                      gradient_predivide_factor=1.0,
+                                                      backward_passes_per_step=1
+                                                      )
 
     def _build_input(self, features: List[InputFeatures]):
         _input = {}
@@ -314,6 +349,31 @@ class T5Text2TextModel(TorchModel):
                        for tokens in predicted_tokens]
 
         return predictions
+
+    @overrides
+    def process_event(self, event_name: str, data: dict) -> None:
+        """Process event. After epoch, increase `self.epochs_done`. After validation, decrease learning rate in
+            `self.learning_rate_drop_div` times (not lower than `self.min_learning_rate`)
+            if given `self.learning_rate_drop_patience`.
+
+        Args:
+            event_name: whether event is send after epoch or batch.
+                    Set of values: ``"after_epoch", "after_batch"``
+            data: event data (dictionary)
+        Returns:
+            None
+        """
+        if event_name == "after_epoch":
+            self.epochs_done += 1
+
+        if event_name == "after_validation" and 'impatience' in data and self.learning_rate_drop_patience:
+            if data['impatience'] == self.learning_rate_drop_patience:
+                log.info(f"----------Current LR is decreased in {self.learning_rate_drop_div} times----------")
+                if self.load_before_drop:
+                    self.load(self.save_path)
+                    self.model.eval()
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = max(param_group['lr'] / self.learning_rate_drop_div, self.min_learning_rate)
 
 
 class T5Text2TextPostprocessor(Component):
