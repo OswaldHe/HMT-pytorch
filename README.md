@@ -95,5 +95,5 @@ WMT configs could be found in `./dp_configs/wmt`
 
 Training with Horovod+DeepPavlov:
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/wmt/ende_hvd.json
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/ende_hvd.json
 ```
