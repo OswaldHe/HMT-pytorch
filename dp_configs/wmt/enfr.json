@@ -33,7 +33,7 @@
       {
         "class_name": "dp:T5Text2TextModel",
         "pretrained_model": "{PRETRAINED_PATH}",
-        "t5_configs_path": "/home/kuratov/t5-experiments/",
+        "t5_configs_path": ".",
         "check_commit": false,
         "sub_batch_size": 64,
         "max_generation_len": 128,
