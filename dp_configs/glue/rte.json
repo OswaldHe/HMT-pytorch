@@ -32,7 +32,7 @@
       {
         "class_name": "dp:T5Text2TextModel",
         "pretrained_model": "{PRETRAINED_PATH}",
-        "t5_configs_path": "/home/kuratov/t5-experiments/",
+        "t5_configs_path": ".",
         "check_commit": false,
         "max_generation_len": 10,
         "save_path": "{MODEL_PATH}/model",

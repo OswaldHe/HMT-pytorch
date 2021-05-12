@@ -32,7 +32,7 @@
       {
         "class_name": "dp:T5Text2TextModel",
         "pretrained_model": "{PRETRAINED_PATH}",
-        "t5_configs_path": "/home/kuratov/t5-experiments/",        
+        "t5_configs_path": ".",
         "check_commit": false,
         "sub_batch_size": 32,
         "max_generation_len": 10,
@@ -40,7 +40,7 @@
         "load_path": "{MODEL_PATH}/model",
         "optimizer": "AdamW",
         "optimizer_parameters": {
-          "lr": 2e-05,
+          "lr": 5e-05,
           "weight_decay": 1e-03
         },
         "lr_scheduler": "StepLR",
@@ -57,7 +57,7 @@
   },
   "train": {
     "max_batches": 250000,
-    "batch_size": 32,
+    "batch_size": 128,
     "log_every_n_batches": 250,
     "log_on_k_batches": 50,
     "save_every_n_batches": 5000,
@@ -74,8 +74,8 @@
     "variables": {
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
-      "PRETRAINED_PATH": "./runs/base_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/glue/mixture/bs_32",
+      "PRETRAINED_PATH": "./runs/small_wiki_bs_128_/",
+      "MODEL_PATH": "{PRETRAINED_PATH}/glue/mixture/bs_128",
       "TASK": "glue_v002_proportional"
     },
     "requirements": [
