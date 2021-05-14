@@ -33,7 +33,7 @@
       {
         "class_name": "dp:T5Text2TextModel",
         "pretrained_model": "{PRETRAINED_PATH}",
-        "t5_configs_path": "./t5configs",
+        "t5_configs_path": ".",
         "check_commit": false,
         "max_generation_len": 128,
         "beam_size": 4,
@@ -78,7 +78,7 @@
     ],
     "validation_patience": 75,
     "val_every_n_batches": 1000,
-    "log_every_n_batches": 100,
+    "log_every_n_batches": 1000,
     "show_examples": false,
     "validate_first": false,
     "evaluation_targets": ["valid", "test"],

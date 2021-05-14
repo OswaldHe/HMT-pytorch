@@ -97,3 +97,12 @@ Training with Horovod+DeepPavlov:
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/ende_hvd.json
 ```
+
+Multi-gpu training and evaluating with `evaluate_model.py` (recommended):
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8; python evaluate_model.py single \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/wmt/ende.json \
+        --suffix bs_128_hvd/run_0 \
+        --train-batch-size 16
+```

@@ -75,7 +75,7 @@
     ],
     "validation_patience": 50,
     "val_every_n_batches": 1000,
-    "log_every_n_batches": 10,
+    "log_every_n_batches": 1000,
     "show_examples": false,
     "validate_first": false,
     "evaluation_targets": ["valid", "test"],
