@@ -223,12 +223,15 @@ if __name__ == '__main__':
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
+                        # last sub-batch, call synchronize within amp.scale_loss scope
+                        if j == (len(batch['inputs']) // args.batch_size - 1) * args.batch_size:
+                            optimizer.synchronize()
                 else:
                     loss.backward()
 
             losses += [batch_loss]
+
             if args.fp16:
-                optimizer.synchronize()
                 with optimizer.skip_synchronize():
                     optimizer.step()
             else:
