@@ -62,7 +62,9 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
                         suffix: str = '',
                         finetuned_model_path: Optional[str] = None,
                         train_batch_size: Optional[int] = None,
-                        train_subbatch_size: Optional[int] = None) -> dict:
+                        train_subbatch_size: Optional[int] = None,
+                        learning_rate: Optional[float] = None,
+                        ) -> dict:
     """Evaluate checkpoint on  folder on tasks from `task_config_path`
 
     Args:
@@ -109,6 +111,8 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
             config['train']['batch_size'] = train_batch_size
         if train_subbatch_size and n_gpus == 1:
             config['chainer']['pipe'][2]['sub_batch_size'] = train_subbatch_size
+        if learning_rate:
+            config['chainer']['pipe'][2]['optimizer_parameters']['lr'] = learning_rate
         # save config
         model_path = expand_dp_path(config['metadata']['variables']['MODEL_PATH'], config['metadata']['variables'])
         model_path.mkdir(parents=True, exist_ok=True)
@@ -238,6 +242,7 @@ def single(task_config: Path = typer.Option(...),
            eval_batch_size: int = typer.Option(64),
            train_batch_size: Optional[int] = typer.Option(None),
            train_subbatch_size: Optional[int] = typer.Option(None),
+           learning_rate: Optional[float] = typer.Option(None, '--lr')
            ):
     """train&eval pretrained_checkpoint on each task independently
     """
@@ -257,6 +262,7 @@ def single(task_config: Path = typer.Option(...),
         eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size, suffix=suffix,
                                            train=True,
                                            train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
+                                           learning_rate=learning_rate
                                            )
         eval_results['is_mixture'] = False
         if not str(pretrained_checkpoint) in T5_PRETRAINED_MODEL_ARCHIVE_LIST:
