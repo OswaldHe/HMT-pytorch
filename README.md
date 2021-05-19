@@ -129,7 +129,4 @@ resources (unordered):
  - https://github.com/NVIDIA/apex/issues/818
 
 ### FP16 for t5 pretraining
-add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default).
-```
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/ende_hvd.json
-```
+add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
