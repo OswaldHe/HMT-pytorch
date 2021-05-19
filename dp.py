@@ -28,6 +28,8 @@ from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST
 
 import logging
 
+import optimizers
+
 # works with:
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -235,6 +237,8 @@ class T5Text2TextModel(TorchModel):
 
         self.model.to(self.device)
 
+        if hasattr(optimizers, self.optimizer_name):
+            optimizer_cls = getattr(optimizers, self.optimizer_name)
         if hasattr(torch.optim, self.optimizer_name):
             optimizer_cls = getattr(torch.optim, self.optimizer_name)
         elif hasattr(transformers.optimization, self.optimizer_name):
@@ -283,7 +287,12 @@ class T5Text2TextModel(TorchModel):
         return _input
 
     def _get_learning_rates(self):
-        return {f'lr/param_group_{j}': param_group['lr'] for j, param_group in enumerate(self.optimizer.param_groups)}
+        learning_rates = {}
+        for p in ['lr', 'scaled_lr']:
+            for j, param_group in enumerate(self.optimizer.param_groups):
+                if p in param_group and param_group[p] is not None:
+                    learning_rates[f'{p}/param_group_{j}'] = param_group[p]
+        return learning_rates
 
     def train_on_batch(self, features: List[InputFeatures], labels: List[InputFeatures]) -> Dict:
         input_x = self._build_input(features)
@@ -317,9 +326,7 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        learning_rates = {k: v for k, v in self._get_learning_rates().items() if v is not None}
-
-        return {**{'loss': batch_loss}, **learning_rates}
+        return {**{'loss': batch_loss}, **self._get_learning_rates()}
 
     def __call__(self, features: List[InputFeatures]) -> List[str]:
         _input = self._build_input(features)
