@@ -30,6 +30,7 @@ from transformers import T5Config, T5Tokenizer  # noqa: E402
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
 from utils import get_cls_by_name, get_git_hash_commit  # noqa: E402
+import optimizers  # noqa: E402
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 # limit cpu threads for tf
@@ -98,7 +99,7 @@ def validate(iter):
 
 if __name__ == '__main__':
     # run with horovod:
-    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
+    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py)
     args = parser.parse_args()
     # set current working dir
     # todo: maybe take path to run_t5_pretraining.py?
@@ -172,17 +173,20 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
 
-    if hasattr(torch.optim, args.optimizer):
+    if hasattr(optimizers, args.optimizer):
+        optimizer_cls = getattr(optimizers, args.optimizer)
+    elif hasattr(torch.optim, args.optimizer):
         optimizer_cls = getattr(torch.optim, args.optimizer)
     elif hasattr(transformers.optimization, args.optimizer):
         optimizer_cls = getattr(transformers.optimization, args.optimizer)
     else:
-        raise RuntimeError(f'Optimizer {args.optimizer} was not found in torch.optim, transformers.optimization')
-    if optimizer_cls == transformers.optimization.Adafactor:
-        if args.lr is not None and not args.scale_parameter and not args.relative_step:
-            raise RuntimeError('To use a manual (external) learning rate schedule you should set '
-                               '`scale_parameter=False` and `relative_step=False`')
+        raise RuntimeError(f'{args.optimizer} was not found in optimizers, torch.optim, transformers.optimization')
 
+    if hvd.local_rank() == 0:
+        logger.info(f'Using optimizer class: {optimizer_cls}')
+
+    if optimizer_cls in [transformers.optimization.Adafactor, optimizers.Adafactor]:
+        # https://github.com/huggingface/transformers/pull/9751/files -> transformers 4.3.0
         optimizer = optimizer_cls(model.parameters(), lr=args.lr,
                                   scale_parameter=args.scale_parameter,
                                   relative_step=args.relative_step,
@@ -283,7 +287,11 @@ if __name__ == '__main__':
                     tb_writer.add_scalar('loss/train', mean_loss, i)
                     # log learning rate
                     for j, param_group in enumerate(optimizer.param_groups):
-                        tb_writer.add_scalar(f'lr/param_group_{j}', param_group['lr'], i)
+                        # adafactor uses external lr to compute its own lr if scale_parameter is true
+                        # adafactor might not have external lr in case if relative_step is used
+                        for p in ['lr', 'scaled_lr']:
+                            if p in param_group and param_group[p] is not None:
+                                tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
                 losses = []
                 validate(i)
 

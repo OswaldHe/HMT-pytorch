@@ -1,7 +1,7 @@
 tensorflow==2.4.0
 torch==1.7.1
 numpy==1.19.4
-horovod==0.21.0
+horovod==0.21.3
 tensorflow_io==0.17.0
 tqdm==4.49.0
 transformers==4.0.1
