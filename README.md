@@ -14,6 +14,7 @@ export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraini
         --input_seq_len 512 \
         --target_seq_len 192 \
         --lr 5e-05 \
+        --weight_decay 1e-05 \
         --model_cfg ./t5configs/t5-small.json \
         --model_cls modeling_t5:T5ForConditionalGeneration
 ```
@@ -31,6 +32,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3; horovodrun --gloo -np 4 python run_t5_pretr
         --input_seq_len 512 \
         --target_seq_len 192 \
         --lr 5e-05 \
+        --weight_decay 1e-05 \
         --model_cls modeling_t5:T5ForConditionalGeneration \
         --model_cfg t5configs/t5-base-only-cdQ.json \
         --init_checkpoint ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh/model_150000.pth
@@ -129,7 +131,4 @@ resources (unordered):
  - https://github.com/NVIDIA/apex/issues/818
 
 ### FP16 for t5 pretraining
-add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default).
-```
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/ende_hvd.json
-```
+add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
