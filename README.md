@@ -132,3 +132,23 @@ resources (unordered):
 
 ### FP16 for t5 pretraining
 add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
+
+## Adafactor optimizer
+Adafactor optimizer might be used in two settings:
+
+- auto learning rate (`--scale_parameter`, `--relative_step`, `--warmup_init` for `run_t5_pretraining.py` or in DP config in `optimizer_parameters` section)
+- external learning rate (`--lr 0.001` and do not use `--relative_step` flag)
+
+`warmup_init` works only with `relative_step`, so you can't setup your own learning rate with warmup.
+
+e.g. for DP config
+```json
+"optimizer": "Adafactor",
+"optimizer_parameters": {
+        "lr": 1e-03,
+        "weight_decay": 0.0,
+        "scale_parameter": true,
+        "relative_step": false,
+        "warmup_init": false
+}
+```
