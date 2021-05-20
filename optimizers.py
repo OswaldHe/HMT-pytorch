@@ -172,7 +172,7 @@ class Adafactor(Optimizer):
                 state["step"] += 1
                 state["RMS"] = self._rms(p_data_fp32)
                 lr = self._get_lr(group, state)
-                group['scaled_lr'] = lr
+                group['scaled_lr'] = lr.item()
 
                 beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
                 update = (grad ** 2) + group["eps"][0]

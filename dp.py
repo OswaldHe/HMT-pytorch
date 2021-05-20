@@ -1,3 +1,4 @@
+import os
 from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
 
@@ -8,14 +9,11 @@ from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be impo
 from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
 from t5.evaluation.metrics import bleu as t5_bleu
-import transformers
 
 import tensorflow.compat.v1 as tf
 import torch
 import horovod.torch as hvd
 
-from transformers.data.processors.utils import InputFeatures
-from transformers import AutoTokenizer
 from deeppavlov.core.commands.utils import expand_path
 from deeppavlov.core.models.component import Component
 from deeppavlov.core.data.dataset_reader import DatasetReader
@@ -23,12 +21,9 @@ from deeppavlov.core.data.data_learning_iterator import DataLearningIterator
 from deeppavlov.core.models.torch_model import TorchModel
 from deeppavlov.core.common.metrics_registry import register_metric
 
-# list of official t5 models
-from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST
+import optimizers
 
 import logging
-
-import optimizers
 
 # works with:
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,14 +31,22 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # do not work with
 # from deeppavlov.core.common.log import init_logger
 # init_logger()
-
 # log = logging.getLogger('deeppavlov')
 log = logging.getLogger(__name__)
 
-tf.config.set_visible_devices([], 'GPU')
-torch.set_num_threads(4)
 hvd.init()
-torch.cuda.set_device(hvd.local_rank())
+if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
+    os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([str(i) for i in range(torch.cuda.device_count())])
+os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[hvd.local_rank()]
+
+torch.set_num_threads(4)
+tf.config.set_visible_devices([], 'GPU')
+
+import transformers  # noqa: E402
+# # list of official t5 models
+from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E402
+from transformers.data.processors.utils import InputFeatures  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class T5DatasetReader(DatasetReader):
@@ -239,7 +242,7 @@ class T5Text2TextModel(TorchModel):
 
         if hasattr(optimizers, self.optimizer_name):
             optimizer_cls = getattr(optimizers, self.optimizer_name)
-        if hasattr(torch.optim, self.optimizer_name):
+        elif hasattr(torch.optim, self.optimizer_name):
             optimizer_cls = getattr(torch.optim, self.optimizer_name)
         elif hasattr(transformers.optimization, self.optimizer_name):
             optimizer_cls = getattr(transformers.optimization, self.optimizer_name)
