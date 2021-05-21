@@ -59,6 +59,7 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
                         task_config_path: str,
                         eval_batch_size: int = 64,
                         train: bool = False,
+                        only_evaluate: bool = False,
                         suffix: str = '',
                         finetuned_model_path: Optional[str] = None,
                         train_batch_size: Optional[int] = None,
@@ -103,7 +104,8 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
         config['chainer']['pipe'][2]['pretrained_model'] = str(pretrained_checkpoint)
     else:
         config['metadata']['variables']['PRETRAINED_PATH'] = str(pretrained_checkpoint.parent)
-    if train:
+    # train model & get metrics
+    if train and not only_evaluate:
         config['metadata']['variables']['MODEL_PATH'] = '{PRETRAINED_PATH}/' + task_name + '/' + suffix
         if not hf_model:
             config['chainer']['pipe'][2]['checkpoint'] = '{PRETRAINED_PATH}/' + str(pretrained_checkpoint.name)
@@ -118,7 +120,7 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
         model_path.mkdir(parents=True, exist_ok=True)
         json.dump(config, (model_path / 'config.json').open('w'), indent=2)
         metrics = hvd_dp_run(config, fn=train_evaluate_model_from_config, check_metrics=True)
-    else:
+    elif only_evaluate:
         finetuned_model_config = json.load((finetuned_model_path.parent / 'config.json').open('r'))
         config['chainer']['pipe'][2] = deepcopy(finetuned_model_config['chainer']['pipe'][2])
         config['metadata']['variables']['MODEL_PATH'] = finetuned_model_config['metadata']['variables']['MODEL_PATH']
@@ -127,6 +129,9 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
         config['train']['batch_size'] = eval_batch_size
         config['chainer']['pipe'][2]['sub_batch_size'] = eval_batch_size
         metrics = hvd_dp_run(config, fn=evaluate_model, check_metrics=True)
+    else:
+        # nothing to do
+        raise RuntimeError('evaluate_checkpoint: set train or only_evaluate to true')
 
     load_path = expand_dp_path(config['chainer']['pipe'][2]['load_path'], config['metadata']['variables'])
 
@@ -146,35 +151,20 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
             }
 
 
-def evaluate_mixture_model(mixture_model: str,
-                           pretrained_checkpoint: str,
-                           task_configs_path: str,
-                           eval_batch_size: int = 64) -> pd.DataFrame:
-    """Evaluate every checkpoint in `mixture_model` folder on tasks from `task_configs_path`, except mixture task.
-
-    Args:
-        mixture_model (str): path to folder with mixture model checkpoints
-        pretrained_checkpoint (str): checkpoint file that was used as initialization for model trained on mixture task
-        task_configs_path (str): path to folder with DeepPavlov configuration files with tasks to evaluate on
-        eval_batch_size (int, optional): Batch size to use for evaluation. Defaults to 64.
-
-    Returns:
-        pd.DataFrame: evaluation results
-    """
-    mixture_model = Path(mixture_model).resolve()
-    pretrained_checkpoint = Path(pretrained_checkpoint).resolve()
-    task_configs_path = Path(task_configs_path).resolve()
-    task_configs = [task for task in task_configs_path.glob('*json') if 'mixture' not in task.name]
-
-    results = []
-    for checkpoint in tqdm(sorted(mixture_model.glob('*.pth.tar'), key=lambda x: x.stat().st_ctime)[::-1]):
-        for config_path in task_configs:
-            eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size,
-                                               finetuned_model_path=checkpoint)
-            eval_results['is_mixture'] = True
-            results += [eval_results]
-
-    return pd.DataFrame(results)
+@app.command()
+def train_mixture(task_config: Path = typer.Option(...),
+                  pretrained_checkpoint: Path = typer.Option(...),
+                  suffix: str = typer.Option(''),
+                  train_batch_size: Optional[int] = typer.Option(None),
+                  train_subbatch_size: Optional[int] = typer.Option(None),
+                  learning_rate: Optional[float] = typer.Option(None, '--lr')):
+    logger.info(f'starting to train {pretrained_checkpoint} on tasks:')
+    logger.info(f'\t{task_config.name}')
+    _ = evaluate_checkpoint(pretrained_checkpoint, task_config, suffix=suffix, train=True,
+                            train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
+                            learning_rate=learning_rate
+                            )
+    logger.info('train mixture - DONE')
 
 
 @app.command()
@@ -207,7 +197,7 @@ def mixture(checkpoint: Path = typer.Option(...),
         for checkpoint in checkpoints:
             for config_path in task_configs:
                 eval_results = evaluate_checkpoint(pretrained_checkpoint, config_path, eval_batch_size,
-                                                   finetuned_model_path=checkpoint)
+                                                   finetuned_model_path=checkpoint, only_evaluate=True)
                 eval_results['is_mixture'] = True
                 results += [eval_results]
                 pbar.update()
