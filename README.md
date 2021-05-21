@@ -65,7 +65,16 @@ more details.
 #### GLUE mixture from T5
 config: `./dp_configs/glue/glue_mixture.json`
 
-Use `save_every_n_batches` parameter to save the model, set `metrics: []` and `evaluation_targets: []`.
+Use `save_every_n_batches` parameter to save the model, set `metrics: []` and `evaluation_targets: []` in DP configs.
+
+Train model on datasets mixture, check all available options in `evaluate_model.py:train_mixture()`:
+```bash
+export CUDA_VISIBLE_DEVICES=1; python evaluate_model.py train-mixture \
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
+        --task-config ./dp_configs/glue/glue_mixture.json  \
+        --suffix bs_128 \
+        --train-batch-size 128
+```
 
 Evaluation for all checkpoints in `checkpoint` folder, saves best checkpoints and evaluation results:
 ```bash
