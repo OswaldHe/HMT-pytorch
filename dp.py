@@ -14,6 +14,7 @@ import tensorflow.compat.v1 as tf
 import torch
 import horovod.torch as hvd
 
+from deeppavlov.core.common.errors import ConfigError
 from deeppavlov.core.commands.utils import expand_path
 from deeppavlov.core.models.component import Component
 from deeppavlov.core.data.dataset_reader import DatasetReader
@@ -384,6 +385,40 @@ class T5Text2TextModel(TorchModel):
                     self.model.eval()
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = max(param_group['lr'] / self.learning_rate_drop_div, self.min_learning_rate)
+
+    @overrides
+    def save(self, fname: Optional[Union[str, Path]] = None, *args, **kwargs) -> None:
+        """Save torch model to `fname` (if `fname` is not given, use `self.save_path`). Checkpoint includes
+            `model_state_dict`, `optimizer_state_dict`, and `epochs_done` (number of training epochs).
+
+        Args:
+            fname:
+            *args:
+            **kwargs:
+
+        Returns:
+
+        """
+        # todo: hvd.rank() == 0 move to trainer logic?
+        # model.save() is called for save_every_n_batches
+        if hvd.rank() == 0:
+            if fname is None:
+                fname = self.save_path
+
+            fname = Path(fname)
+            if not fname.parent.is_dir():
+                raise ConfigError("Provided save path is incorrect!")
+
+            weights_path = fname.with_suffix(".pth.tar")
+            log.info(f"Saving model to {weights_path}.")
+            # move the model to `cpu` before saving to provide consistency
+            torch.save({
+                "model_state_dict": self.model.cpu().state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "epochs_done": self.epochs_done
+            }, weights_path)
+            # return it back to device (necessary if it was on `cuda`)
+            self.model.to(self.device)
 
 
 class T5Text2TextPostprocessor(Component):
