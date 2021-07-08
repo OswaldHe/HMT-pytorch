@@ -5,7 +5,7 @@ horovod==0.21.3
 tensorflow_io==0.17.0
 tqdm==4.49.0
 transformers==4.0.1
-t5==0.8.1
+git+https://github.com/google-research/text-to-text-transfer-transformer.git@270714ca16177921f68c660b907d9c7f0ea9ce42
 typer==0.3.2
 # for training with deeppavlov and tf2.0 tensorboard support
 git+https://github.com/deepmipt/DeepPavlov.git@feat/tf2_tensorboard
