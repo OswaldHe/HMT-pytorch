@@ -1,10 +1,12 @@
 import random
+from typing import Callable, List, Optional
 
 import t5
 import torch
 import tensorflow.compat.v1 as tf
 import tensorflow_io as tfio
 from t5.models.hf_model import tokens_to_batches
+from t5.seqio.dataset_providers import ShardInfo
 from torch.utils.data import IterableDataset
 
 
@@ -51,8 +53,31 @@ DEFAULT_OUTPUT_FEATURES = {
 
 
 class T5PretrainingDataset(IterableDataset):
-    def __init__(self, shards, batch_size, text_preprocessor=text_preprocessor, inputs_len=32, targets_len=32,
-                 vocab_path=DEFAULT_SPM_PATH):
+    def __init__(self, shards: List[str], batch_size: int,
+                 text_preprocessor: Callable = text_preprocessor,
+                 inputs_len: int = 32, targets_len: int = 32,
+                 vocab_path: str = DEFAULT_SPM_PATH, shard_info: Optional[ShardInfo] = None,
+                 shuffle: bool = True):
+        """Torch IterableDataset wrapper for span_corruption task from t5.
+           Uses tf.datasets under the hood.
+
+           It is supposed that shards are already split between workers in multi-gpu setting.
+
+           It is possible to give all shards for each worker with shard_info specified, but the performance is not
+           tested. Current use case for shard_info is to split single validation shard to multiple workers.
+
+        Args:
+            shards (List[str]): list of shards paths
+            batch_size (int): batch size to use (per worker)
+            text_preprocessor (Callable, optional): defines how to read data from shards. Defaults to text_preprocessor.
+            inputs_len (int, optional): input sequence length. Defaults to 32.
+            targets_len (int, optional): target sequence length. Defaults to 32.
+            vocab_path (str, optional): path to spm vocabulary to use. Defaults to DEFAULT_SPM_PATH.
+            shard_info (Optional[ShardInfo], optional): worker index and num_shards. It is used to shard the data
+                from `shards`. Current use case is when `shards` is a single shard and we split it on num_shards for
+                validation on multiple gpus.
+                Defaults to None.
+        """
         self.sequence_length = {"inputs": inputs_len, "targets": targets_len}
         self.shards = shards
         self.batch_size = batch_size
@@ -65,7 +90,8 @@ class T5PretrainingDataset(IterableDataset):
                                  token_preprocessor=t5.data.preprocessors.span_corruption,
                                  output_features=get_output_features(vocab_path),
                                  metric_fns=[])
-        self.tfdataset = self.task.get_dataset(split='', sequence_length=self.sequence_length)
+        self.tfdataset = self.task.get_dataset(split='', sequence_length=self.sequence_length,
+                                               shuffle=shuffle, shard_info=shard_info)
         self.tfdataset = tokens_to_batches(self.tfdataset,
                                            sequence_length=self.sequence_length,
                                            batch_size=self.batch_size,

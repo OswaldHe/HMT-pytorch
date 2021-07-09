@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import platform
 import importlib
+import itertools
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
+from t5.seqio.dataset_providers import ShardInfo
 import horovod.torch as hvd
 
 import numpy as np
@@ -51,6 +53,7 @@ amp = None
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
 parser.add_argument('--data_path', type=str, help='path with the sharded data in jsonl format')
+parser.add_argument('--valid_data_path', type=str, help='path with the sharded data in jsonl format for validation')
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
@@ -91,15 +94,44 @@ parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
 
-def validate(iter):
-    # todo: model.eval()
+def validate(args, iter, model, dataloader, tb_writer):
+    # todo: refactor, there is duplicate logic with training loop
+    model.eval()
     if hvd.local_rank() == 0:
-        logger.info(f'start validation at iter {iter}')
+        logger.info(f'start validation at step {iter}')
+
+    losses = []
+    for batch in dataloader:
+        for k in batch:
+            batch[k] = batch[k].cuda()
+
+        batch_loss = 0
+        # iterations over sub-batches
+        for j in range(0, len(batch['inputs']), args.batch_size):
+            with torch.no_grad():
+                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
+                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                labels=batch['targets'][j: j + args.batch_size])
+            if args.fp16 and args.apex_opt_lvl == 'O2':
+                loss = outputs['loss']
+            else:
+                loss = outputs.loss
+
+            # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+            loss = loss / args.gradient_accumulation_steps
+            batch_loss += loss.detach().item()
+        losses += [batch_loss]
+
+    losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
+    mean_loss = np.mean(losses)
+    if hvd.local_rank() == 0:
+        logger.info(f'valid_loss: {mean_loss:.4f}')
+        tb_writer.add_scalar('loss/valid', mean_loss, i)
 
 
 if __name__ == '__main__':
     # run with horovod:
-    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py)
+    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
     args = parser.parse_args()
     # set current working dir
     # todo: maybe take path to run_t5_pretraining.py?
@@ -138,7 +170,7 @@ if __name__ == '__main__':
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
         tb_writer = SummaryWriter(log_dir=args.model_path)
 
-    # get dataset shards
+    # get train dataset shards
     data_path = Path(args.data_path).expanduser().absolute()
     shards = list(sorted([sh.name for sh in data_path.glob('*.jsonl')]))
     # split shards across workers, drop remainders
@@ -150,11 +182,30 @@ if __name__ == '__main__':
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
 
-    t5dataset = T5PretrainingDataset(shards, batch_size=per_worker_batch_size, text_preprocessor=jsonl_preprocessor,
-                                     inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
-                                     vocab_path=args.vocab)
+    train_data = T5PretrainingDataset(shards, batch_size=per_worker_batch_size, text_preprocessor=jsonl_preprocessor,
+                                      inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
+                                      vocab_path=args.vocab)
     # fails to work if num_workes > 0 cause we are using tf.datasets
-    t5dataloader = DataLoader(t5dataset, num_workers=0, batch_size=None, **kwargs)
+    train_dataloader = DataLoader(train_data, num_workers=0, batch_size=None, **kwargs)
+
+    # get validation dataset
+    if args.valid_data_path:
+        valid_data_path = Path(args.valid_data_path).expanduser().absolute()
+        valid_shards = list(sorted([sh.name for sh in valid_data_path.glob('*.jsonl')]))
+        # split shards across workers, drop remainders
+        logger.info(f'worker {hvd.local_rank()} validation shards: {valid_shards}')
+        # absolute path to shards
+        valid_shards = [str(valid_data_path / sh) for sh in valid_shards]
+        valid_data = T5PretrainingDataset(valid_shards, batch_size=per_worker_batch_size,
+                                          text_preprocessor=jsonl_preprocessor,
+                                          inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
+                                          vocab_path=args.vocab,
+                                          shard_info=ShardInfo(index=hvd.local_rank(), num_shards=hvd.size()))
+        valid_dataloader = DataLoader(valid_data, num_workers=0, batch_size=None, **kwargs)
+
+    elif hvd.local_rank() == 0:
+        logger.info('No validation data is used.')
+        valid_dataloader = None
 
     # define model
     if not args.model_cfg:
@@ -236,7 +287,7 @@ if __name__ == '__main__':
 
     losses = []
     while i <= args.iters:
-        for batch in t5dataloader:
+        for batch in train_dataloader:
             model.train()
             if i > args.iters:
                 break
@@ -293,7 +344,8 @@ if __name__ == '__main__':
                             if p in param_group and param_group[p] is not None:
                                 tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
                 losses = []
-                validate(i)
+                if valid_dataloader:
+                    validate(args, i, model, valid_dataloader, tb_writer)
 
             # saving model
             if i % args.save_interval == 0 and hvd.local_rank() == 0:
