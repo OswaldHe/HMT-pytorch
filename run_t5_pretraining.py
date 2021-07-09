@@ -344,7 +344,7 @@ if __name__ == '__main__':
                             if p in param_group and param_group[p] is not None:
                                 tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
                 losses = []
-                if valid_dataloader:
+                if valid_dataloader is not None:
                     validate(args, i, model, valid_dataloader, tb_writer)
 
             # saving model
