@@ -57,6 +57,8 @@ parser.add_argument('--valid_data_path', type=str, help='path with the sharded d
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
+parser.add_argument('--save_best', action='store_true', default=False,
+                    help='Save best checkpoint if validation set is provided.')
 parser.add_argument('--working_dir', type=str, default='.',
                     help='working dir, should be a dir with t5-experiments repo (default: .)')
 
@@ -127,6 +129,24 @@ def validate(args, iter, model, dataloader, tb_writer):
     if hvd.local_rank() == 0:
         logger.info(f'valid_loss: {mean_loss:.4f}')
         tb_writer.add_scalar('loss/valid', mean_loss, i)
+    return mean_loss
+
+
+def save_model(args, i, model, optimizer, suffix=''):
+    if hvd.local_rank() == 0:
+        if suffix == '':
+            save_path = f'{args.model_path}/model_{i}.pth'
+        else:
+            save_path = f'{args.model_path}/model_{suffix}.pth'
+        to_save = {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "iteration": i,
+                    }
+        if args.fp16:
+            to_save['amp'] = amp.state_dict(),
+        torch.save(to_save, save_path)
+        logger.info(f'Model was saved to {save_path}')
 
 
 if __name__ == '__main__':
@@ -286,6 +306,7 @@ if __name__ == '__main__':
         pbar.update(i)
 
     losses = []
+    best_valid_loss = np.inf
     while i <= args.iters:
         for batch in train_dataloader:
             model.train()
@@ -345,20 +366,15 @@ if __name__ == '__main__':
                                 tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
                 losses = []
                 if valid_dataloader is not None:
-                    validate(args, i, model, valid_dataloader, tb_writer)
+                    valid_loss = validate(args, i, model, valid_dataloader, tb_writer)
+                    if valid_loss < best_valid_loss:
+                        best_valid_loss = valid_loss
+                        if args.save_best:
+                            save_model(args, i, model, optimizer, suffix='best')
 
             # saving model
-            if i % args.save_interval == 0 and hvd.local_rank() == 0:
-                save_path = f'{args.model_path}/model_{i}.pth'
-                to_save = {
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "iteration": i,
-                           }
-                if args.fp16:
-                    to_save['amp'] = amp.state_dict(),
-                torch.save(to_save, save_path)
-                logger.info(f'Model was saved to {save_path}')
+            if i % args.save_interval == 0:
+                save_model(args, i, model, optimizer)
 
             i += 1
             if hvd.local_rank() == 0:
