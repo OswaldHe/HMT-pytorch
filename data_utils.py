@@ -54,6 +54,7 @@ DEFAULT_OUTPUT_FEATURES = {
 
 class T5PretrainingDataset(IterableDataset):
     def __init__(self, shards: List[str], batch_size: int,
+                 task: str = 'span_corruption',
                  text_preprocessor: Callable = text_preprocessor,
                  inputs_len: int = 32, targets_len: int = 32,
                  vocab_path: str = DEFAULT_SPM_PATH, shard_info: Optional[ShardInfo] = None,
@@ -69,6 +70,7 @@ class T5PretrainingDataset(IterableDataset):
         Args:
             shards (List[str]): list of shards paths
             batch_size (int): batch size to use (per worker)
+            task (str): t5 task name, e.g. `span_corruption`, `prefix_lm`. Defaults to span_corruption.
             text_preprocessor (Callable, optional): defines how to read data from shards. Defaults to text_preprocessor.
             inputs_len (int, optional): input sequence length. Defaults to 32.
             targets_len (int, optional): target sequence length. Defaults to 32.
@@ -82,12 +84,12 @@ class T5PretrainingDataset(IterableDataset):
         self.shards = shards
         self.batch_size = batch_size
         self.text_preprocessor = text_preprocessor
-        self.task = t5.data.Task("span_corruption",
+        self.task = t5.data.Task(task,
                                  splits=[],
                                  dataset_fn=lambda split, shuffle_files: sharded_dataset_fn(self.shards, split,
                                                                                             shuffle_files),
                                  text_preprocessor=[self.text_preprocessor],
-                                 token_preprocessor=t5.data.preprocessors.span_corruption,
+                                 token_preprocessor=getattr(t5.data.preprocessors, task),
                                  output_features=get_output_features(vocab_path),
                                  metric_fns=[])
         self.tfdataset = self.task.get_dataset(split='', sequence_length=self.sequence_length,
@@ -106,13 +108,12 @@ class T5PretrainingDataset(IterableDataset):
 
 
 def assert_vocabs(tokenizer, vocab_path=DEFAULT_SPM_PATH):
-    """Asserts that default vocabulary from t5 repo is the same as HFTransformers tokenizer
+    """Asserts that default vocabulary from t5 repo has the same as HFTransformers tokenizer special tokens
 
     Args:
         tokenizer: HuggingFace Transformers tokenizer to check
     """
     vocab = get_vocabulary(vocab_path=vocab_path)
-    assert vocab.vocab_size == tokenizer.vocab_size
     assert vocab.unk_id == tokenizer.unk_token_id
     assert vocab.eos_id == tokenizer.eos_token_id
     assert vocab.pad_id == tokenizer.pad_token_id
