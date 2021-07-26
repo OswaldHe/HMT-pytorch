@@ -25,12 +25,13 @@ if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
 
 hvd.init()
 # set 1 gpu visible per process, should be before transformers import
+os.environ['CUDA_VISIBLE_DEVICES_GLOBAL'] = os.environ['CUDA_VISIBLE_DEVICES']
 os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[hvd.local_rank()]
 
 import transformers  # noqa: E402
 from transformers import T5Config, T5Tokenizer  # noqa: E402
 
-from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
+from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor, get_vocabulary  # noqa: E402
 from utils import get_cls_by_name, get_git_hash_commit  # noqa: E402
 import optimizers  # noqa: E402
 
@@ -76,6 +77,8 @@ parser.add_argument('--vocab', type=str, default='./vocabs/sentencepiece.model',
                     help='path to vocabulary file with sentencepiece model (default: ./vocabs/sentencepiece.model)')
 
 # training args
+parser.add_argument('--task', type=str, default='span_corruption',
+                    help='t5 task name, e.g. `span_corruption`, `prefix_lm`. (default: span_corruption)')
 parser.add_argument('--lr', type=float, default=None, help='learning rate (default: None)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
 parser.add_argument('--iters', type=int, default=100,
@@ -183,7 +186,8 @@ if __name__ == '__main__':
             Path(model_path).mkdir(parents=True)
         args_dict = dict(vars(args))
         args_dict['ENV'] = {}
-        for env_var in ['CUDA_VISIBLE_DEVICES']:
+        args_dict['ENV']['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES_GLOBAL', '')
+        for env_var in []:  # todo: add needed variables
             args_dict['ENV'][env_var] = os.environ.get(env_var, '')
         args_dict['MACHINE'] = platform.node()
         args_dict['COMMIT'] = get_git_hash_commit()
@@ -235,9 +239,9 @@ if __name__ == '__main__':
         # todo: get tokenizer from config
         logger.warning(f'Model configuration was taken from {args.model_cfg}, but tokenizer from {args.base_model}')
     # define tokenizer
-    t5tokenizer = T5Tokenizer.from_pretrained(args.base_model)
+    t5_default_tokenizer = T5Tokenizer.from_pretrained(args.base_model)
     if hvd.local_rank() == 0:
-        assert_vocabs(t5tokenizer, args.vocab)
+        assert_vocabs(t5_default_tokenizer, args.vocab)
 
     model_cls = get_cls_by_name(args.model_cls)  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
     if hvd.local_rank() == 0:
