@@ -206,7 +206,8 @@ if __name__ == '__main__':
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
 
-    train_data = T5PretrainingDataset(shards, batch_size=per_worker_batch_size, text_preprocessor=jsonl_preprocessor,
+    train_data = T5PretrainingDataset(shards, task=args.task, batch_size=per_worker_batch_size,
+                                      text_preprocessor=jsonl_preprocessor,
                                       inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
                                       vocab_path=args.vocab)
     # fails to work if num_workes > 0 cause we are using tf.datasets
@@ -220,7 +221,7 @@ if __name__ == '__main__':
         logger.info(f'worker {hvd.local_rank()} validation shards: {valid_shards}')
         # absolute path to shards
         valid_shards = [str(valid_data_path / sh) for sh in valid_shards]
-        valid_data = T5PretrainingDataset(valid_shards, batch_size=per_worker_batch_size,
+        valid_data = T5PretrainingDataset(valid_shards, task=args.task, batch_size=per_worker_batch_size,
                                           text_preprocessor=jsonl_preprocessor,
                                           inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
                                           vocab_path=args.vocab,
