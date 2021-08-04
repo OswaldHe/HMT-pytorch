@@ -10,7 +10,7 @@ import itertools
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 from t5.seqio.dataset_providers import ShardInfo
 import horovod.torch as hvd
-
+from dotenv import load_dotenv
 import numpy as np
 import tensorflow.compat.v1 as tf
 import torch
@@ -18,6 +18,8 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+
+load_dotenv()
 
 # if CUDA_VISIBLE_DEVICES is not set make all gpus visible
 if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
