@@ -28,6 +28,7 @@ if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
 hvd.init()
 # set 1 gpu visible per process, should be before transformers import
 os.environ['CUDA_VISIBLE_DEVICES_GLOBAL'] = os.environ['CUDA_VISIBLE_DEVICES']
+# might fail only if NUM(CUDA_VISIBLE_DEVICES) less than hvd.local_rank()
 os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[hvd.local_rank()]
 
 import transformers  # noqa: E402
@@ -44,6 +45,7 @@ tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it will use all cpus and throttle gpus
 torch.set_num_threads(4)
+torch.cuda.set_device(int(os.environ['CUDA_VISIBLE_DEVICES']))
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
