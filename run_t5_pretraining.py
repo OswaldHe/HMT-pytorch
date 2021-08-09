@@ -104,7 +104,7 @@ parser.add_argument('--warmup_init', action='store_true', default=False,
 def validate(args, iter, model, dataloader, tb_writer):
     # todo: refactor, there is duplicate logic with training loop
     model.eval()
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         logger.info(f'start validation at step {iter}')
 
     losses = []
@@ -131,14 +131,14 @@ def validate(args, iter, model, dataloader, tb_writer):
 
     losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
     mean_loss = np.mean(losses)
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         logger.info(f'valid_loss: {mean_loss:.4f}')
         tb_writer.add_scalar('loss/valid', mean_loss, i)
     return mean_loss
 
 
 def save_model(args, i, model, optimizer, suffix=''):
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         if suffix == '':
             save_path = f'{args.model_path}/model_{i}.pth'
         else:
@@ -162,7 +162,7 @@ if __name__ == '__main__':
     # todo: maybe take path to run_t5_pretraining.py?
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
     os.chdir(args.working_dir)
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
 
@@ -181,7 +181,7 @@ if __name__ == '__main__':
 
     # create model_path and save configuration, init tensorboard logs
     tb_writer = None
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         # todo: if model path exists and there is config file, write new config file
         model_path = Path(args.model_path)
         if not model_path.exists():
@@ -201,8 +201,8 @@ if __name__ == '__main__':
     shards = list(sorted([sh.name for sh in data_path.glob('*.jsonl')]))
     # split shards across workers, drop remainders
     shards_per_worker = len(shards) // hvd.size()
-    shards = shards[hvd.local_rank() * shards_per_worker:(hvd.local_rank() + 1) * shards_per_worker]
-    logger.info(f'worker {hvd.local_rank()} shards: {shards}')
+    shards = shards[hvd.rank() * shards_per_worker:(hvd.rank() + 1) * shards_per_worker]
+    logger.info(f'worker {hvd.rank()} shards: {shards}')
     # absolute path to shards
     shards = [str(data_path / sh) for sh in shards]
 
@@ -220,17 +220,17 @@ if __name__ == '__main__':
         valid_data_path = Path(args.valid_data_path).expanduser().absolute()
         valid_shards = list(sorted([sh.name for sh in valid_data_path.glob('*.jsonl')]))
         # split shards across workers, drop remainders
-        logger.info(f'worker {hvd.local_rank()} validation shards: {valid_shards}')
+        logger.info(f'worker {hvd.rank()} validation shards: {valid_shards}')
         # absolute path to shards
         valid_shards = [str(valid_data_path / sh) for sh in valid_shards]
         valid_data = T5PretrainingDataset(valid_shards, task=args.task, batch_size=per_worker_batch_size,
                                           text_preprocessor=jsonl_preprocessor,
                                           inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
                                           vocab_path=args.vocab,
-                                          shard_info=ShardInfo(index=hvd.local_rank(), num_shards=hvd.size()))
+                                          shard_info=ShardInfo(index=hvd.rank(), num_shards=hvd.size()))
         valid_dataloader = DataLoader(valid_data, num_workers=0, batch_size=None, **kwargs)
 
-    elif hvd.local_rank() == 0:
+    elif hvd.rank() == 0:
         logger.info('No validation data is used.')
         valid_dataloader = None
 
@@ -243,11 +243,11 @@ if __name__ == '__main__':
         logger.warning(f'Model configuration was taken from {args.model_cfg}, but tokenizer from {args.base_model}')
     # define tokenizer
     t5_default_tokenizer = T5Tokenizer.from_pretrained(args.base_model)
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         assert_vocabs(t5_default_tokenizer, args.vocab)
 
     model_cls = get_cls_by_name(args.model_cls)  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
 
@@ -260,7 +260,7 @@ if __name__ == '__main__':
     else:
         raise RuntimeError(f'{args.optimizer} was not found in optimizers, torch.optim, transformers.optimization')
 
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         logger.info(f'Using optimizer class: {optimizer_cls}')
 
     if optimizer_cls in [transformers.optimization.Adafactor, optimizers.Adafactor]:
@@ -308,7 +308,7 @@ if __name__ == '__main__':
     # train loop
     i = init_iteration
     pbar = None
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         pbar = tqdm(total=args.iters)
         pbar.update(i)
 
@@ -360,7 +360,7 @@ if __name__ == '__main__':
             # logging / validation
             if i % args.log_interval == 0:
                 mean_loss = np.mean(losses)
-                if hvd.local_rank() == 0:
+                if hvd.rank() == 0:
                     # log train loss
                     logger.info(f'step: {i}/{args.iters} loss: {mean_loss:.4f}')
                     tb_writer.add_scalar('loss/train', mean_loss, i)
@@ -384,9 +384,9 @@ if __name__ == '__main__':
                 save_model(args, i, model, optimizer)
 
             i += 1
-            if hvd.local_rank() == 0:
+            if hvd.rank() == 0:
                 pbar.update(1)
 
-    if hvd.local_rank() == 0:
+    if hvd.rank() == 0:
         pbar.close()
     logger.info('Done!')
