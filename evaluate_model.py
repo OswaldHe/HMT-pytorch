@@ -43,7 +43,13 @@ def hvd_dp_run(config, fn=evaluate_model, check_metrics=False):
         # check that metrics from all workers are equal
         if check_metrics:
             splits = list(metrics[0].keys())
+            if len(splits) == 0:
+                logger.info(f'no evaluation splits were found in metrics: {metrics}')
+                return {}
             metrics_names = metrics[0][splits[0]].keys()
+            if len(metrics_names) == 0:
+                logger.info(f'no metrics were found in evaluation results: {metrics}')
+                return {}
             for split in splits:
                 for name in metrics_names:
                     if len(set([m[split][name] for m in metrics])) > 1:
