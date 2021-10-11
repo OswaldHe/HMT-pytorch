@@ -34,10 +34,6 @@ logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
 logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
 
 hvd.init()
-# set 1 gpu visible per process, should be before transformers import
-os.environ['CUDA_VISIBLE_DEVICES_GLOBAL'] = os.environ['CUDA_VISIBLE_DEVICES']
-# might fail only if NUM(CUDA_VISIBLE_DEVICES) less than hvd.local_rank()
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[hvd.local_rank()]
 
 import transformers  # noqa: E402
 from transformers import T5Config, T5Tokenizer  # noqa: E402
@@ -53,11 +49,8 @@ tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it will use all cpus and throttle gpus
 torch.set_num_threads(4)
-torch.cuda.set_device(int(os.environ['CUDA_VISIBLE_DEVICES']))
-
-
-
-
+# all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
+torch.cuda.set_device(hvd.local_rank())
 
 # apex.amp
 amp = None
@@ -239,9 +232,10 @@ if __name__ == '__main__':
                                           shard_info=ShardInfo(index=hvd.rank(), num_shards=hvd.size()))
         valid_dataloader = DataLoader(valid_data, num_workers=0, batch_size=None, **kwargs)
 
-    elif hvd.rank() == 0:
-        logger.info('No validation data is used.')
+    else:
         valid_dataloader = None
+        if hvd.rank() == 0:
+            logger.info('No validation data is used.')
 
     # define model
     if not args.model_cfg:
@@ -306,9 +300,10 @@ if __name__ == '__main__':
     if args.init_checkpoint:
         # todo: use iteration number to restore position in dataset?
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
-        checkpoint = torch.load(args.init_checkpoint)
+        checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if 'amp' in checkpoint and args.fp16:
             amp.load_state_dict(checkpoint['amp'])
         init_iteration = checkpoint.get('iteration', 0)
