@@ -301,7 +301,13 @@ if __name__ == '__main__':
         # todo: use iteration number to restore position in dataset?
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
         checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
-        model.load_state_dict(checkpoint["model_state_dict"])
+        missing_k, unexpected_k = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if hvd.rank() == 0:
+            if len(missing_k) != 0:
+                logger.info(f'{missing_k} were not loaded from checkpoint! These paremeters were randomly initialized.')
+            if len(unexpected_k) != 0:
+                logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
+
         if "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if 'amp' in checkpoint and args.fp16:
