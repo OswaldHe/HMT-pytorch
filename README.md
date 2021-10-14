@@ -1,5 +1,26 @@
 # t5-experiments
 
+## Install requirements
+This repo is based on 🤗 Transfomers implementation of the T5 model.
+Data processing pipeline is used from the original [T5 repository](https://github.com/google-research/text-to-text-transfer-transformer) in all settings. Horovod is used for multi-gpu and multi-node training. DeepPavlov library is used for running and tracking fine-tuning experiments and evalutaion.
+
+Install requirements after cloning the repo:
+```bash
+grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
+```
+
+###  Install Horovod
+Depending on your setup just `pip install horovod==0.23.0` might work.
+
+Building Horovod with NCCL for PyTorch:
+```bash
+HOROVOD_NCCL_HOME=... HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch]==0.23.0 --no-binary=horovod
+```
+
+Currently, T5 is using `tensorflow==2.6.0` and Horovod started to support tf2.6 since 0.22.1.
+
+For further details check Horovod documentation: https://horovod.readthedocs.io/en/stable/install_include.html
+
 ## Pre-training
 ### T5-small baseline
 ```bash
