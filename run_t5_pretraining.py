@@ -61,6 +61,8 @@ parser.add_argument('--data_path', type=str, help='path with the sharded data in
 parser.add_argument('--valid_data_path', type=str, help='path with the sharded data in jsonl format for validation')
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
+parser.add_argument('--valid_interval', type=int, default=None,
+                    help='how many batches to wait for logging training status')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
 parser.add_argument('--save_best', action='store_true', default=False,
                     help='Save best checkpoint if validation set is provided.')
@@ -231,7 +233,8 @@ if __name__ == '__main__':
                                           vocab_path=args.vocab,
                                           shard_info=ShardInfo(index=hvd.rank(), num_shards=hvd.size()))
         valid_dataloader = DataLoader(valid_data, num_workers=0, batch_size=None, **kwargs)
-
+        if args.valid_interval is None:
+            args.valid_interval = args.log_interval
     else:
         valid_dataloader = None
         if hvd.rank() == 0:
@@ -304,7 +307,7 @@ if __name__ == '__main__':
         missing_k, unexpected_k = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         if hvd.rank() == 0:
             if len(missing_k) != 0:
-                logger.info(f'{missing_k} were not loaded from checkpoint! These paremeters were randomly initialized.')
+                logger.info(f'{missing_k} were not loaded from checkpoint! These parameters were randomly initialized.')
             if len(unexpected_k) != 0:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
@@ -367,7 +370,7 @@ if __name__ == '__main__':
             else:
                 optimizer.step()
 
-            # logging / validation
+            # logging
             if i % args.log_interval == 0:
                 mean_loss = np.mean(losses)
                 if hvd.rank() == 0:
@@ -382,12 +385,13 @@ if __name__ == '__main__':
                             if p in param_group and param_group[p] is not None:
                                 tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
                 losses = []
-                if valid_dataloader is not None:
-                    valid_loss = validate(args, i, model, valid_dataloader, tb_writer)
-                    if valid_loss < best_valid_loss:
-                        best_valid_loss = valid_loss
-                        if args.save_best:
-                            save_model(args, i, model, optimizer, suffix='best')
+            # validation
+            if valid_dataloader is not None and i % args.valid_interval == 0:
+                valid_loss = validate(args, i, model, valid_dataloader, tb_writer)
+                if valid_loss < best_valid_loss:
+                    best_valid_loss = valid_loss
+                    if args.save_best:
+                        save_model(args, i, model, optimizer, suffix='best')
 
             # saving model
             if i % args.save_interval == 0:
@@ -399,4 +403,4 @@ if __name__ == '__main__':
 
     if hvd.rank() == 0:
         pbar.close()
-    logger.info('Done!')
+        logger.info('Done!')
