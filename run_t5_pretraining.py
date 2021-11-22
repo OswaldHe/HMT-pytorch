@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 import platform
+import time
 import importlib
 import itertools
 
@@ -105,7 +106,7 @@ parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
 
-def validate(args, iter, model, dataloader, tb_writer):
+def validate(args, iter, model, dataloader, tb_writer, global_batch_size):
     # todo: refactor, there is duplicate logic with training loop
     model.eval()
     if hvd.rank() == 0:
@@ -137,7 +138,9 @@ def validate(args, iter, model, dataloader, tb_writer):
     mean_loss = np.mean(losses)
     if hvd.rank() == 0:
         logger.info(f'valid_loss: {mean_loss:.4f}')
-        tb_writer.add_scalar('loss/valid', mean_loss, i)
+        tb_writer.add_scalar('loss/valid', mean_loss, iter)
+        tb_writer.add_scalar('loss/iterations/valid', mean_loss, iter)
+        tb_writer.add_scalar('loss/samples/valid', mean_loss, iter * global_batch_size)
     return mean_loss
 
 
@@ -211,6 +214,7 @@ if __name__ == '__main__':
     shards = [str(data_path / sh) for sh in shards]
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
+    global_batch_size = per_worker_batch_size * hvd.size()
 
     train_data = T5PretrainingDataset(shards, task=args.task, batch_size=per_worker_batch_size,
                                       text_preprocessor=jsonl_preprocessor,
@@ -329,6 +333,7 @@ if __name__ == '__main__':
     best_valid_loss = np.inf
     while i <= args.iters:
         for batch in train_dataloader:
+            iteration_start = time.time()
             model.train()
             if i > args.iters:
                 break
@@ -374,6 +379,9 @@ if __name__ == '__main__':
             else:
                 optimizer.step()
 
+            # timings
+            iteration_time = time.time() - iteration_start
+
             # logging
             if i % args.log_interval == 0:
                 mean_loss = np.mean(losses)
@@ -381,17 +389,24 @@ if __name__ == '__main__':
                     # log train loss
                     logger.info(f'step: {i}/{args.iters} loss: {mean_loss:.4f}')
                     tb_writer.add_scalar('loss/train', mean_loss, i)
+                    tb_writer.add_scalar('loss/iterations/train', mean_loss, i)
+                    tb_writer.add_scalar('loss/samples/train', mean_loss, i * global_batch_size)
+                    # log iteration time
+                    tb_writer.add_scalar('time/iterations/per_iter', iteration_time, i)
+                    tb_writer.add_scalar('time/samples/per_iter', iteration_time, i * global_batch_size)
                     # log learning rate
                     for j, param_group in enumerate(optimizer.param_groups):
                         # adafactor uses external lr to compute its own lr if scale_parameter is true
                         # adafactor might not have external lr in case if relative_step is used
                         for p in ['lr', 'scaled_lr']:
                             if p in param_group and param_group[p] is not None:
-                                tb_writer.add_scalar(f'{p}/param_group_{j}', param_group[p], i)
+                                tb_writer.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], i)
+                                tb_writer.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
+                                                     i * global_batch_size)
                 losses = []
             # validation
             if valid_dataloader is not None and i % args.valid_interval == 0:
-                valid_loss = validate(args, i, model, valid_dataloader, tb_writer)
+                valid_loss = validate(args, i, model, valid_dataloader, tb_writer, global_batch_size)
                 if valid_loss < best_valid_loss:
                     best_valid_loss = valid_loss
                     if args.save_best:
