@@ -153,7 +153,7 @@ def save_model(args, i, model, optimizer, suffix=''):
                     "iteration": i,
                     }
         if args.fp16:
-            to_save['amp'] = amp.state_dict(),
+            to_save['amp'] = amp.state_dict()
         torch.save(to_save, save_path)
         logger.info(f'Model was saved to {save_path}')
 
