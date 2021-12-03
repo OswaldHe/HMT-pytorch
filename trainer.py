@@ -2,7 +2,6 @@ import importlib
 import itertools
 import logging
 import time
-from typing import Optional
 
 import numpy as np
 import torch
