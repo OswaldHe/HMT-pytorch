@@ -4,14 +4,11 @@ import logging
 import os
 from pathlib import Path
 import platform
-import importlib
-import itertools
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 from t5.seqio.dataset_providers import ShardInfo
 import horovod.torch as hvd
 from dotenv import load_dotenv
-import numpy as np
 import tensorflow.compat.v1 as tf
 import torch
 import torch.multiprocessing as mp
@@ -52,8 +49,6 @@ torch.set_num_threads(4)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 torch.cuda.set_device(hvd.local_rank())
 
-# apex.amp
-amp = None
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
@@ -104,45 +99,6 @@ parser.add_argument('--relative_step', action='store_true', default=False,
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
-
-def validate(args, iter, model, dataloader, tb_writer, global_batch_size):
-    # todo: refactor, there is duplicate logic with training loop
-    model.eval()
-    if hvd.rank() == 0:
-        logger.info(f'start validation at step {iter}')
-
-    losses = []
-    for batch in dataloader:
-        for k in batch:
-            batch[k] = batch[k].cuda()
-
-        batch_loss = 0
-        # iterations over sub-batches
-        for j in range(0, len(batch['inputs']), args.batch_size):
-            with torch.no_grad():
-                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
-                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
-                                labels=batch['targets'][j: j + args.batch_size])
-            if args.fp16 and args.apex_opt_lvl == 'O2':
-                loss = outputs['loss']
-            else:
-                loss = outputs.loss
-
-            # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-            loss = loss / args.gradient_accumulation_steps
-            batch_loss += loss.detach().item()
-        losses += [batch_loss]
-
-    losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
-    mean_loss = np.mean(losses)
-    if hvd.rank() == 0:
-        logger.info(f'valid_loss: {mean_loss:.4f}')
-        tb_writer.add_scalar('loss/valid', mean_loss, iter)
-        tb_writer.add_scalar('loss/iterations/valid', mean_loss, iter)
-        tb_writer.add_scalar('loss/samples/valid', mean_loss, iter * global_batch_size)
-    return mean_loss
-
-
 if __name__ == '__main__':
     # run with horovod:
     # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
@@ -154,12 +110,6 @@ if __name__ == '__main__':
     if hvd.rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
-
-    if args.fp16:
-        try:
-            amp = importlib.import_module('apex.amp')
-        except ImportError:
-            raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
 
     kwargs = {'pin_memory': True}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
