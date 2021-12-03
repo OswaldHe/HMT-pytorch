@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 import platform
-import time
 import importlib
 import itertools
 
@@ -17,8 +16,8 @@ import tensorflow.compat.v1 as tf
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+
+from trainer import Trainer
 
 load_dotenv()
 
@@ -39,7 +38,7 @@ hvd.init()
 import transformers  # noqa: E402
 from transformers import T5Config, T5Tokenizer  # noqa: E402
 
-from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor, get_vocabulary  # noqa: E402
+from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
 from utils import get_cls_by_name, get_git_hash_commit  # noqa: E402
 import optimizers  # noqa: E402
 
@@ -144,23 +143,6 @@ def validate(args, iter, model, dataloader, tb_writer, global_batch_size):
     return mean_loss
 
 
-def save_model(args, i, model, optimizer, suffix=''):
-    if hvd.rank() == 0:
-        if suffix == '':
-            save_path = f'{args.model_path}/model_{i}.pth'
-        else:
-            save_path = f'{args.model_path}/model_{suffix}.pth'
-        to_save = {
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "iteration": i,
-                    }
-        if args.fp16:
-            to_save['amp'] = amp.state_dict()
-        torch.save(to_save, save_path)
-        logger.info(f'Model was saved to {save_path}')
-
-
 if __name__ == '__main__':
     # run with horovod:
     # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
@@ -187,7 +169,6 @@ if __name__ == '__main__':
         kwargs['multiprocessing_context'] = 'forkserver'
 
     # create model_path and save configuration, init tensorboard logs
-    tb_writer = None
     if hvd.rank() == 0:
         # todo: if model path exists and there is config file, write new config file
         model_path = Path(args.model_path)
@@ -195,13 +176,13 @@ if __name__ == '__main__':
             Path(model_path).mkdir(parents=True)
         args_dict = dict(vars(args))
         args_dict['ENV'] = {}
-        args_dict['ENV']['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES_GLOBAL', '')
+        args_dict['ENV']['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '')
         for env_var in []:  # todo: add needed variables
             args_dict['ENV'][env_var] = os.environ.get(env_var, '')
+        args_dict['HVD_SIZE'] = hvd.size()
         args_dict['MACHINE'] = platform.node()
         args_dict['COMMIT'] = get_git_hash_commit()
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
-        tb_writer = SummaryWriter(log_dir=args.model_path)
 
     # get train dataset shards
     data_path = Path(args.data_path).expanduser().absolute()
@@ -282,144 +263,8 @@ if __name__ == '__main__':
                                   weight_decay=args.weight_decay)
     else:
         optimizer = optimizer_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    model = model.cuda()
 
-    # Horovod: broadcast parameters & optimizer state.
-    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
-    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
-
-    # Horovod: (optional) compression algorithm.
-    compression = hvd.Compression.fp16 if args.fp16_allreduce else hvd.Compression.none
-
-    # Horovod: wrap optimizer with DistributedOptimizer.
-    optimizer = hvd.DistributedOptimizer(optimizer,
-                                         named_parameters=model.named_parameters(),
-                                         compression=compression,
-                                         op=hvd.Average,
-                                         gradient_predivide_factor=1.0,
-                                         backward_passes_per_step=args.gradient_accumulation_steps,
-                                         )
-    # Apex
-    if args.fp16:
-        model, optimizer = amp.initialize(model, optimizer, enabled=args.fp16, opt_level=args.apex_opt_lvl)
-
-    init_iteration = 0
-    if args.init_checkpoint:
-        # todo: use iteration number to restore position in dataset?
-        # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
-        checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
-        missing_k, unexpected_k = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        if hvd.rank() == 0:
-            if len(missing_k) != 0:
-                logger.info(f'{missing_k} were not loaded from checkpoint! These parameters were randomly initialized.')
-            if len(unexpected_k) != 0:
-                logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
-
-        if "optimizer_state_dict" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if 'amp' in checkpoint and args.fp16:
-            amp.load_state_dict(checkpoint['amp'])
-        init_iteration = checkpoint.get('iteration', 0)
-        logger.info(f'Model was loaded from: {args.init_checkpoint}')
+    trainer = Trainer(model, optimizer, train_dataloader, valid_dataloader, args)
 
     # train loop
-    i = init_iteration
-    pbar = None
-    if hvd.rank() == 0:
-        pbar = tqdm(total=args.iters)
-        pbar.update(i)
-
-    losses = []
-    best_valid_loss = np.inf
-    while i <= args.iters:
-        for batch in train_dataloader:
-            iteration_start = time.time()
-            model.train()
-            if i > args.iters:
-                break
-            # move batch data to gpu
-            for k in batch:
-                batch[k] = batch[k].cuda()
-            # train step
-            optimizer.zero_grad()
-            batch_loss = 0
-            # iterations over sub-batches (for gradient accumulation)
-            for j in range(0, len(batch['inputs']), args.batch_size):
-                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
-                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
-                                # todo: use decoder_attention mask!
-                                # it is okay to not use decoder_attention_mask as loss from paddings is ignored
-                                # and decoder_attention_mask should be zero only for paddings
-                                # so, anyway padding are ignored.
-                                # decoder_attention_mask=batch['targets_mask'][j: j + args.batch_size],
-                                labels=batch['targets'][j: j + args.batch_size])
-                if args.fp16 and args.apex_opt_lvl == 'O2':
-                    loss = outputs['loss']
-                else:
-                    loss = outputs.loss
-
-                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                loss = loss / args.gradient_accumulation_steps
-                batch_loss += loss.detach().item()
-                if args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                        # last sub-batch, call synchronize within amp.scale_loss scope
-                        # mb move to just above with optimizer.skip_synchronize()
-                        if j == (len(batch['inputs']) // args.batch_size - 1) * args.batch_size:
-                            optimizer.synchronize()
-                else:
-                    loss.backward()
-
-            losses += [batch_loss]
-
-            if args.fp16:
-                with optimizer.skip_synchronize():
-                    optimizer.step()
-            else:
-                optimizer.step()
-
-            # timings
-            iteration_time = time.time() - iteration_start
-
-            # logging
-            if i % args.log_interval == 0:
-                mean_loss = np.mean(losses)
-                if hvd.rank() == 0:
-                    # log train loss
-                    logger.info(f'step: {i}/{args.iters} loss: {mean_loss:.4f}')
-                    tb_writer.add_scalar('loss/train', mean_loss, i)
-                    tb_writer.add_scalar('loss/iterations/train', mean_loss, i)
-                    tb_writer.add_scalar('loss/samples/train', mean_loss, i * global_batch_size)
-                    # log iteration time
-                    tb_writer.add_scalar('time/iterations/per_iter', iteration_time, i)
-                    tb_writer.add_scalar('time/samples/per_iter', iteration_time, i * global_batch_size)
-                    # log learning rate
-                    for j, param_group in enumerate(optimizer.param_groups):
-                        # adafactor uses external lr to compute its own lr if scale_parameter is true
-                        # adafactor might not have external lr in case if relative_step is used
-                        for p in ['lr', 'scaled_lr']:
-                            if p in param_group and param_group[p] is not None:
-                                tb_writer.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], i)
-                                tb_writer.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
-                                                     i * global_batch_size)
-                losses = []
-            # validation
-            if valid_dataloader is not None and i % args.valid_interval == 0:
-                valid_loss = validate(args, i, model, valid_dataloader, tb_writer, global_batch_size)
-                if valid_loss < best_valid_loss:
-                    best_valid_loss = valid_loss
-                    if args.save_best:
-                        save_model(args, i, model, optimizer, suffix='best')
-
-            # saving model
-            if i % args.save_interval == 0:
-                save_model(args, i, model, optimizer)
-
-            i += 1
-            if hvd.rank() == 0:
-                pbar.update(1)
-
-    if hvd.rank() == 0:
-        pbar.close()
-        logger.info('Done!')
+    trainer.train()
