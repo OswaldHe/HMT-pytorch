@@ -146,7 +146,11 @@ def main():
     startup_start = time.time()
 
     print("Opening", args.input)
-    fin = open(args.input, 'r', encoding='utf-8')
+    if os.path.isdir(args.input):
+        data_files = [f for f in os.listdir(args.input) if f.endswith('.jsonl') or f.endswith('.json')]
+        fin = (line for f in data_files for line in open(os.path.join(args.input, f), 'r', encoding='utf-8'))
+    else:
+        fin = open(args.input, 'r', encoding='utf-8')
 
     if nltk_available and args.split_sentences:
         nltk.download("punkt", quiet=True)
