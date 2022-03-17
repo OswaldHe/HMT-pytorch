@@ -18,6 +18,8 @@
 from abc import ABC
 from abc import abstractmethod
 
+from transformers import AutoTokenizer
+
 from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer
 
@@ -29,6 +31,7 @@ def build_tokenizer(args):
               flush=True)
 
     # Select and instantiate the tokenizer.
+    # todo: add support of _HFAutoTokenizer
     assert args.vocab_file is not None
     if args.tokenizer_type == 'BertWordPieceLowerCase':
         tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
@@ -289,3 +292,52 @@ class _GPT2BPETokenizer(AbstractTokenizer):
     @property
     def eod(self):
         return self.eod_id
+
+
+class _HFAutoTokenizer(AbstractTokenizer):
+    """AutoTokenizer for Hf Pretrained model loading."""
+
+    def __init__(self, tokenizer_name_or_path):
+        name = tokenizer_name_or_path
+        super().__init__(name)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        self.encoder = self.tokenizer.get_vocab()
+        self.decoder = {v: k for k, v in self.encoder.items()}
+
+    @property
+    def vocab_size(self):
+        return self.tokenizer.vocab_size
+
+    @property
+    def vocab(self):
+        return self.encoder
+
+    @property
+    def inv_vocab(self):
+        return self.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def eod(self):
+        return self.tokenizer.eos_token_id
+
+    @property
+    def cls(self):
+        return self.tokenizer.cls_token_id
+
+    @property
+    def sep(self):
+        return self.tokenizer.sep_token_id
+
+    @property
+    def pad(self):
+        return self.tokenizer.pad_token_id
+
+    @property
+    def mask(self):
+        return self.tokenizer.mask_token_id

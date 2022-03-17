@@ -37,7 +37,7 @@ class BertDataset(torch.utils.data.Dataset):
 
     def __init__(self, name, indexed_dataset, data_prefix,
                  num_epochs, max_num_samples, masked_lm_prob,
-                 max_seq_length, short_seq_prob, seed, binary_head):
+                 max_seq_length, short_seq_prob, seed, binary_head, tokenizer=None):
 
         # Params to store.
         self.name = name
@@ -61,7 +61,8 @@ class BertDataset(torch.utils.data.Dataset):
                                                    self.binary_head)
 
         # Vocab stuff.
-        tokenizer = get_tokenizer()
+        if tokenizer is None:
+            tokenizer = get_tokenizer()
         self.vocab_id_list = list(tokenizer.inv_vocab.keys())
         self.vocab_id_to_token_dict = tokenizer.inv_vocab
         self.cls_id = tokenizer.cls

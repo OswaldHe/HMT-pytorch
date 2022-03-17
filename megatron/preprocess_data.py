@@ -114,7 +114,6 @@ def get_args():
     group.add_argument('--append-eod', action='store_true',
                        help='Append an <eod> token to the end of a document.')
 
-
     group = parser.add_argument_group(title='output data')
     group.add_argument('--output-prefix', type=str, required=True,
                        help='Path to binary output file without suffix')
@@ -151,6 +150,7 @@ def main():
         fin = (line for f in data_files for line in open(os.path.join(args.input, f), 'r', encoding='utf-8'))
     else:
         fin = open(args.input, 'r', encoding='utf-8')
+
 
     if nltk_available and args.split_sentences:
         nltk.download("punkt", quiet=True)
