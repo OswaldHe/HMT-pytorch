@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, model, optimizer, train_dataloader, valid_dataloader, args) -> None:
+    def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader,
+                 train_sampler=None, batch_transform_fn=None) -> None:
         """Implements training loop with horovod multi-gpu & apex fp16 support.
 
         Args:
@@ -30,14 +31,17 @@ class Trainer:
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = train_dataloader
+        self.train_sampler = train_sampler
         self.valid_dataloader = valid_dataloader
+        self.batch_transform_fn = batch_transform_fn
 
         self.args = args
 
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
-        self.tb = SummaryWriter(log_dir=self.args.model_path)
+        if hvd.rank() == 0:
+            self.tb = SummaryWriter(log_dir=self.args.model_path)
 
         # move model to gpu
         self.model.cuda()
@@ -64,9 +68,11 @@ class Trainer:
             except ImportError:
                 raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
-                                                             enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl)
+                                                             enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
+                                                             verbosity=int(hvd.rank() == 0))
 
         self.n_iter = 0
+        self.n_epoch = 0
         if self.args.init_checkpoint:
             self.load(args.init_checkpoint)
 
@@ -90,20 +96,16 @@ class Trainer:
         else:
             self.model.eval()
 
+        if self.batch_transform_fn:
+            batch = self.batch_transform_fn(batch)
         for k in batch:
             batch[k] = batch[k].cuda()
 
         batch_loss = 0
         with torch.set_grad_enabled(is_train_mode):
-            for j in range(0, len(batch['inputs']), batch_size):
-                outputs = self.model(input_ids=batch['inputs'][j: j + batch_size],
-                                     attention_mask=batch['inputs_mask'][j: j + batch_size],
-                                     # todo: use decoder_attention mask!
-                                     # it is okay to not use decoder_attention_mask as loss from paddings is ignored
-                                     # and decoder_attention_mask should be zero only for paddings
-                                     # so, anyway padding are ignored.
-                                     # decoder_attention_mask=batch['targets_mask'][j: j + args.batch_size],
-                                     labels=batch['targets'][j: j + batch_size])
+            for j in range(0, len(batch['input_ids']), batch_size):
+                subbatch = {k: batch[k][j: j + batch_size] for k in batch}
+                outputs = self.model(**subbatch)
                 if self.args.fp16 and self.args.apex_opt_lvl == 'O2':
                     loss = outputs['loss']
                 else:
@@ -119,7 +121,7 @@ class Trainer:
                             scaled_loss.backward()
                             # last sub-batch, call synchronize within amp.scale_loss scope
                             # mb move to just above with optimizer.skip_synchronize()
-                            if j == (len(batch['inputs']) // batch_size - 1) * batch_size:
+                            if j == (len(batch['input_ids']) // batch_size - 1) * batch_size:
                                 self.optimizer.synchronize()
                     else:
                         loss.backward()
@@ -142,6 +144,9 @@ class Trainer:
         best_valid_loss = np.inf
         valid_loss = np.nan
         while self.n_iter <= self.args.iters:
+            if self.train_sampler:
+                # to shuffle data in each epoch differently
+                self.train_sampler.set_epoch(self.n_epoch)
             for batch in self.train_dataloader:
                 if self.n_iter > self.args.iters:
                     break
@@ -153,16 +158,12 @@ class Trainer:
                 # logging
                 if self.n_iter % self.args.log_interval == 0:
                     losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
+                    # mean loss over last log_interval iterations
                     mean_loss = np.mean(losses)
+                    losses = []
                     if hvd.rank() == 0:
                         # todo: move logging, move to self.log()
                         logger.info(f'step: {self.n_iter}/{self.args.iters} loss: {mean_loss:.4f}')
-                        pbar.set_postfix({
-                            'train_loss': f'{mean_loss:.3f}',
-                            'valid_loss': f'{valid_loss:.3f}',
-                            'best_valid_loss': f'{best_valid_loss:.3f}'
-                            })
-                        self.tb.add_scalar('loss/train', mean_loss, self.n_iter)
                         self.tb.add_scalar('loss/iterations/train', mean_loss, self.n_iter)
                         self.tb.add_scalar('loss/samples/train', mean_loss, self.n_iter * self.global_batch_size)
                         # log iteration time
@@ -178,7 +179,6 @@ class Trainer:
                                     self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
                                     self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                        self.n_iter * self.global_batch_size)
-                    losses = []
 
                 # validation
                 if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
@@ -195,6 +195,11 @@ class Trainer:
                 self.n_iter += 1
                 if hvd.rank() == 0:
                     pbar.update(1)
+                    pbar.set_postfix({'train_loss': f'{mean_loss:.3f}',
+                                      'valid_loss': f'{valid_loss:.3f}',
+                                      'best_valid_loss': f'{best_valid_loss:.3f}'
+                                      })
+            self.n_epoch += 1
 
         if hvd.rank() == 0:
             pbar.close()
@@ -214,7 +219,6 @@ class Trainer:
         # logging
         if hvd.rank() == 0:
             logger.info(f'valid_loss: {mean_loss:.4f}')
-            self.tb.add_scalar('loss/valid', mean_loss, self.n_iter)
             self.tb.add_scalar('loss/iterations/valid', mean_loss, self.n_iter)
             self.tb.add_scalar('loss/samples/valid', mean_loss, self.n_iter * self.global_batch_size)
         return mean_loss
@@ -235,6 +239,7 @@ class Trainer:
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
         self.n_iter = checkpoint.get('iteration', 0)
+        self.n_epoch = checkpoint.get('epoch', 0)
         if hvd.rank() == 0:
             logger.info(f'Model was loaded from: {self.args.init_checkpoint}')
             logger.info(f'Start iteration = {self.n_iter}')
@@ -249,6 +254,7 @@ class Trainer:
                        "model_state_dict": self.model.state_dict(),
                        "optimizer_state_dict": self.optimizer.state_dict(),
                        "iteration": self.n_iter,
+                       "epoch": self.n_epoch,
                        }
             if self.args.fp16:
                 to_save['amp'] = self.amp.state_dict()
