@@ -15,4 +15,4 @@ datasets==1.1.3
 #t5 repo
 git+https://github.com/google-research/text-to-text-transfer-transformer.git@270714ca16177921f68c660b907d9c7f0ea9ce42
 # install manually according to your setup
-# horovod==0.23.0
+# horovod==0.24.2
