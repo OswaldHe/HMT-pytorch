@@ -34,6 +34,8 @@ from megatron import (
 from megatron.data.blendable_dataset import BlendableDataset
 from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
 
+import horovod.torch as hvd
+
 DSET_TYPE_BERT = 'standard_bert'
 DSET_TYPE_ICT = 'ict'
 DSET_TYPE_T5  = 't5'
@@ -663,8 +665,14 @@ def get_samples_mapping(indexed_dataset,
 
     # Build the indexed mapping if not exist.
     # todo: check if hvd would be used for multigpu
-    is_distributed = torch.distributed.is_initialized()
-    if (not is_distributed or torch.distributed.get_rank() == 0) and \
+    is_distributed = torch.distributed.is_initialized() or hvd.is_initialized()
+    rank = 0
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    elif hvd.is_initialized():
+        rank = hvd.rank()
+
+    if (not is_distributed or rank == 0) and \
        not os.path.isfile(indexmap_filename):
         print(' > WARNING: could not find index map file {}, building '
               'the indices on rank 0 ...'.format(indexmap_filename))
@@ -674,7 +682,7 @@ def get_samples_mapping(indexed_dataset,
         assert indexed_dataset.sizes.dtype == np.int32
 
         # Build samples mapping
-        verbose = (not is_distributed or torch.distributed.get_rank() == 0)
+        verbose = (not is_distributed or rank == 0)
         start_time = time.time()
         print_rank_0(' > building samples index mapping for {} ...'.format(
             name))
@@ -699,7 +707,7 @@ def get_samples_mapping(indexed_dataset,
                      '(seconds): {:4f}'.format(
                          time.time() - start_time))
 
-    if is_distributed:
+    if torch.distributed.is_initialized():
         # This should be a barrier but nccl barrier assumes
         # device_index=rank which is not the case for model
         # parallel case
@@ -709,6 +717,10 @@ def get_samples_mapping(indexed_dataset,
         assert counts[0].item() == (
             torch.distributed.get_world_size() //
             torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
+
+    if hvd.is_initialized():
+        # model parallel is not supported here!
+        hvd.barrier()
 
     # Load indexed dataset.
     print_rank_0(' > loading indexed mapping from {}'.format(

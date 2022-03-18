@@ -37,7 +37,7 @@ class BertDataset(torch.utils.data.Dataset):
 
     def __init__(self, name, indexed_dataset, data_prefix,
                  num_epochs, max_num_samples, masked_lm_prob,
-                 max_seq_length, short_seq_prob, seed, binary_head, tokenizer=None):
+                 max_seq_length, short_seq_prob, seed, binary_head, tokenizer=None, mask_label_id=-1):
 
         # Params to store.
         self.name = name
@@ -69,6 +69,7 @@ class BertDataset(torch.utils.data.Dataset):
         self.sep_id = tokenizer.sep
         self.mask_id = tokenizer.mask
         self.pad_id = tokenizer.pad
+        self.mask_label_id = mask_label_id
 
     def __len__(self):
         return self.samples_mapping.shape[0]
@@ -87,7 +88,7 @@ class BertDataset(torch.utils.data.Dataset):
                                      self.cls_id, self.sep_id,
                                      self.mask_id, self.pad_id,
                                      self.masked_lm_prob, np_rng,
-                                     self.binary_head)
+                                     self.binary_head, self.mask_label_id)
 
 
 
@@ -96,7 +97,7 @@ def build_training_sample(sample,
                           target_seq_length, max_seq_length,
                           vocab_id_list, vocab_id_to_token_dict,
                           cls_id, sep_id, mask_id, pad_id,
-                          masked_lm_prob, np_rng, binary_head):
+                          masked_lm_prob, np_rng, binary_head, mask_label_id=-1):
     """Biuld training sample.
 
     Arguments:
@@ -150,7 +151,7 @@ def build_training_sample(sample,
     # Padding.
     tokens_np, tokentypes_np, labels_np, padding_mask_np, loss_mask_np \
         = pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
-                                   masked_labels, pad_id, max_seq_length)
+                                   masked_labels, pad_id, max_seq_length, mask_label_id)
 
     train_sample = {
         'text': tokens_np,
@@ -164,7 +165,7 @@ def build_training_sample(sample,
 
 
 def pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
-                             masked_labels, pad_id, max_seq_length):
+                             masked_labels, pad_id, max_seq_length, mask_label_id=-1):
     """Pad sequences and convert them to numpy."""
 
     # Some checks.
@@ -184,7 +185,7 @@ def pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
                                dtype=np.int64)
 
     # Lables and loss mask.
-    labels = [-1] * max_seq_length
+    labels = [mask_label_id] * max_seq_length
     loss_mask = [0] * max_seq_length
     for i in range(len(masked_positions)):
         assert masked_positions[i] < num_tokens
