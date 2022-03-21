@@ -31,19 +31,37 @@ def build_tokenizer(args):
               flush=True)
 
     # Select and instantiate the tokenizer.
-    # todo: add support of _HFAutoTokenizer
-    assert args.vocab_file is not None
     if args.tokenizer_type == 'BertWordPieceLowerCase':
+        assert args.vocab_file is not None
         tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
                                             lower_case=True,
                                             vocab_extra_ids=args.vocab_extra_ids)
     elif args.tokenizer_type == 'BertWordPieceCase':
+        assert args.vocab_file is not None
         tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
                                             lower_case=False,
                                             vocab_extra_ids=args.vocab_extra_ids)
     elif args.tokenizer_type == 'GPT2BPETokenizer':
+        assert args.vocab_file is not None
         assert args.merge_file is not None
         tokenizer = _GPT2BPETokenizer(args.vocab_file, args.merge_file)
+    elif args.tokenizer_type == "HFTokenizer":
+        # taken from:
+        # https://github.com/bigscience-workshop/Megatron-DeepSpeed/blob/497aa1bfd3b817ff63e985bd15abe65d1cef45d9/megatron/tokenizer/tokenizer.py#L44
+        assert args.tokenizer_name_or_path is not None
+
+        # prevent transformers from logging info and warnings on each rank
+        import transformers
+        import logging
+        if args.rank == 0:
+            transformers.utils.logging.set_verbosity(logging.INFO)
+        else:
+            # shut the warnings on replicas
+            transformers.utils.logging.set_verbosity(logging.ERROR)
+
+        if args.rank == 0:
+            print("vocab file is un-used. loading tokenizer from pre-trained model")
+        tokenizer = _HFAutoTokenizer(args.tokenizer_name_or_path)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
