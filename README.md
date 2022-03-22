@@ -14,7 +14,7 @@ Depending on your setup just `pip install horovod==0.23.0` might work.
 
 Building Horovod with NCCL for PyTorch:
 ```bash
-HOROVOD_NCCL_HOME=... HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch]==0.23.0 --no-binary=horovod
+HOROVOD_NCCL_HOME=... HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch]==0.24.2 --no-binary=horovod
 ```
 
 Currently, T5 is using `tensorflow==2.6.0` and Horovod started to support tf2.6 since 0.22.1.
