@@ -57,6 +57,8 @@ from transformers.modeling_utils import (
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 
+from utils import get_cls_by_name
+
 
 logger = logging.get_logger(__name__)
 
@@ -233,9 +235,24 @@ class BertSelfAttention(nn.Module):
                 f"heads ({config.num_attention_heads})"
             )
 
+        self.config = config
+        self.is_decoder = config.is_decoder
+        self.max_seq_len = config.max_position_embeddings
+
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        # sparse attention configuration
+        self.is_sparse = False
+        sparse_config_cls_name = getattr(config, 'sparse_config_cls', None)
+        if sparse_config_cls_name:
+            self.is_sparse = True
+            sparse_config_cls = get_cls_by_name(sparse_config_cls_name)
+            self.sparse_config = sparse_config_cls(**self.config.sparse_attention)
+
+        if self.is_decoder and self.is_sparse:
+            raise RuntimeError('SparseAttention with BertModel decoder is not currently supported!')
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
@@ -246,11 +263,19 @@ class BertSelfAttention(nn.Module):
         self.position_embedding_type = position_embedding_type or getattr(
             config, "position_embedding_type", "absolute"
         )
+
+        if self.is_sparse and self.position_embedding_type != 'absolute':
+            raise RuntimeError(f'SparseAttention supports only `absolute` position embeddings currently: '
+                               f'position_embeddings_type = {self.position_embedding_type}')
+
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
-            self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
+            self.max_seq_len = 2 * config.max_position_embeddings
+            self.distance_embedding = nn.Embedding(self.max_distance - 1, self.attention_head_size)
 
-        self.is_decoder = config.is_decoder
+        if self.is_sparse:
+            from deepspeed.ops.sparse_attention import SparseSelfAttention
+            self.sparse_self_attention = SparseSelfAttention(self.sparse_config, max_seq_length=self.max_seq_len)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -310,47 +335,61 @@ class BertSelfAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer)
+        if not self.is_sparse:
+            # Take the dot product between "query" and "key" to get the raw attention scores.
+            attention_scores = torch.matmul(query_layer, key_layer)
 
-        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            seq_length = hidden_states.size()[1]
-            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
-            distance = position_ids_l - position_ids_r
-            positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
-            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
+            if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+                seq_length = hidden_states.size()[1]
+                position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+                position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+                distance = position_ids_l - position_ids_r
+                positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
+                positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
 
-            # https://arxiv.org/abs/2009.13658
-            if self.position_embedding_type == "relative_key":
-                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                attention_scores = attention_scores + relative_position_scores
-            elif self.position_embedding_type == "relative_key_query":
-                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                relative_position_scores_key = torch.einsum("bhdr,lrd->bhlr", key_layer, positional_embedding)
-                attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+                # https://arxiv.org/abs/2009.13658
+                if self.position_embedding_type == "relative_key":
+                    relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                    attention_scores = attention_scores + relative_position_scores
+                elif self.position_embedding_type == "relative_key_query":
+                    relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                    relative_position_scores_key = torch.einsum("bhdr,lrd->bhlr", key_layer, positional_embedding)
+                    attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
 
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        if attention_mask is not None:
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-            attention_scores = attention_scores + attention_mask
+            attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+            if attention_mask is not None:
+                # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+                attention_scores = attention_scores + attention_mask
 
-        # Normalize the attention scores to probabilities.
-        attention_probs = self.softmax(attention_scores)
+            # Normalize the attention scores to probabilities.
+            attention_probs = self.softmax(attention_scores)
 
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
+            # This is actually dropping out entire tokens to attend to, which might
+            # seem a bit unusual, but is taken from the original Transformer paper.
+            attention_probs = self.dropout(attention_probs)
 
-        # Mask heads if we want to
-        if head_mask is not None:
-            attention_probs = attention_probs * head_mask
+            # Mask heads if we want to
+            if head_mask is not None:
+                attention_probs = attention_probs * head_mask
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+            context_layer = torch.matmul(attention_probs, value_layer)
+        else:
+            # sparse attention
+            # todo: return attention_probs, support t5 relative position embds
+            # todo: support relative_key -> need to change einsum with sparse operators..
+            # sparse attention supports masks with following shapes
+            # key_padding_mask: (bs x seq_len) or (bs x 1 x 1 x seq_len)
+            # attention_mask: seq_len x seq_len or (1 x 1 x seq_len x seq_len)
+            context_layer = self.sparse_self_attention(query_layer, key_layer, value_layer, rpe=None,
+                                                       key_padding_mask=attention_mask)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
+
+        if self.is_sparse and output_attentions:
+            # todo: return sparse attention_scores or None, to not break the run
+            raise RuntimeError(f'SparseAttention does not support output_attention = {output_attentions}')
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
@@ -362,7 +401,7 @@ class BertSelfAttention(nn.Module):
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.pre_layer_norm = config.pre_layer_norm
+        self.pre_layer_norm = getattr(config, 'pre_layer_norm', False)
         self.bert_output_layer = True
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -444,7 +483,7 @@ class BertIntermediate(nn.Module):
 class BertOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.pre_layer_norm = config.pre_layer_norm
+        self.pre_layer_norm = getattr(config, 'pre_layer_norm', False)
         self.bert_output_layer = True
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -464,7 +503,7 @@ class BertLayer(nn.Module):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.pre_layer_norm = config.pre_layer_norm
+        self.pre_layer_norm = getattr(config, 'pre_layer_norm', False)
         if self.pre_layer_norm:
             self.pre_attention_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
             self.post_attention_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -893,6 +932,15 @@ class BertModel(BertPreTrainedModel):
         super().__init__(config)
         self.config = config
 
+        if hasattr(config, 'sparse_attention'):
+            self.is_sparse = True
+            self.sparse_block_size = self.config.sparse_attention['block']
+        else:
+            self.is_sparse = False
+
+        if self.is_sparse and self.config.is_decoder:
+            raise RuntimeError('SparseAttention with BertModel decoder is not currently supported!')
+
         self.embeddings = BertEmbeddings(config)
         self.encoder = BertEncoder(config)
 
@@ -980,6 +1028,11 @@ class BertModel(BertPreTrainedModel):
 
         batch_size, seq_length = input_shape
         device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        # if sparse attention is used, input sequence length should be divisible by block size
+        if self.is_sparse and seq_length % self.sparse_block_size != 0:
+            raise RuntimeError(f'BertModel with sparse attention is used, but seq_len = {seq_length} '
+                               f'is not divisible by block_size = {self.sparse_block_size}')
 
         # past_key_values_length
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
