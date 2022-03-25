@@ -182,3 +182,34 @@ e.g. for DP config
         "warmup_init": false
 }
 ```
+
+## Sparse Attention
+BERT model training supports sparse attentions from DeepSpeed. 
+
+DeepSpeed Sparse attention docpage -- https://www.deepspeed.ai/tutorials/sparse-attention.
+### Install DeepSpeed
+DeepSpeed Sparse attention supports only GPUs with compute compatibility >= 7 (V100, T4, A100), CUDA 10.1, 10.2, 11.0, or 11.1 and runs only in FP16 mode (as of DeepSpeed 0.6.0).
+```bash
+pip install triton==1.0.0
+DS_BUILD_SPARSE_ATTN=1 pip install deepspeed==0.6.0 --global-option="build_ext" --global-option="-j8" --no-cache
+```
+and check installation with
+```bash
+ds_report
+```
+### Configure Sparse Attention
+SparseAttention parameters are passed to the model with HF model configuration file:
+```json
+...
+"sparse_config_cls": "deepspeed.ops.sparse_attention:BigBirdSparsityConfig",
+"sparse_attention": {
+  "num_heads": 12,
+  "block": 16,
+  "different_layout_per_head": true,
+  "num_sliding_window_blocks": 1,
+  "num_global_blocks": 1,
+  "num_random_blocks": 1
+}
+...
+```
+You can also check `bert_base_uncased-4L_sparse.json` config example in `bert_configs` folder.
