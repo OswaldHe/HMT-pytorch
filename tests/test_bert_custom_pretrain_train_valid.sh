@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CUDA_VISIBLE_DEVICES=1,2 NP=2 ./test_custom_bert_pretrain_train_valid.sh
+# CUDA_VISIBLE_DEVICES=1,2 NP=2 ./test_bert_custom_pretrain_train_valid.sh
 set -e
 cd ..
 
