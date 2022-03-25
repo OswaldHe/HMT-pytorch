@@ -167,6 +167,7 @@ def build_training_sample(sample,
 def pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
                              masked_labels, pad_id, max_seq_length, mask_label_id=-1):
     """Pad sequences and convert them to numpy."""
+    # todo: optionally pad to make seq_len divisible by block_size
 
     # Some checks.
     num_tokens = len(tokens)
