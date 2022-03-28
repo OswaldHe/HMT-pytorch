@@ -10,7 +10,7 @@ horovodrun --gloo -np $NP python run_bert_pretraining.py \
 --model_path ./tests/runs/test_bert_pretrain \
 --batch_size 16 --gradient_accumulation_steps 2 \
 --data_n_epochs 1 --lr 3e-04 --save_best --iters 100 --log_interval 25 --save_interval 50 --valid_interval 50 \
---fp16
+--fp16 --apex_opt_lvl O2
 echo "run_bert_pretraining.py done"
 echo "cleaning..."
 rm -rf ./tests/runs/test_bert_pretrain

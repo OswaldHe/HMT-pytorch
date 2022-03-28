@@ -106,7 +106,7 @@ class Trainer:
             for j in range(0, len(batch['input_ids']), batch_size):
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
                 outputs = self.model(**subbatch)
-                if self.args.fp16 and self.args.apex_opt_lvl == 'O2':
+                if self.args.fp16 and self.args.apex_opt_lvl in ['O2', 'O3']:
                     loss = outputs['loss']
                 else:
                     loss = outputs.loss
