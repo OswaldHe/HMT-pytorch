@@ -172,7 +172,8 @@ class BertEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        if config.position_embedding_type == 'absolute':
+            self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
@@ -227,7 +228,15 @@ class BertEmbeddings(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, has_relative_attention_bias=False):
+        """Bert self-attention with abs/relative position encodings and sparsity.
+
+        Args:
+            config: HF model configuration loaded from json
+            position_embedding_type (str, optional): absolute, relative_key, relative_key_query or
+                relative_attention_bias . Defaults to None.
+            has_relative_attention_bias (bool, optional): Use it's own relative embeddings matrix. Defaults to False.
+        """
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -237,6 +246,7 @@ class BertSelfAttention(nn.Module):
 
         self.config = config
         self.is_decoder = config.is_decoder
+        # max_seq_len is used in absolute, relative_key & relative_key_query and to pre-define sparsity layout
         self.max_seq_len = config.max_position_embeddings
 
         self.num_attention_heads = config.num_attention_heads
@@ -260,18 +270,25 @@ class BertSelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.softmax = nn.Softmax(dim=-1)
-        self.position_embedding_type = position_embedding_type or getattr(
-            config, "position_embedding_type", "absolute"
-        )
+        self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
+        self.has_relative_attention_bias = has_relative_attention_bias
 
-        if self.is_sparse and self.position_embedding_type != 'absolute':
-            raise RuntimeError(f'SparseAttention supports only `absolute` position embeddings currently: '
-                               f'position_embeddings_type = {self.position_embedding_type}')
+        if self.is_sparse and self.position_embedding_type not in ['absolute', 'relative_attention_bias']:
+            raise RuntimeError(f'SparseAttention supports `absolute` and `relative_attention_bias` position embeddings '
+                               f'currently: position_embeddings_type = {self.position_embedding_type}')
+
+        if self.is_decoder and self.position_embedding_type == 'relative_attention_bias':
+            raise RuntimeError(f'BertSelfAttention does not support `relative_attention_bias` with `is_decoder` '
+                               f' = {self.is_decoder}')
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
             self.max_seq_len = 2 * config.max_position_embeddings
             self.distance_embedding = nn.Embedding(self.max_distance - 1, self.attention_head_size)
+        elif self.position_embedding_type == 'relative_attention_bias' and self.has_relative_attention_bias:
+            self.relative_attention_num_buckets = self.config.relative_attention_num_buckets
+            self.relative_last_bucket_distance = self.config.relative_last_bucket_distance
+            self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.num_attention_heads)
 
         if self.is_sparse:
             from deepspeed.ops.sparse_attention import SparseSelfAttention
@@ -288,6 +305,78 @@ class BertSelfAttention(nn.Module):
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 3, 1)
 
+    @staticmethod
+    def _relative_position_bucket(relative_position, bidirectional=True, num_buckets=32, max_distance=128):
+        """
+        Adapted from Mesh Tensorflow:
+        https://github.com/tensorflow/mesh/blob/0cb87fe07da627bf0b7e60475d59f95ed6b5be3d/mesh_tensorflow/transformer/transformer_layers.py#L593
+
+        #todo: refactor, the same code is used in modeling_t5
+
+        Translate relative position to a bucket number for relative attention. The relative position is defined as
+        memory_position - query_position, i.e. the distance in tokens from the attending position to the attended-to
+        position. If bidirectional=False, then positive relative positions are invalid. We use smaller buckets for
+        small absolute relative_position and larger buckets for larger absolute relative_positions. All relative
+        positions >=max_distance map to the same bucket. All relative positions <=-max_distance map to the same bucket.
+        This should allow for more graceful generalization to longer sequences than the model has been trained on
+
+        Args:
+            relative_position: an int32 Tensor
+            bidirectional: a boolean - whether the attention is bidirectional
+            num_buckets: an integer
+            max_distance: an integer
+
+        Returns:
+            a Tensor with the same shape as relative_position, containing int32 values in the range [0, num_buckets)
+        """
+        relative_buckets = 0
+        if bidirectional:
+            num_buckets //= 2
+            relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
+            relative_position = torch.abs(relative_position)
+        else:
+            relative_position = -torch.min(relative_position, torch.zeros_like(relative_position))
+        # now relative_position is in the range [0, inf)
+
+        # half of the buckets are for exact increments in positions
+        max_exact = num_buckets // 2
+        is_small = relative_position < max_exact
+
+        # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
+        relative_postion_if_large = max_exact + (
+            torch.log(relative_position.float() / max_exact)
+            / math.log(max_distance / max_exact)
+            * (num_buckets - max_exact)
+        ).to(torch.long)
+        relative_postion_if_large = torch.min(
+            relative_postion_if_large, torch.full_like(relative_postion_if_large, num_buckets - 1)
+        )
+
+        relative_buckets += torch.where(is_small, relative_position, relative_postion_if_large)
+        return relative_buckets
+
+    def compute_bias(self, query_length, key_length):
+        """ Compute binned relative position bias """
+        context_position = torch.arange(query_length, dtype=torch.long)[:, None]
+        memory_position = torch.arange(key_length, dtype=torch.long)[None, :]
+        relative_position = memory_position - context_position  # shape (query_length, key_length)
+        relative_position_bucket = self._relative_position_bucket(
+            relative_position,  # shape (query_length, key_length)
+            bidirectional=(not self.is_decoder),
+            num_buckets=self.relative_attention_num_buckets,
+            max_distance=self.relative_last_bucket_distance,
+        )
+        relative_position_bucket = relative_position_bucket.to(self.relative_attention_bias.weight.device)
+        values = self.relative_attention_bias(relative_position_bucket)  # shape (query_length, key_length, num_heads)
+        values = values.permute([2, 0, 1]).unsqueeze(0)  # shape (1, num_heads, query_length, key_length)
+        return values
+
+    def get_relative_attention_bias(self, position_bias, batch_size, query_length, key_length):
+        if position_bias is None and self.has_relative_attention_bias:
+            position_bias = self.compute_bias(query_length, key_length)
+            position_bias = position_bias.repeat(batch_size, 1, 1, 1)
+        return position_bias
+
     def forward(
         self,
         hidden_states,
@@ -296,6 +385,7 @@ class BertSelfAttention(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         past_key_value=None,
+        position_bias=None,
         output_attentions=False,
     ):
         mixed_query_layer = self.query(hidden_states)
@@ -339,7 +429,7 @@ class BertSelfAttention(nn.Module):
             # Take the dot product between "query" and "key" to get the raw attention scores.
             attention_scores = torch.matmul(query_layer, key_layer)
 
-            if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+            if self.position_embedding_type in ["relative_key", "relative_key_query"]:
                 seq_length = hidden_states.size()[1]
                 position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
                 position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
@@ -355,6 +445,10 @@ class BertSelfAttention(nn.Module):
                     relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
                     relative_position_scores_key = torch.einsum("bhdr,lrd->bhlr", key_layer, positional_embedding)
                     attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+                elif self.position_embedding_type == 'relative_attention_bias':
+                    bs, seq_len, _ = hidden_states.shape
+                    position_bias = self.get_relative_attention_bias(position_bias, bs, seq_len, seq_len)
+                    attention_scores = attention_scores + position_bias
 
             attention_scores = attention_scores / math.sqrt(self.attention_head_size)
             if attention_mask is not None:
@@ -375,12 +469,16 @@ class BertSelfAttention(nn.Module):
             context_layer = torch.matmul(attention_probs, value_layer)
         else:
             # sparse attention
-            # todo: return attention_probs, support t5 relative position embds
+            # todo: return attention_probs
             # todo: support relative_key -> need to change einsum with sparse operators..
-            # sparse attention supports masks with following shapes
+            # sparse attention supports masks with following shapes:
             # key_padding_mask: (bs x seq_len) or (bs x 1 x 1 x seq_len)
             # attention_mask: seq_len x seq_len or (1 x 1 x seq_len x seq_len)
-            context_layer = self.sparse_self_attention(query_layer, key_layer, value_layer, rpe=None,
+            if self.position_embedding_type == 'relative_attention_bias':
+                bs, seq_len, _ = hidden_states.shape
+                position_bias = self.get_relative_attention_bias(position_bias, bs, seq_len, seq_len)
+
+            context_layer = self.sparse_self_attention(query_layer, key_layer, value_layer, rpe=position_bias,
                                                        key_padding_mask=attention_mask)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
@@ -392,6 +490,9 @@ class BertSelfAttention(nn.Module):
             raise RuntimeError(f'SparseAttention does not support output_attention = {output_attentions}')
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+
+        if self.position_embedding_type == 'relative_attention_bias':
+            outputs = outputs + (position_bias,)
 
         if self.is_decoder:
             outputs = outputs + (past_key_value,)
@@ -417,9 +518,10 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, has_relative_attention_bias=False):
         super().__init__()
-        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
+        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type,
+                                      has_relative_attention_bias=has_relative_attention_bias)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
 
@@ -449,6 +551,7 @@ class BertAttention(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         past_key_value=None,
+        position_bias=None,
         output_attentions=False,
     ):
         self_outputs = self.self(
@@ -458,6 +561,7 @@ class BertAttention(nn.Module):
             encoder_hidden_states,
             encoder_attention_mask,
             past_key_value,
+            position_bias,
             output_attentions,
         )
         attention_output = self.output(self_outputs[0], hidden_states)
@@ -499,7 +603,7 @@ class BertOutput(nn.Module):
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
@@ -507,7 +611,7 @@ class BertLayer(nn.Module):
         if self.pre_layer_norm:
             self.pre_attention_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
             self.post_attention_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.attention = BertAttention(config)
+        self.attention = BertAttention(config, has_relative_attention_bias=has_relative_attention_bias)
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
@@ -525,6 +629,7 @@ class BertLayer(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         past_key_value=None,
+        position_bias=None,
         output_attentions=False,
     ):
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
@@ -533,6 +638,7 @@ class BertLayer(nn.Module):
             hidden_states if not self.pre_layer_norm else self.pre_attention_ln(hidden_states),
             attention_mask,
             head_mask,
+            position_bias=position_bias,
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
         )
@@ -561,6 +667,7 @@ class BertLayer(nn.Module):
                 encoder_hidden_states,
                 encoder_attention_mask,
                 cross_attn_past_key_value,
+                position_bias,
                 output_attentions,
             )
             attention_output = cross_attention_outputs[0]
@@ -598,7 +705,9 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList(
+                [BertLayer(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_hidden_layers)]
+            )
         self.gradient_checkpointing = False
 
     def forward(
@@ -617,6 +726,7 @@ class BertEncoder(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+        position_bias = None
 
         next_decoder_cache = () if use_cache else None
         for i, layer_module in enumerate(self.layer):
@@ -636,7 +746,7 @@ class BertEncoder(nn.Module):
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs, past_key_value, output_attentions)
+                        return module(*inputs, past_key_value, position_bias, output_attentions)
 
                     return custom_forward
 
@@ -656,6 +766,7 @@ class BertEncoder(nn.Module):
                     encoder_hidden_states,
                     encoder_attention_mask,
                     past_key_value,
+                    position_bias,
                     output_attentions,
                 )
 
@@ -666,6 +777,12 @@ class BertEncoder(nn.Module):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+
+            if self.config.position_embedding_type == 'relative_attention_bias':
+                if not output_attentions:
+                    position_bias = layer_outputs[1]
+                else:
+                    position_bias = layer_outputs[2]
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
