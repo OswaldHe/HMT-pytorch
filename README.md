@@ -1,27 +1,70 @@
 # t5-experiments
+This repo is based on 🤗 Transfomers implementation of the T5 model and BERT.
+T5 data processing pipeline is used from the original [T5 repository](https://github.com/google-research/text-to-text-transfer-transformer) for pre-training (span corruption, prefix-lm) and fine-tuning. BERT data processing pipeline is used from [Megatron-LM](https://github.com/NVIDIA/Megatron-LM).
+
+Multi-gpu and multi-node training with Horovod is supported. APEX is used for FP16 and mixed-precision training. Sparse Attention from [DeepSpeed](https://www.deepspeed.ai/tutorials/sparse-attention/) is used.
+
+BERT model supports such additional features as pre-attention layer norm, sparse attention, relative position embeddings.
+
+T5 and BERT pre-training is implemented in `run_(model_type)_pretraining.py` scripts.
 
 ## Install requirements
-This repo is based on 🤗 Transfomers implementation of the T5 model.
-Data processing pipeline is used from the original [T5 repository](https://github.com/google-research/text-to-text-transfer-transformer) in all settings. Horovod is used for multi-gpu and multi-node training. DeepPavlov library is used for running and tracking fine-tuning experiments and evalutaion.
-
 Install requirements after cloning the repo:
 ```bash
 grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
 ```
+Currenty, T5 text-to-text installation might install tf2.8.0+, downgrade TF related packages with:
+```bash
+pip install tensorflow==2.6.0 tensorflow-estimator==2.6.0 tensorflow-text==2.6.0 tensorflow-io-gcs-filesystem==0.21.0 keras==2.6.0
+```
+> todo: reorder reqs in requirements.txt.
 
 ###  Install Horovod
-Depending on your setup just `pip install horovod==0.23.0` might work.
+Depending on your setup just `pip install horovod==0.24.2` might work.
 
 Building Horovod with NCCL for PyTorch:
 ```bash
 HOROVOD_NCCL_HOME=... HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch]==0.24.2 --no-binary=horovod
 ```
-
-Currently, T5 is using `tensorflow==2.6.0` and Horovod started to support tf2.6 since 0.22.1.
+check installation with
+```bash
+horovodrun --check-build
+```
 
 For further details check Horovod documentation: https://horovod.readthedocs.io/en/stable/install_include.html
 
-## Pre-training
+### Install APEX
+Install APEX https://github.com/NVIDIA/apex#quick-start
+```
+git clone https://github.com/NVIDIA/apex
+cd apex
+pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+```
+
+apex.amp is moved to torch.cuda.amp https://github.com/NVIDIA/apex/issues/818, but:
+
+speed: `APEX O1` < `torch.cuda.amp` < `APEX O2`
+
+resources (unordered):
+ - https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html
+ - https://pytorch.org/docs/stable/notes/amp_examples.html
+ - https://spell.ml/blog/mixed-precision-training-with-pytorch-Xuk7YBEAACAASJam
+ - https://pytorch.org/blog/accelerating-training-on-nvidia-gpus-with-pytorch-automatic-mixed-precision/
+ - https://github.com/horovod/horovod/issues/1089
+ - https://github.com/NVIDIA/apex/issues/818
+
+### Install DeepSpeed
+DeepSpeed Sparse attention supports only GPUs with compute compatibility >= 7 (V100, T4, A100), CUDA 10.1, 10.2, 11.0, or 11.1 and runs only in FP16 mode (as of DeepSpeed 0.6.0).
+```bash
+pip install triton==1.0.0
+DS_BUILD_SPARSE_ATTN=1 pip install deepspeed==0.6.0 --global-option="build_ext" --global-option="-j8" --no-cache
+```
+and check installation with
+```bash
+ds_report
+```
+
+## T5 Pre-training
 ### T5-small baseline
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraining.py \
@@ -59,7 +102,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3; horovodrun --gloo -np 4 python run_t5_pretr
         --init_checkpoint ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh/model_150000.pth
 ```
 
-## Fine-tuning with DeepPavlov
+## T5 Fine-tuning with DeepPavlov
 `python -m deeppavlov train config_name`
 
 Gradient accumulation for `dp:T5Text2TextModel`, e.g.:
@@ -140,27 +183,10 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; python evaluate_model.py single \
         --lr 5e-05
 ```
 
-## FP16
-Install APEX https://github.com/NVIDIA/apex#quick-start
-```
-git clone https://github.com/NVIDIA/apex
-cd apex
-pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
-```
+## BERT pretraining
+Data preprocessing [readme](megatron/README.md)
 
-apex.amp is moved to torch.cuda.amp https://github.com/NVIDIA/apex/issues/818, but:
-
-speed: `APEX O1` < `torch.cuda.amp` < `APEX O2`
-
-resources (unordered):
- - https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html
- - https://pytorch.org/docs/stable/notes/amp_examples.html
- - https://spell.ml/blog/mixed-precision-training-with-pytorch-Xuk7YBEAACAASJam
- - https://pytorch.org/blog/accelerating-training-on-nvidia-gpus-with-pytorch-automatic-mixed-precision/
- - https://github.com/horovod/horovod/issues/1089
- - https://github.com/NVIDIA/apex/issues/818
-
-### FP16 for t5 pretraining
+## FP16 for pretraining
 add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
 
 ## Adafactor optimizer
@@ -187,20 +213,10 @@ e.g. for DP config
 BERT model training supports sparse attentions from DeepSpeed. 
 
 DeepSpeed Sparse attention docpage -- https://www.deepspeed.ai/tutorials/sparse-attention.
-### Install DeepSpeed
-DeepSpeed Sparse attention supports only GPUs with compute compatibility >= 7 (V100, T4, A100), CUDA 10.1, 10.2, 11.0, or 11.1 and runs only in FP16 mode (as of DeepSpeed 0.6.0).
-```bash
-pip install triton==1.0.0
-DS_BUILD_SPARSE_ATTN=1 pip install deepspeed==0.6.0 --global-option="build_ext" --global-option="-j8" --no-cache
-```
-and check installation with
-```bash
-ds_report
-```
+
 ### Configure Sparse Attention
 SparseAttention parameters are passed to the model with HF model configuration file:
 ```json
-...
 "sparse_config_cls": "deepspeed.ops.sparse_attention:BigBirdSparsityConfig",
 "sparse_attention": {
   "num_heads": 12,
@@ -210,6 +226,5 @@ SparseAttention parameters are passed to the model with HF model configuration f
   "num_global_blocks": 1,
   "num_random_blocks": 1
 }
-...
 ```
 You can also check `bert_base_uncased-4L_sparse.json` config example in `bert_configs` folder.
