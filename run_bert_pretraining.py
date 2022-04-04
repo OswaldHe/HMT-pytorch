@@ -4,14 +4,15 @@ import logging
 import os
 from pathlib import Path
 
-import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
-from t5.seqio.dataset_providers import ShardInfo
+from megatron.data.dataset_utils import get_indexed_dataset_
+from megatron.data.bert_dataset import BertDataset
+from megatron.tokenizer.tokenizer import _HFAutoTokenizer
+
 import horovod.torch as hvd
 from dotenv import load_dotenv
-import tensorflow.compat.v1 as tf
 import torch
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
 from trainer import Trainer
 
@@ -32,27 +33,20 @@ logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
 hvd.init()
 
 import transformers  # noqa: E402
-from transformers import T5Config, T5Tokenizer  # noqa: E402
+from transformers import AutoConfig  # noqa: E402
 
-from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
 from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
 import optimizers  # noqa: E402
 
-tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
-# limit cpu threads for tf
-# tf.config.threading.set_intra_op_parallelism_threads(1)
-# tf.config.threading.set_inter_op_parallelism_threads(1)
-
-# limit # of CPU threads to be used per pytorch worker, otherwise it will use all cpus and throttle gpus
+# limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
 torch.set_num_threads(4)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 torch.cuda.set_device(hvd.local_rank())
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
-parser.add_argument('--data_path', type=str, help='path with the sharded data in jsonl format')
-parser.add_argument('--valid_data_path', type=str, help='path with the sharded data in jsonl format for validation')
+parser.add_argument('--data_path', type=str, help='path with the indexed data in bin format')
+parser.add_argument('--valid_data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--valid_interval', type=int, default=None,
@@ -62,23 +56,33 @@ parser.add_argument('--save_best', action='store_true', default=False,
                     help='Save best checkpoint if validation set is provided.')
 parser.add_argument('--working_dir', type=str, default='.',
                     help='working dir, should be a dir with t5-experiments repo (default: .)')
+parser.add_argument('--seed', type=int, default=42, help='random seed')
+
+# bert data args
+parser.add_argument('--data_impl', type=str, default='mmap', choices=['lazy', 'cached', 'mmap'],
+                    help='type of dataset produced by preprocess_data.py')
+parser.add_argument('--data_name', type=str, default='', help='used to save/load samples mapping .npy index')
+parser.add_argument('--data_n_epochs', type=int, default=None, help='pre-generate samples for data_epochs')
+parser.add_argument('--data_n_samples', type=int, default=None, help='pre-generate data_n_samples')
+parser.add_argument('--data_skip_warmup', action='store_true', default=False,
+                    help='skip dataset warmup (default: False)')
+parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
+parser.add_argument('--mlm_prob', type=float, default=0.15, help='MLM task prob (default: 0.15)')
+parser.add_argument('--short_seq_prob', type=float, default=0.1, help='short sequence prob (default: 0.1)')
+parser.add_argument('--use_nsp', type=int, default=1, help='use next sentence prediction task (default: 1)')
+parser.add_argument('--data_n_workers', type=int, default=2, help='number of dataloader workers (default: 2)')
 
 # model args
-parser.add_argument('--base_model', type=str, default='t5-base',
-                    help='base model name (from huggingface) (default: t5-base)')
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: None)')
-parser.add_argument('--model_cls', type=str, default='transformers:T5ForConditionalGeneration',
-                    help='model class name to use (default: transformers:T5ForConditionalGeneration)')
-
+parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
+                    help='model class name to use (default: transformers:BertForPreTraining)')
 parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
-parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
-parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
-parser.add_argument('--vocab', type=str, default='./vocabs/sentencepiece.model',
-                    help='path to vocabulary file with sentencepiece model (default: ./vocabs/sentencepiece.model)')
+
+# tokenizer
+# todo: add wordpiece tokenizers support?
+parser.add_argument('--tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
 
 # training args
-parser.add_argument('--task', type=str, default='span_corruption',
-                    help='t5 task name, e.g. `span_corruption`, `prefix_lm`. (default: span_corruption)')
 parser.add_argument('--lr', type=float, default=None, help='learning rate (default: None)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
 parser.add_argument('--iters', type=int, default=100,
@@ -99,25 +103,15 @@ parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
 if __name__ == '__main__':
-    # run with horovod:
-    # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
     args = parser.parse_args()
     # set current working dir
-    # todo: maybe take path to run_t5_pretraining.py?
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
     os.chdir(args.working_dir)
     if hvd.rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
 
-    kwargs = {'pin_memory': True}
-    # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
-    # issues with Infiniband implementations that are not fork-safe
-    if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
-            mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
-        kwargs['multiprocessing_context'] = 'forkserver'
-
-    # create model_path and save configuration
+    # create model path and save configuration
     if hvd.rank() == 0:
         model_path = Path(args.model_path)
         if not model_path.exists():
@@ -126,40 +120,47 @@ if __name__ == '__main__':
         # todo: if model path exists and there is config file, write new config file aside
         json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
 
-    # get train dataset shards
+    tokenizer = _HFAutoTokenizer(args.tokenizer)
+    # get train dataset
+    if hvd.rank() == 0:
+        logger.info(f'preparing training data from: {args.data_path}')
     data_path = Path(args.data_path).expanduser().absolute()
-    shards = list(sorted([sh.name for sh in data_path.glob('*.jsonl')]))
-    # split shards across workers, drop remainders
-    shards_per_worker = len(shards) // hvd.size()
-    shards = shards[hvd.rank() * shards_per_worker:(hvd.rank() + 1) * shards_per_worker]
-    logger.info(f'worker {hvd.rank()} shards: {shards}')
-    # absolute path to shards
-    shards = [str(data_path / sh) for sh in shards]
+    train_data_index = get_indexed_dataset_(str(data_path), args.data_impl, skip_warmup=args.data_skip_warmup)
+
+    train_dataset = BertDataset(indexed_dataset=train_data_index, masked_lm_prob=args.mlm_prob,
+                                short_seq_prob=args.short_seq_prob, binary_head=args.use_nsp, tokenizer=tokenizer,
+                                name=args.data_name, data_prefix=str(data_path),
+                                num_epochs=args.data_n_epochs, max_num_samples=args.data_n_samples,
+                                max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed,
+                                )
+    # shuffle train data each epoch (one loop over train_dataset) & drop last batch
+    train_sampler = DistributedSampler(train_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=True,
+                                       drop_last=True, seed=args.seed)
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
     global_batch_size = per_worker_batch_size * hvd.size()
-
-    train_data = T5PretrainingDataset(shards, task=args.task, batch_size=per_worker_batch_size,
-                                      text_preprocessor=jsonl_preprocessor,
-                                      inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
-                                      vocab_path=args.vocab)
-    # fails to work if num_workes > 0 cause we are using tf.datasets
-    train_dataloader = DataLoader(train_data, num_workers=0, batch_size=None, **kwargs)
-
+    kwargs = {'pin_memory': True}
+    # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
+    # issues with Infiniband implementations that are not fork-safe
+    if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
+            mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
+        kwargs['multiprocessing_context'] = 'forkserver'
+    train_dataloader = DataLoader(train_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
+                                  sampler=train_sampler, **kwargs)
     # get validation dataset
     if args.valid_data_path:
+        if hvd.rank() == 0:
+            logger.info(f'preparing validation data from: {args.valid_data_path}')
         valid_data_path = Path(args.valid_data_path).expanduser().absolute()
-        valid_shards = list(sorted([sh.name for sh in valid_data_path.glob('*.jsonl')]))
-        # split shards across workers, drop remainders
-        logger.info(f'worker {hvd.rank()} validation shards: {valid_shards}')
-        # absolute path to shards
-        valid_shards = [str(valid_data_path / sh) for sh in valid_shards]
-        valid_data = T5PretrainingDataset(valid_shards, task=args.task, batch_size=per_worker_batch_size,
-                                          text_preprocessor=jsonl_preprocessor,
-                                          inputs_len=args.input_seq_len, targets_len=args.target_seq_len,
-                                          vocab_path=args.vocab,
-                                          shard_info=ShardInfo(index=hvd.rank(), num_shards=hvd.size()))
-        valid_dataloader = DataLoader(valid_data, num_workers=0, batch_size=None, **kwargs)
+        valid_data_index = get_indexed_dataset_(str(valid_data_path), args.data_impl, skip_warmup=args.data_skip_warmup)
+        valid_dataset = BertDataset(indexed_dataset=valid_data_index, masked_lm_prob=args.mlm_prob,
+                                    short_seq_prob=args.short_seq_prob, binary_head=args.use_nsp, tokenizer=tokenizer,
+                                    name=args.data_name, data_prefix=str(valid_data_path),
+                                    num_epochs=1, max_num_samples=None,  # take all validation data
+                                    max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed)
+        valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
+        valid_dataloader = DataLoader(valid_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
+                                      sampler=valid_sampler, **kwargs)
         if args.valid_interval is None:
             args.valid_interval = args.log_interval
     else:
@@ -168,21 +169,12 @@ if __name__ == '__main__':
             logger.info('No validation data is used.')
 
     # define model
-    if not args.model_cfg:
-        t5config = T5Config.from_pretrained(args.base_model)
-    else:
-        t5config = T5Config.from_json_file(args.model_cfg)
-        # todo: get tokenizer from config
-        logger.warning(f'Model configuration was taken from {args.model_cfg}, but tokenizer from {args.base_model}')
-    # define tokenizer
-    t5_default_tokenizer = T5Tokenizer.from_pretrained(args.base_model)
-    if hvd.rank() == 0:
-        assert_vocabs(t5_default_tokenizer, args.vocab)
-
-    model_cls = get_cls_by_name(args.model_cls)  # transfomers:T5ForConditionalGeneration or modeling_t5:my_class
+    model_cfg = AutoConfig.from_pretrained(args.model_cfg)
+    # todo: get model class from model_cfg?
+    model_cls = get_cls_by_name(args.model_cls)
     if hvd.rank() == 0:
         logger.info(f'Using model class: {model_cls}')
-    model = model_cls(config=t5config)
+    model = model_cls(config=model_cfg)
 
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
@@ -192,6 +184,7 @@ if __name__ == '__main__':
     if hvd.rank() == 0:
         logger.info(f'Using optimizer class: {optimizer_cls}')
 
+    # todo: group optimizer params
     if optimizer_cls in [transformers.optimization.Adafactor, optimizers.Adafactor]:
         # https://github.com/huggingface/transformers/pull/9751/files -> transformers 4.3.0
         optimizer = optimizer_cls(model.parameters(), lr=args.lr,
@@ -204,13 +197,14 @@ if __name__ == '__main__':
 
     def batch_transform_fn(batch):
         return {
-            'input_ids': batch['inputs'],
-            'attention_mask': batch['inputs_mask'],
-            'labels': batch['targets'],
-            'decoder_attention_mask': batch['targets_mask'],
+            'input_ids': batch['text'],
+            'token_type_ids': batch['types'],
+            'attention_mask': batch['padding_mask'],
+            'labels': batch['labels'],
+            'next_sentence_label': batch['is_random'],
         }
 
-    trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, batch_transform_fn=batch_transform_fn)
+    trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler, batch_transform_fn)
 
     # train loop
     trainer.train()

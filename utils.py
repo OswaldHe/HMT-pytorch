@@ -1,10 +1,15 @@
 import importlib
 import json
+import os
+import platform
 import subprocess
 from pathlib import Path
 
+import horovod.torch as hvd
 import torch
+import transformers
 from transformers import T5Config, T5Tokenizer
+import optimizers
 
 
 def get_cls_by_name(name: str) -> type:
@@ -59,3 +64,26 @@ def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True):
     print(f'Model was loaded from: {checkpoint}')
     model.eval()
     return model, t5tokenizer
+
+
+def get_optimizer(name):
+    if hasattr(optimizers, name):
+        return getattr(optimizers, name)
+    if hasattr(torch.optim, name):
+        return getattr(torch.optim, name)
+    if hasattr(transformers.optimization, name):
+        return getattr(transformers.optimization, name)
+    return None
+
+
+def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
+    args_dict = dict(vars(args))
+    args_dict['ENV'] = {}
+    for env_var in env_vars:
+        args_dict['ENV'][env_var] = os.environ.get(env_var, '')
+    args_dict['HVD_INIT'] = hvd.is_initialized()
+    if hvd.is_initialized():
+        args_dict['HVD_SIZE'] = hvd.size()
+    args_dict['MACHINE'] = platform.node()
+    args_dict['COMMIT'] = get_git_hash_commit()
+    return args_dict
