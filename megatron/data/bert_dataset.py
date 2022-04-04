@@ -177,9 +177,8 @@ def pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
     assert len(masked_positions) == len(masked_labels)
 
     # Tokens and token types.
-    filler = [pad_id] * padding_length
-    tokens_np = np.array(tokens + filler, dtype=np.int64)
-    tokentypes_np = np.array(tokentypes + filler, dtype=np.int64)
+    tokens_np = np.array(tokens + [pad_id] * padding_length, dtype=np.int64)
+    tokentypes_np = np.array(tokentypes + [0] * padding_length, dtype=np.int64)
 
     # Padding mask.
     padding_mask_np = np.array([1] * num_tokens + [0] * padding_length,
