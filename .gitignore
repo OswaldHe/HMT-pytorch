@@ -131,3 +131,4 @@ dmypy.json
 .vscode/
 runs/
 data/*.tsv
+tests/runs/
