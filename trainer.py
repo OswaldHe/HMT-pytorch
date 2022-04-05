@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from transformers.optimization import get_scheduler
 from tqdm import tqdm
 import horovod.torch as hvd
 
@@ -60,6 +61,16 @@ class Trainer:
                                                   gradient_predivide_factor=1.0,
                                                   backward_passes_per_step=self.args.gradient_accumulation_steps,
                                                   )
+
+        if args.lr_scheduler:
+            if args.lr is None:
+                raise RuntimeError('Set learning_rate to use learning rate schedulers.')
+            if args.num_training_steps is None:
+                args.num_training_steps = args.iters
+            self.lr_scheduler = get_scheduler(args.lr_scheduler, self.optimizer,
+                                              args.num_warmup_steps, args.num_training_steps)
+        else:
+            self.lr_scheduler = None
 
         # Apex
         if args.fp16:
@@ -132,6 +143,8 @@ class Trainer:
                         self.optimizer.step()
                 else:
                     self.optimizer.step()
+                if self.lr_scheduler:
+                    self.lr_scheduler.step()
         return batch_loss
 
     def train(self) -> None:
@@ -140,16 +153,20 @@ class Trainer:
             pbar = tqdm(total=self.args.iters, desc='Train')
             pbar.update(self.n_iter)
 
+        if self.n_iter > 0:
+            self._skip_n_train_batches(self.n_iter - 1)
+
         losses = []
         best_valid_loss = np.inf
         valid_loss = np.nan
+        train_loss = np.nan
         while self.n_iter <= self.args.iters:
             if self.train_sampler:
                 # to shuffle data in each epoch differently
                 self.train_sampler.set_epoch(self.n_epoch)
             for batch in self.train_dataloader:
                 if self.n_iter > self.args.iters:
-                    break
+                    return self._stop_training(pbar)
                 iteration_start = time.time()
                 batch_loss = self.step(batch, is_train_mode=True)
                 iteration_time = time.time() - iteration_start
@@ -159,13 +176,13 @@ class Trainer:
                 if self.n_iter % self.args.log_interval == 0:
                     losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
                     # mean loss over last log_interval iterations
-                    mean_loss = np.mean(losses)
+                    train_loss = np.mean(losses)
                     losses = []
                     if hvd.rank() == 0:
                         # todo: move logging, move to self.log()
-                        logger.info(f'step: {self.n_iter}/{self.args.iters} loss: {mean_loss:.4f}')
-                        self.tb.add_scalar('loss/iterations/train', mean_loss, self.n_iter)
-                        self.tb.add_scalar('loss/samples/train', mean_loss, self.n_iter * self.global_batch_size)
+                        logger.info(f'step: {self.n_iter}/{self.args.iters} loss: {train_loss:.4f}')
+                        self.tb.add_scalar('loss/iterations/train', train_loss, self.n_iter)
+                        self.tb.add_scalar('loss/samples/train', train_loss, self.n_iter * self.global_batch_size)
                         # log iteration time
                         self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
                         self.tb.add_scalar('time/samples/per_iter', iteration_time,
@@ -195,12 +212,16 @@ class Trainer:
                 self.n_iter += 1
                 if hvd.rank() == 0:
                     pbar.update(1)
-                    pbar.set_postfix({'train_loss': f'{mean_loss:.3f}',
+                    pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
                                       'valid_loss': f'{valid_loss:.3f}',
                                       'best_valid_loss': f'{best_valid_loss:.3f}'
                                       })
             self.n_epoch += 1
 
+        self._stop_training(pbar)
+
+    def _stop_training(self, pbar):
+        # todo: run validation, call save model?
         if hvd.rank() == 0:
             pbar.close()
             logger.info('Done!')
@@ -223,8 +244,29 @@ class Trainer:
             self.tb.add_scalar('loss/samples/valid', mean_loss, self.n_iter * self.global_batch_size)
         return mean_loss
 
+    def _skip_n_train_batches(self, n):
+        # todo: we can skip directly to n_epoch
+        pbar = None
+        if hvd.rank() == 0:
+            logger.info(f'Skipping first {n} batches from the dataset...')
+            pbar = tqdm(total=n, desc='Skipping...')
+
+        i = 0
+        epoch = 0
+        while i < n:
+            if self.train_sampler:
+                self.train_sampler.set_epoch(epoch)
+            for _ in self.train_dataloader:
+                if i >= n:
+                    break
+                i += 1
+                if hvd.rank() == 0:
+                    pbar.update(1)
+            epoch += 1
+        if hvd.rank() == 0:
+            pbar.close()
+
     def load(self, load_path) -> None:
-        # todo: use iteration number to restore position in dataset?
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
         checkpoint = torch.load(load_path, map_location='cpu')
         missing_k, unexpected_k = self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -234,15 +276,21 @@ class Trainer:
             if len(unexpected_k) != 0:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
-        if "optimizer_state_dict" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not self.args.reset_lr:
+            # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
+            self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
-        self.n_iter = checkpoint.get('iteration', 0)
+        self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
         self.n_epoch = checkpoint.get('epoch', 0)
         if hvd.rank() == 0:
             logger.info(f'Model was loaded from: {self.args.init_checkpoint}')
             logger.info(f'Start iteration = {self.n_iter}')
+            if self.lr_scheduler and self.args.reset_lr:
+                logger.warning(f'lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
+                               f' step (torch.optim.LRScheduler last_epoch parameter) = {self.n_iter}')
 
     def save(self, save_path, suffix='') -> None:
         if hvd.rank() == 0:
@@ -258,5 +306,7 @@ class Trainer:
                        }
             if self.args.fp16:
                 to_save['amp'] = self.amp.state_dict()
+            if self.lr_scheduler:
+                to_save['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
             torch.save(to_save, save_path)
             logger.info(f'Model was saved to {save_path}')
