@@ -98,6 +98,17 @@ parser.add_argument('--relative_step', action='store_true', default=False,
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
+# scheduler args
+parser.add_argument('--lr_scheduler', type=str, default=None,
+                    help='scheduler name from transformers.optimization: linear, cosine, cosine_with_restarts, '
+                    'polynomial, constant, constant_with_warmup (default: None)')
+parser.add_argument('--num_warmup_steps', type=int, default=None,
+                    help='number of warming steps to get to lr (default: None)')
+parser.add_argument('--num_training_steps', type=int, default=None,
+                    help='number of training steps, if not set iters will be used (default: None)')
+parser.add_argument('--reset_lr', action='store_true', default=False,
+                    help='Do not load lr_scheduler from checkpoint and setup new (default: False)')
+
 if __name__ == '__main__':
     # run with horovod:
     # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py

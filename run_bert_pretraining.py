@@ -93,6 +93,8 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
+
+# optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
 parser.add_argument('--weight_decay', type=float, default=0.0, help='optimizer weight decay (default: 0.0)')
 parser.add_argument('--scale_parameter', action='store_true', default=False,
@@ -101,6 +103,17 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+
+# scheduler args
+parser.add_argument('--lr_scheduler', type=str, default=None,
+                    help='scheduler name from transformers.optimization: linear, cosine, cosine_with_restarts, '
+                    'polynomial, constant, constant_with_warmup (default: None)')
+parser.add_argument('--num_warmup_steps', type=int, default=None,
+                    help='number of warming steps to get to lr (default: None)')
+parser.add_argument('--num_training_steps', type=int, default=None,
+                    help='number of training steps, if not set iters will be used (default: None)')
+parser.add_argument('--reset_lr', action='store_true', default=False,
+                    help='Do not load lr_scheduler from checkpoint and setup new (default: False)')
 
 if __name__ == '__main__':
     args = parser.parse_args()
@@ -177,6 +190,7 @@ if __name__ == '__main__':
     model = model_cls(config=model_cfg)
 
     # define optimizer
+    # todo: move to trainer?
     optimizer_cls = get_optimizer(args.optimizer)
     if optimizer_cls is None:
         raise RuntimeError(f'{args.optimizer} was not found in optimizers, torch.optim, transformers.optimization')
