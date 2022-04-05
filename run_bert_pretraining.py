@@ -218,7 +218,19 @@ if __name__ == '__main__':
             'next_sentence_label': batch['is_random'],
         }
 
-    trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler, batch_transform_fn)
+    def get_metrics_fn(output):
+        # output - result of model(batch) call
+        # only stateless metrics could be get in such way - metrics are averaged over batches
+        # loss is a default metric, this function should be used if other metrics than loss should be logged
+        metrics = {'loss': output['loss']}
+        if 'mlm_loss' in output:
+            metrics['loss_mlm'] = output['mlm_loss']
+        if 'nsp_loss' in output:
+            metrics['loss_nsp'] = output['nsp_loss']
+        return metrics
+
+    trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
+                      batch_transform_fn, get_metrics_fn)
 
     # train loop
     trainer.train()

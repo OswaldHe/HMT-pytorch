@@ -1,7 +1,9 @@
+from collections import defaultdict
 import importlib
 import itertools
 import logging
 import time
+from typing import Dict
 
 import numpy as np
 import torch
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader,
-                 train_sampler=None, batch_transform_fn=None) -> None:
+                 train_sampler=None, batch_transform_fn=None, get_metrics_fn=lambda out: {'loss': out['loss']}) -> None:
         """Implements training loop with horovod multi-gpu & apex fp16 support.
 
         Args:
@@ -35,6 +37,7 @@ class Trainer:
         self.train_sampler = train_sampler
         self.valid_dataloader = valid_dataloader
         self.batch_transform_fn = batch_transform_fn
+        self.get_metrics_fn = get_metrics_fn
 
         self.args = args
 
@@ -87,7 +90,7 @@ class Trainer:
         if self.args.init_checkpoint:
             self.load(args.init_checkpoint)
 
-    def step(self, batch, is_train_mode=True) -> float:
+    def step(self, batch, is_train_mode=True) -> Dict[str, float]:
         """Performs one step (forward and optionally backward and optimizer.step()) over data in a batch.
 
         Batch is splitted on sub-batches of self.args.batch_size size, loss and gradients are accumulated.
@@ -112,19 +115,19 @@ class Trainer:
         for k in batch:
             batch[k] = batch[k].cuda()
 
-        batch_loss = 0
+        batch_metrics = defaultdict(lambda: 0.0)
         with torch.set_grad_enabled(is_train_mode):
             for j in range(0, len(batch['input_ids']), batch_size):
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
                 outputs = self.model(**subbatch)
-                if self.args.fp16 and self.args.apex_opt_lvl in ['O2', 'O3']:
-                    loss = outputs['loss']
-                else:
-                    loss = outputs.loss
+                loss = outputs['loss']
+                metrics = self.get_metrics_fn(outputs)
 
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / self.args.gradient_accumulation_steps
-                batch_loss += loss.detach().item()
+                for k in metrics:
+                    metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
+                    batch_metrics[k] += metrics[k].detach().item()
 
                 if is_train_mode:
                     if self.args.fp16:
@@ -145,7 +148,7 @@ class Trainer:
                     self.optimizer.step()
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
-        return batch_loss
+        return batch_metrics
 
     def train(self) -> None:
         pbar = None
@@ -156,7 +159,7 @@ class Trainer:
         if self.n_iter > 0:
             self._skip_n_train_batches(self.n_iter - 1)
 
-        losses = []
+        metrics = defaultdict(lambda: [])
         best_valid_loss = np.inf
         valid_loss = np.nan
         train_loss = np.nan
@@ -168,21 +171,27 @@ class Trainer:
                 if self.n_iter > self.args.iters:
                     return self._stop_training(pbar)
                 iteration_start = time.time()
-                batch_loss = self.step(batch, is_train_mode=True)
+                batch_metrics = self.step(batch, is_train_mode=True)
                 iteration_time = time.time() - iteration_start
-                losses += [batch_loss]
+                for k in batch_metrics:
+                    metrics[k] += [batch_metrics[k]]
 
                 # logging
                 if self.n_iter % self.args.log_interval == 0:
-                    losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
                     # mean loss over last log_interval iterations
-                    train_loss = np.mean(losses)
-                    losses = []
+                    metrics_mean = {}
+                    for k in metrics.keys():
+                        metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
+                        metrics_mean[k] = np.mean(metrics_mean[k])
+                    train_loss = metrics_mean['loss']
+                    metrics = defaultdict(lambda: [])
                     if hvd.rank() == 0:
                         # todo: move logging, move to self.log()
-                        logger.info(f'step: {self.n_iter}/{self.args.iters} loss: {train_loss:.4f}')
-                        self.tb.add_scalar('loss/iterations/train', train_loss, self.n_iter)
-                        self.tb.add_scalar('loss/samples/train', train_loss, self.n_iter * self.global_batch_size)
+                        for k in metrics_mean.keys():
+                            logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
+                            self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
+                            self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
+                                               self.n_iter * self.global_batch_size)
                         # log iteration time
                         self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
                         self.tb.add_scalar('time/samples/per_iter', iteration_time,
@@ -199,6 +208,7 @@ class Trainer:
 
                 # validation
                 if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
+                    # todo: we can use other metrics than loss here
                     valid_loss = self.validate(self.valid_dataloader)
                     if valid_loss < best_valid_loss:
                         best_valid_loss = valid_loss
@@ -230,19 +240,23 @@ class Trainer:
         if hvd.rank() == 0:
             logger.info(f'start validation at step {self.n_iter}')
 
-        losses = []
+        metrics = defaultdict(lambda: [])
         for batch in tqdm(dataloader, desc='Validation', disable=(hvd.rank() != 0)):
-            batch_loss = self.step(batch, is_train_mode=False)
-            losses += [batch_loss]
+            batch_metrics = self.step(batch, is_train_mode=False)
+            for k in batch_metrics:
+                metrics[k] += [batch_metrics[k]]
 
-        losses = list(itertools.chain.from_iterable(hvd.allgather_object(losses)))
-        mean_loss = np.mean(losses)
-        # logging
+        metrics_mean = {}
+        for k in metrics.keys():
+            metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
+            metrics_mean[k] = np.mean(metrics_mean[k])
+        valid_loss = metrics_mean['loss']
         if hvd.rank() == 0:
-            logger.info(f'valid_loss: {mean_loss:.4f}')
-            self.tb.add_scalar('loss/iterations/valid', mean_loss, self.n_iter)
-            self.tb.add_scalar('loss/samples/valid', mean_loss, self.n_iter * self.global_batch_size)
-        return mean_loss
+            for k in metrics_mean.keys():
+                logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
+                self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
+                self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
+        return valid_loss
 
     def _skip_n_train_batches(self, n):
         # todo: we can skip directly to n_epoch
