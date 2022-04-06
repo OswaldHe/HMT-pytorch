@@ -71,6 +71,8 @@ parser.add_argument('--model_cls', type=str, default='transformers:T5ForConditio
                     help='model class name to use (default: transformers:T5ForConditionalGeneration)')
 
 parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
+parser.add_argument('--skip_used_data', action='store_true', default=False,
+                    help='skip batches that were already seen by init_checkpoint (default: False)')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=128, help='target sequnce length (default: 128).')
 parser.add_argument('--vocab', type=str, default='./vocabs/sentencepiece.model',

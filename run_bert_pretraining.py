@@ -77,6 +77,8 @@ parser.add_argument('--model_cfg', type=str, help='path to model configuration f
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
 parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
+parser.add_argument('--skip_used_data', action='store_true', default=False,
+                    help='skip batches that were already seen by init_checkpoint (default: False)')
 
 # tokenizer
 # todo: add wordpiece tokenizers support?

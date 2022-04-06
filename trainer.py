@@ -156,7 +156,7 @@ class Trainer:
             pbar = tqdm(total=self.args.iters, desc='Train')
             pbar.update(self.n_iter)
 
-        if self.n_iter > 0:
+        if self.args.skip_used_data and self.n_iter > 0:
             self._skip_n_train_batches(self.n_iter - 1)
 
         metrics = defaultdict(lambda: [])
@@ -260,6 +260,10 @@ class Trainer:
 
     def _skip_n_train_batches(self, n):
         # todo: we can skip directly to n_epoch
+        # currently, skipping is based on number of iterations, not samples seen on previous run:
+        #   (n_gpus x bs x  x n_grad_acc x n_iters)
+        # todo: save number of seen samples in checkpoint
+
         pbar = None
         if hvd.rank() == 0:
             logger.info(f'Skipping first {n} batches from the dataset...')
