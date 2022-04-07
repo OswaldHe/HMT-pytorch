@@ -4,7 +4,7 @@ T5 data processing pipeline is used from the original [T5 repository](https://gi
 
 Multi-gpu and multi-node training with Horovod is supported. APEX is used for FP16 and mixed-precision training. Sparse Attention from [DeepSpeed](https://www.deepspeed.ai/tutorials/sparse-attention/) is used.
 
-BERT model supports such additional features as pre-attention layer norm, sparse attention, relative position embeddings.
+BERT model supports such additional features as pre-attention layer norm, sparse attention, relative position and rotary embeddings.
 
 T5 and BERT pre-training is implemented in `run_(model_type)_pretraining.py` scripts.
 

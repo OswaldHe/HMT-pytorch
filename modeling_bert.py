@@ -271,9 +271,9 @@ class BertSelfAttention(nn.Module):
         self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
         self.has_relative_attention_bias = has_relative_attention_bias
 
-        if self.is_sparse and self.position_embedding_type not in ['absolute', 'relative_attention_bias']:
-            raise RuntimeError(f'SparseAttention supports `absolute` and `relative_attention_bias` position embeddings '
-                               f'currently: position_embeddings_type = {self.position_embedding_type}')
+        if self.is_sparse and self.position_embedding_type not in ['absolute', 'relative_attention_bias', 'rotary']:
+            raise RuntimeError(f'SparseAttention supports `absolute`, `relative_attention_bias` and `rotary` position '
+                               f'embeddings, but: position_embeddings_type = {self.position_embedding_type}')
 
         if self.is_decoder and self.position_embedding_type == 'relative_attention_bias':
             raise RuntimeError(f'BertSelfAttention does not support `relative_attention_bias` with `is_decoder` '
@@ -287,6 +287,10 @@ class BertSelfAttention(nn.Module):
             self.relative_attention_num_buckets = self.config.relative_attention_num_buckets
             self.relative_last_bucket_distance = self.config.relative_last_bucket_distance
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.num_attention_heads)
+        elif self.position_embedding_type == 'rotary':
+            self.rotary_base = getattr(config, 'rotary_base', None)
+            self.rotary_dim = getattr(config, 'rotary_dim', self.attention_head_size)
+            self.rotary_emb = RotaryEmbedding(self.rotary_dim, base=self.rotary_base)
 
         if self.is_sparse:
             from deepspeed.ops.sparse_attention import SparseSelfAttention
@@ -423,14 +427,43 @@ class BertSelfAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
+        bs, seq_len, _ = hidden_states.shape
+        # query shape: bs x n_heads x seq_len x head_dim
+        # key shape:   bs x n_heads x head_dim x seq_len
+
+        if self.position_embedding_type == 'rotary':
+            # todo: in key_layer and value_layer past states already concatenated
+            # but rotary embeddings should not be applied to past states
+            if past_key_value is not None:
+                raise RuntimeError(f'past_key_values is not None are not supported in BertSelfAttention.forward with '
+                                   f'position_embedding_type = {self.position_embedding_type}.')
+            # traspose to bs x n_heads x seq_len x head_dim
+            key_layer = key_layer.transpose(-1, -2)
+            if self.rotary_dim < self.attention_head_size:
+                query_rot = query_layer[..., :self.rotary_dim]
+                query_pass = query_layer[..., self.rotary_dim:]
+
+                key_rot = key_layer[..., :self.rotary_dim]
+                key_pass = key_layer[..., self.rotary_dim:]
+            else:  # full rotary
+                query_rot = query_layer
+                key_rot = key_layer
+
+            cos, sin = self.rotary_emb(key_rot, seq_len=seq_len)
+            query_layer, key_layer = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=0)
+            if self.rotary_dim < self.attention_head_size:
+                query_layer = torch.cat((query_layer, query_pass), dim=-1)
+                key_layer = torch.cat((key_layer, key_pass), dim=-1)
+            # transpose to bs x n_heads x head_dim x seq_len
+            key_layer = key_layer.transpose(-1, -2)
+
         if not self.is_sparse:
             # Take the dot product between "query" and "key" to get the raw attention scores.
             attention_scores = torch.matmul(query_layer, key_layer)
 
             if self.position_embedding_type in ["relative_key", "relative_key_query"]:
-                seq_length = hidden_states.size()[1]
-                position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-                position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+                position_ids_l = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+                position_ids_r = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(1, -1)
                 distance = position_ids_l - position_ids_r
                 positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
                 positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
@@ -444,7 +477,6 @@ class BertSelfAttention(nn.Module):
                     relative_position_scores_key = torch.einsum("bhdr,lrd->bhlr", key_layer, positional_embedding)
                     attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
                 elif self.position_embedding_type == 'relative_attention_bias':
-                    bs, seq_len, _ = hidden_states.shape
                     position_bias = self.get_relative_attention_bias(position_bias, bs, seq_len, seq_len)
                     attention_scores = attention_scores + position_bias
 
@@ -473,7 +505,6 @@ class BertSelfAttention(nn.Module):
             # key_padding_mask: (bs x seq_len) or (bs x 1 x 1 x seq_len)
             # attention_mask: seq_len x seq_len or (1 x 1 x seq_len x seq_len)
             if self.position_embedding_type == 'relative_attention_bias':
-                bs, seq_len, _ = hidden_states.shape
                 position_bias = self.get_relative_attention_bias(position_bias, bs, seq_len, seq_len)
 
             context_layer = self.sparse_self_attention(query_layer, key_layer, value_layer, rpe=position_bias,
@@ -2079,3 +2110,38 @@ class BertForQuestionAnswering(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+# todo: move to separate file with other position embeddings?
+# https://github.com/EleutherAI/gpt-neox/blob/8229d921d329266323706c01dd6778fa71649ac7/megatron/model/positional_embeddings.py#L24
+# https://blog.eleuther.ai/rotary-embeddings/
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+        self.seq_len_cached = None
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def forward(self, x, seq_dim=1, seq_len=None):
+        if seq_len is None:
+            seq_len = x.shape[seq_dim]
+        if seq_len != self.seq_len_cached:
+            self.seq_len_cached = seq_len
+            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
+            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.cos_cached = emb.cos()[None, None, :, :]
+            self.sin_cached = emb.sin()[None, None, :, :]
+        return self.cos_cached, self.sin_cached
+
+
+def rotate_half(x):
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=x1.ndim - 1)  # dim=-1 triggers a bug in earlier torch versions
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
+    cos, sin = cos[:, :, offset: q.shape[2] + offset, :], sin[:, :, offset: q.shape[2] + offset, :]
+    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
