@@ -209,11 +209,12 @@ class Trainer:
                 # validation
                 if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
                     # todo: we can use other metrics than loss here
-                    valid_loss = self.validate(self.valid_dataloader)
+                    valid_metrics = self.validate(self.valid_dataloader)
+                    valid_loss = valid_metrics['loss']
                     if valid_loss < best_valid_loss:
                         best_valid_loss = valid_loss
                         if self.args.save_best:
-                            self.save(self.args.model_path, suffix='best')
+                            self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
 
                 # saving model
                 if self.n_iter % self.args.save_interval == 0:
@@ -236,7 +237,7 @@ class Trainer:
             pbar.close()
             logger.info('Done!')
 
-    def validate(self, dataloader) -> float:
+    def validate(self, dataloader) -> Dict[str, float]:
         if hvd.rank() == 0:
             logger.info(f'start validation at step {self.n_iter}')
 
@@ -250,13 +251,12 @@ class Trainer:
         for k in metrics.keys():
             metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
             metrics_mean[k] = np.mean(metrics_mean[k])
-        valid_loss = metrics_mean['loss']
         if hvd.rank() == 0:
             for k in metrics_mean.keys():
                 logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
                 self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
                 self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
-        return valid_loss
+        return metrics_mean
 
     def _skip_n_train_batches(self, n):
         # todo: we can skip directly to n_epoch
@@ -310,7 +310,7 @@ class Trainer:
                 logger.warning(f'lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
                                f' step (torch.optim.LRScheduler last_epoch parameter) = {self.n_iter}')
 
-    def save(self, save_path, suffix='') -> None:
+    def save(self, save_path, suffix='', metrics=None) -> None:
         if hvd.rank() == 0:
             if suffix == '':
                 save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
@@ -322,6 +322,8 @@ class Trainer:
                        "iteration": self.n_iter,
                        "epoch": self.n_epoch,
                        }
+            if metrics:
+                to_save['metrics'] = metrics
             if self.args.fp16:
                 to_save['amp'] = self.amp.state_dict()
             if self.lr_scheduler:
