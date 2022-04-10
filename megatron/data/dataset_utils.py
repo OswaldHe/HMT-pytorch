@@ -251,7 +251,15 @@ def create_masked_lm_predictions(tokens,
 
     (masked_lms, masked_spans) = ([], [])
     covered_indexes = set()
-    for cand_index_set in ngram_indexes:
+
+    # sampling all at once ~3-4x faster than sequentially
+    if not geometric_dist:
+        ns = np_rng.choice(ngrams, len(ngram_indexes), p=pvals)
+    else:
+        ns = np_rng.geometric(0.2, len(ngram_indexes))
+    ns = np.clip(ns, a_max=max_ngrams, a_min=None)
+
+    for j, cand_index_set in enumerate(ngram_indexes):
         if len(masked_lms) >= num_to_predict:
             break
         if not cand_index_set:
@@ -263,16 +271,17 @@ def create_masked_lm_predictions(tokens,
                 if index in covered_indexes:
                     continue
 
-        if not geometric_dist:
-            n = np_rng.choice(ngrams[:len(cand_index_set)],
-                              p=pvals[:len(cand_index_set)] /
-                              pvals[:len(cand_index_set)].sum(keepdims=True))
-        else:
-            # Sampling "n" from the geometric distribution and clipping it to
-            # the max_ngrams. Using p=0.2 default from the SpanBERT paper
-            # https://arxiv.org/pdf/1907.10529.pdf (Sec 3.1)
-            n = min(np_rng.geometric(0.2), max_ngrams)
-
+        # move up from here to sample all n values at once
+        # if not geometric_dist:
+        #     n = np_rng.choice(ngrams[:len(cand_index_set)],
+        #                       p=pvals[:len(cand_index_set)] /
+        #                       pvals[:len(cand_index_set)].sum(keepdims=True))
+        # else:
+        #     # Sampling "n" from the geometric distribution and clipping it to
+        #     # the max_ngrams. Using p=0.2 default from the SpanBERT paper
+        #     # https://arxiv.org/pdf/1907.10529.pdf (Sec 3.1)
+        #     n = min(np_rng.geometric(0.2), max_ngrams)
+        n = ns[j]
         index_set = sum(cand_index_set[n - 1], [])
         n -= 1
         # Note(mingdachen):
