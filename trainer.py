@@ -83,7 +83,7 @@ class Trainer:
                 raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
                                                              enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
-                                                             verbosity=int(hvd.rank() == 0))
+                                                             min_loss_scale=1e-05, verbosity=int(hvd.rank() == 0))
 
         self.n_iter = 0
         self.n_epoch = 0
@@ -150,90 +150,114 @@ class Trainer:
                     self.lr_scheduler.step()
         return batch_metrics
 
+    def _train_batch_generator(self):
+        while self.n_iter <= self.args.iters:
+            if self.train_sampler:
+                self.train_sampler.set_epoch(self.n_epoch)
+            # self.train_dataloader
+            for batch in self.train_dataloader:
+                if self.n_iter > self.args.iters:
+                    return
+                yield batch
+                self.n_iter += 1
+            self.n_epoch += 1
+
+    def _skip_n_train_batches(self, train_batches, n):
+        # we have to re-iterate over dataset
+        # currently, skipping is based on number of iterations, not samples seen on previous run:
+        #   (n_gpus x bs x n_grad_acc x n_iters)
+        # todo: save number of seen samples in checkpoint
+        if hvd.rank() == 0:
+            logger.info(f'Skipping {n} batches from the dataset from epoch {self.n_epoch}...')
+        # skipping...
+        for _ in tqdm(itertools.islice(train_batches, n), disable=(hvd.rank() != 0), desc='Skipping...', total=n):
+            ...
+
     def train(self) -> None:
         pbar = None
         if hvd.rank() == 0:
             pbar = tqdm(total=self.args.iters, desc='Train')
             pbar.update(self.n_iter)
 
+        train_batches = self._train_batch_generator()
+
+        # skip used data if needed
         if self.args.skip_used_data and self.n_iter > 0:
-            self._skip_n_train_batches(self.n_iter - 1)
+            train_size = None
+            try:
+                train_size = len(self.train_dataloader)
+            except TypeError as e:
+                if hvd.rank() == 0:
+                    logger.info(f"Can't get train_dataloader length:\n{e}")
+            # if we know train_size and number of epochs passed -> jump to this epoch and re-iterate over remainders
+            skip_iter = self.n_iter % train_size if train_size else self.n_iter
+            self.n_iter = (self.n_iter // train_size) * train_size if train_size else 0
+            self._skip_n_train_batches(train_batches, skip_iter)
 
         metrics = defaultdict(lambda: [])
         best_valid_loss = np.inf
         valid_loss = np.nan
         train_loss = np.nan
-        while self.n_iter <= self.args.iters:
-            if self.train_sampler:
-                # to shuffle data in each epoch differently
-                self.train_sampler.set_epoch(self.n_epoch)
-            for batch in self.train_dataloader:
-                if self.n_iter > self.args.iters:
-                    return self._stop_training(pbar)
-                iteration_start = time.time()
-                batch_metrics = self.step(batch, is_train_mode=True)
-                iteration_time = time.time() - iteration_start
-                for k in batch_metrics:
-                    metrics[k] += [batch_metrics[k]]
+        for batch in train_batches:
+            iteration_start = time.time()
+            batch_metrics = self.step(batch, is_train_mode=True)
+            iteration_time = time.time() - iteration_start
+            for k in batch_metrics:
+                metrics[k] += [batch_metrics[k]]
 
-                # logging
-                if self.n_iter % self.args.log_interval == 0:
-                    # mean loss over last log_interval iterations
-                    metrics_mean = {}
-                    for k in metrics.keys():
-                        metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
-                        metrics_mean[k] = np.mean(metrics_mean[k])
-                    train_loss = metrics_mean['loss']
-                    metrics = defaultdict(lambda: [])
-                    if hvd.rank() == 0:
-                        # todo: move logging, move to self.log()
-                        for k in metrics_mean.keys():
-                            logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
-                            self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
-                            self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
-                                               self.n_iter * self.global_batch_size)
-                        # log iteration time
-                        self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
-                        self.tb.add_scalar('time/samples/per_iter', iteration_time,
-                                           self.n_iter * self.global_batch_size)
-                        # log learning rate
-                        for j, param_group in enumerate(self.optimizer.param_groups):
-                            # adafactor uses external lr to compute its own lr if scale_parameter is true
-                            # adafactor might not have external lr in case if relative_step is used
-                            for p in ['lr', 'scaled_lr']:
-                                if p in param_group and param_group[p] is not None:
-                                    self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
-                                    self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
-                                                       self.n_iter * self.global_batch_size)
-
-                # validation
-                if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
-                    # todo: we can use other metrics than loss here
-                    valid_metrics = self.validate(self.valid_dataloader)
-                    valid_loss = valid_metrics['loss']
-                    if valid_loss < best_valid_loss:
-                        best_valid_loss = valid_loss
-                        if self.args.save_best:
-                            self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
-
-                # saving model
-                if self.n_iter % self.args.save_interval == 0:
-                    self.save(self.args.model_path)
-
-                self.n_iter += 1
+            # logging
+            if self.n_iter % self.args.log_interval == 0:
+                # mean loss over last log_interval iterations
+                metrics_mean = {}
+                for k in metrics.keys():
+                    metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
+                    metrics_mean[k] = np.mean(metrics_mean[k])
+                train_loss = metrics_mean['loss']
+                metrics = defaultdict(lambda: [])
                 if hvd.rank() == 0:
-                    pbar.update(1)
-                    pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
-                                      'valid_loss': f'{valid_loss:.3f}',
-                                      'best_valid_loss': f'{best_valid_loss:.3f}'
-                                      })
-            self.n_epoch += 1
+                    # todo: move logging, move to self.log()
+                    for k in metrics_mean.keys():
+                        logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
+                        self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
+                        self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
+                                           self.n_iter * self.global_batch_size)
+                    # log iteration time
+                    self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
+                    self.tb.add_scalar('time/samples/per_iter', iteration_time,
+                                       self.n_iter * self.global_batch_size)
+                    # log learning rate
+                    for j, param_group in enumerate(self.optimizer.param_groups):
+                        # adafactor uses external lr to compute its own lr if scale_parameter is true
+                        # adafactor might not have external lr in case if relative_step is used
+                        for p in ['lr', 'scaled_lr']:
+                            if p in param_group and param_group[p] is not None:
+                                self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
+                                self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
+                                                   self.n_iter * self.global_batch_size)
 
-        self._stop_training(pbar)
+            # validation
+            if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
+                # todo: we can use other metrics than loss here
+                valid_metrics = self.validate(self.valid_dataloader)
+                valid_loss = valid_metrics['loss']
+                if valid_loss < best_valid_loss:
+                    best_valid_loss = valid_loss
+                    if self.args.save_best:
+                        self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
 
-    def _stop_training(self, pbar):
-        # todo: run validation, call save model?
+            # saving model
+            if self.n_iter % self.args.save_interval == 0:
+                self.save(self.args.model_path)
+
+            if hvd.rank() == 0:
+                pbar.update(1)
+                pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
+                                  'valid_loss': f'{valid_loss:.3f}',
+                                  'best_valid_loss': f'{best_valid_loss:.3f}'
+                                  })
+
         if hvd.rank() == 0:
+            # todo: run validation, call save model?
             pbar.close()
             logger.info('Done!')
 
@@ -257,32 +281,6 @@ class Trainer:
                 self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
                 self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
         return metrics_mean
-
-    def _skip_n_train_batches(self, n):
-        # todo: we can skip directly to n_epoch
-        # currently, skipping is based on number of iterations, not samples seen on previous run:
-        #   (n_gpus x bs x  x n_grad_acc x n_iters)
-        # todo: save number of seen samples in checkpoint
-
-        pbar = None
-        if hvd.rank() == 0:
-            logger.info(f'Skipping first {n} batches from the dataset...')
-            pbar = tqdm(total=n, desc='Skipping...')
-
-        i = 0
-        epoch = 0
-        while i < n:
-            if self.train_sampler:
-                self.train_sampler.set_epoch(epoch)
-            for _ in self.train_dataloader:
-                if i >= n:
-                    break
-                i += 1
-                if hvd.rank() == 0:
-                    pbar.update(1)
-            epoch += 1
-        if hvd.rank() == 0:
-            pbar.close()
 
     def load(self, load_path) -> None:
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
