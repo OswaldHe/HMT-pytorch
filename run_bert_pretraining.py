@@ -221,15 +221,29 @@ if __name__ == '__main__':
             'next_sentence_label': batch['is_random'],
         }
 
-    def get_metrics_fn(output):
+    def get_metrics_fn(batch, output):
         # output - result of model(batch) call
         # only stateless metrics could be get in such way - metrics are averaged over batches
         # loss is a default metric, this function should be used if other metrics than loss should be logged
         metrics = {'loss': output['loss']}
+        # losses
         if 'mlm_loss' in output:
             metrics['loss_mlm'] = output['mlm_loss']
         if 'nsp_loss' in output:
             metrics['loss_nsp'] = output['nsp_loss']
+
+        # metrics
+        if 'prediction_logits' in output:
+            p = output['prediction_logits']
+            y = batch['labels']
+            n = (y != -100).sum()
+            metrics['accuracy_mlm'] = (torch.argmax(p, dim=-1) == y).sum() / n if n != 0 else torch.tensor(0.0)
+
+        if 'seq_relationship_logits' in output:
+            p = output['seq_relationship_logits']
+            y = batch['next_sentence_label']
+            metrics['accuracy_nsp'] = (torch.argmax(p, dim=-1) == y).sum() / y.shape[0]
+
         return metrics
 
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
