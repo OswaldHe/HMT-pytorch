@@ -143,9 +143,14 @@ class Trainer:
 
             if is_train_mode:
                 if self.args.fp16:
+                    if self.args.clip_grad_norm:
+                        # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
+                        torch.nn.utils.clip_grad_norm_(self.amp.master_params(self.optimizer), self.args.clip_grad_norm)
                     with self.optimizer.skip_synchronize():
                         self.optimizer.step()
                 else:
+                    if self.args.clip_grad_norm:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad_norm)
                     self.optimizer.step()
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
