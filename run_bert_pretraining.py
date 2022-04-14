@@ -95,6 +95,7 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
+parser.add_argument('--min_loss_scale', type=float, default=None, help='apex min_loss_scale. (default: None)')
 
 # optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')

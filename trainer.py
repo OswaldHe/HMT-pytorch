@@ -83,7 +83,8 @@ class Trainer:
                 raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
                                                              enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
-                                                             min_loss_scale=1e-05, verbosity=int(hvd.rank() == 0))
+                                                             min_loss_scale=self.args.min_loss_scale,
+                                                             verbosity=int(hvd.rank() == 0))
 
         self.n_iter = 0
         self.n_epoch = 0
