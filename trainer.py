@@ -306,8 +306,9 @@ class Trainer:
             logger.info(f'Model was loaded from: {self.args.init_checkpoint}')
             logger.info(f'Start iteration = {self.n_iter}')
             if self.lr_scheduler and self.args.reset_lr:
-                logger.warning(f'lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
-                               f' step (torch.optim.LRScheduler last_epoch parameter) = {self.n_iter}')
+                logger.warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
+                               ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
+                               ' Current iteration number is ignored.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
         if hvd.rank() == 0:
