@@ -44,6 +44,11 @@ class Trainer:
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
+        if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
+            raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
+                               f'clip_grad_norm = {self.args.clip_grad_norm}, '
+                               f'clip_grad_value = {self.args.clip_grad_value}.')
+
         if hvd.rank() == 0:
             self.tb = SummaryWriter(log_dir=self.args.model_path)
 
@@ -143,12 +148,17 @@ class Trainer:
 
             if is_train_mode:
                 if self.args.fp16:
+                    if self.args.clip_grad_value:
+                        torch.nn.utils.clip_grad_value_(self.amp.master_params(self.optimizer),
+                                                        self.args.clip_grad_value)
                     if self.args.clip_grad_norm:
                         # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
                         torch.nn.utils.clip_grad_norm_(self.amp.master_params(self.optimizer), self.args.clip_grad_norm)
                     with self.optimizer.skip_synchronize():
                         self.optimizer.step()
                 else:
+                    if self.args.clip_grad_value:
+                        torch.nn.utils.clip_grad_value_(self.model.parameters(), self.args.clip_grad_value)
                     if self.args.clip_grad_norm:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad_norm)
                     self.optimizer.step()
