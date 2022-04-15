@@ -110,6 +110,9 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+parser.add_argument('--reset_optimizer', action='store_true', default=False,
+                    help='Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
+                    'training of models trained with fp16 O2. Otherwise spikes in loss might happen. (default: False)')
 
 # scheduler args
 parser.add_argument('--lr_scheduler', type=str, default=None,
@@ -159,14 +162,13 @@ if __name__ == '__main__':
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
     global_batch_size = per_worker_batch_size * hvd.size()
-    kwargs = {'pin_memory': True}
+    kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
     # issues with Infiniband implementations that are not fork-safe
     if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
             mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
         kwargs['multiprocessing_context'] = 'forkserver'
-    train_dataloader = DataLoader(train_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
-                                  sampler=train_sampler, **kwargs)
+    train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler, **kwargs)
     # get validation dataset
     if args.valid_data_path:
         if hvd.rank() == 0:
@@ -179,8 +181,7 @@ if __name__ == '__main__':
                                     num_epochs=1, max_num_samples=None,  # take all validation data
                                     max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed)
         valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
-        valid_dataloader = DataLoader(valid_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
-                                      sampler=valid_sampler, **kwargs)
+        valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler, **kwargs)
         if args.valid_interval is None:
             args.valid_interval = args.log_interval
     else:
