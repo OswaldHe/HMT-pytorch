@@ -323,10 +323,12 @@ class Trainer:
             if len(unexpected_k) != 0:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
-        if 'optimizer_state_dict' in checkpoint:
+        if 'optimizer_state_dict' in checkpoint and not self.args.reset_optimizer:
+            logger.info('Loading optimizer state_dict from the checkpoint.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not self.args.reset_lr:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
+            logger.info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
@@ -339,6 +341,8 @@ class Trainer:
                 logger.warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
                                ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
                                ' Current iteration number is ignored.')
+            if self.args.reset_optimizer:
+                logger.warning('Optimizer is not loaded from the checkpoint. New optimizer is created.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
         if hvd.rank() == 0:

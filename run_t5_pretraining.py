@@ -104,6 +104,9 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+parser.add_argument('--reset_optimizer', action='store_true', default=False,
+                    help='Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
+                    'training of models trained with fp16 O2. Otherwise spikes in loss might happen. (default: False)')
 
 # scheduler args
 parser.add_argument('--lr_scheduler', type=str, default=None,
