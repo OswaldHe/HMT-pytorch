@@ -98,6 +98,8 @@ parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt lev
 parser.add_argument('--min_loss_scale', type=float, default=None, help='apex min_loss_scale. (default: None)')
 parser.add_argument('--clip_grad_norm', type=float, default=None,
                     help='torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)')
+parser.add_argument('--clip_grad_value', type=float, default=None,
+                    help='torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)')
 
 # optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
