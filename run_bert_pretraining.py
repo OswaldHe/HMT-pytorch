@@ -39,7 +39,9 @@ from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # n
 import optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
-torch.set_num_threads(4)
+# > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
+# need to upgrade to torch>1.8.1
+torch.set_num_threads(2)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 torch.cuda.set_device(hvd.local_rank())
 
