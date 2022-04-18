@@ -46,13 +46,15 @@ torch.set_num_threads(2)
 torch.cuda.set_device(hvd.local_rank())
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
+parser.add_argument('--model_path', type=str, default=None, help='path where to save model (default: None)')
 parser.add_argument('--data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--valid_data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--valid_interval', type=int, default=None,
                     help='how many batches to wait for logging training status')
+parser.add_argument('--validate_only', action='store_true', default=False,
+                    help='Skip training and run only validation. (default: False)')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
 parser.add_argument('--save_best', action='store_true', default=False,
                     help='Save best checkpoint if validation set is provided.')
@@ -136,8 +138,11 @@ if __name__ == '__main__':
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
 
+    if hvd.rank() == 0 and args.model_path is None:
+        logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')
+
     # create model path and save configuration
-    if hvd.rank() == 0:
+    if hvd.rank() == 0 and args.model_path is not None:
         model_path = Path(args.model_path)
         if not model_path.exists():
             Path(model_path).mkdir(parents=True)
@@ -256,5 +261,8 @@ if __name__ == '__main__':
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
                       batch_transform_fn, get_metrics_fn)
 
-    # train loop
-    trainer.train()
+    if not args.validate_only:
+        # train loop
+        trainer.train()
+    else:
+        trainer.validate(valid_dataloader)
