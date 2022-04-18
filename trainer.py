@@ -49,12 +49,13 @@ class Trainer:
                                f'clip_grad_norm = {self.args.clip_grad_norm}, '
                                f'clip_grad_value = {self.args.clip_grad_value}.')
 
+        self.clip_grad = False
         if self.args.clip_grad_norm or self.args.clip_grad_value:
             self.clip_grad = True
-        else:
-            self.clip_grad = False
 
-        if hvd.rank() == 0:
+        self.tb = None
+        # write tensorboard logs only from rank 0 and if model_path is specified
+        if hvd.rank() == 0 and self.args.model_path is not None:
             self.tb = SummaryWriter(log_dir=self.args.model_path)
 
         # move model to gpu
@@ -249,19 +250,21 @@ class Trainer:
                     # todo: move logging, move to self.log()
                     for k in metrics_mean.keys():
                         logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
-                        self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
-                        self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
-                                           self.n_iter * self.global_batch_size)
+                        if self.tb:
+                            self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
+                            self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
+                                               self.n_iter * self.global_batch_size)
                     # log iteration time
-                    self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
-                    self.tb.add_scalar('time/samples/per_iter', iteration_time,
-                                       self.n_iter * self.global_batch_size)
+                    if self.tb:
+                        self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
+                        self.tb.add_scalar('time/samples/per_iter', iteration_time,
+                                           self.n_iter * self.global_batch_size)
                     # log learning rate
                     for j, param_group in enumerate(self.optimizer.param_groups):
                         # adafactor uses external lr to compute its own lr if scale_parameter is true
                         # adafactor might not have external lr in case if relative_step is used
                         for p in ['lr', 'scaled_lr']:
-                            if p in param_group and param_group[p] is not None:
+                            if p in param_group and param_group[p] is not None and self.tb:
                                 self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
                                 self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
@@ -309,8 +312,9 @@ class Trainer:
         if hvd.rank() == 0:
             for k in metrics_mean.keys():
                 logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
-                self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
-                self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
+                if self.tb:
+                    self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
+                    self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
         return metrics_mean
 
     def load(self, load_path) -> None:
@@ -324,11 +328,13 @@ class Trainer:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
         if 'optimizer_state_dict' in checkpoint and not self.args.reset_optimizer:
-            logger.info('Loading optimizer state_dict from the checkpoint.')
+            if hvd.rank() == 0:
+                logger.info('Loading optimizer state_dict from the checkpoint.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not self.args.reset_lr:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
-            logger.info('Loading lr_scheduler state_dict from the checkpoint.')
+            if hvd.rank() == 0:
+                logger.info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
@@ -345,7 +351,7 @@ class Trainer:
                 logger.warning('Optimizer is not loaded from the checkpoint. New optimizer is created.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
-        if hvd.rank() == 0:
+        if hvd.rank() == 0 and save_path is not None:
             if suffix == '':
                 save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
             else:
