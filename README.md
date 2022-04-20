@@ -190,12 +190,20 @@ Data preprocessing [readme](megatron/README.md)
 add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
 
 ## Adafactor optimizer
-Adafactor optimizer might be used in two settings:
+[Adafactor](https://arxiv.org/abs/1804.04235) was used to train such models as T5, BigBird, PaLM and others. Adafactor lowers required memory by keeping moving average of per-parameter second moments factorized.
 
-- auto learning rate (`--scale_parameter`, `--relative_step`, `--warmup_init` for `run_t5_pretraining.py` or in DP config in `optimizer_parameters` section)
-- external learning rate (`--lr 0.001` and do not use `--relative_step` flag)
+Adafactor parameters:
+- `scale_parameter` - lr is scaled by root mean square of parameter: lr * RMS(p)
+- `relative_step` - lr = 1/sqrt(step)
+- `warmup_init` - linear warm up from 1e-06 to 0.01 at 10k steps, works only in combination with `relative_step`
 
-`warmup_init` works only with `relative_step`, so you can't setup your own learning rate with warmup.
+Adafactor can be used with constant lr / lr schedulers. In this case, `relative_step` and `warmup_init` should be set to False. `scale_parameter` is does not depend on learning rate schedules and can be used with external learning rates.
+
+example for pretraining scripts:
+```bash
+--optimizer Adafactor --lr 1e-03 --scale_parameter \
+--lr_scheduler constant_with_warmup --num_warmup_steps 10000
+```
 
 e.g. for DP config
 ```json
