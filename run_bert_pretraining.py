@@ -39,18 +39,22 @@ from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # n
 import optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
-torch.set_num_threads(4)
+# > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
+# need to upgrade to torch>1.8.1
+torch.set_num_threads(2)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 torch.cuda.set_device(hvd.local_rank())
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
+parser.add_argument('--model_path', type=str, default=None, help='path where to save model (default: None)')
 parser.add_argument('--data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--valid_data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--log_interval', type=int, default=10,
                     help='how many batches to wait for logging training status')
 parser.add_argument('--valid_interval', type=int, default=None,
                     help='how many batches to wait for logging training status')
+parser.add_argument('--validate_only', action='store_true', default=False,
+                    help='Skip training and run only validation. (default: False)')
 parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
 parser.add_argument('--save_best', action='store_true', default=False,
                     help='Save best checkpoint if validation set is provided.')
@@ -96,6 +100,10 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
 parser.add_argument('--min_loss_scale', type=float, default=None, help='apex min_loss_scale. (default: None)')
+parser.add_argument('--clip_grad_norm', type=float, default=None,
+                    help='torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)')
+parser.add_argument('--clip_grad_value', type=float, default=None,
+                    help='torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)')
 
 # optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
@@ -106,6 +114,9 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+parser.add_argument('--reset_optimizer', action='store_true', default=False,
+                    help='Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
+                    'training of models trained with fp16 O2. Otherwise spikes in loss might happen. (default: False)')
 
 # scheduler args
 parser.add_argument('--lr_scheduler', type=str, default=None,
@@ -127,8 +138,11 @@ if __name__ == '__main__':
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
 
+    if hvd.rank() == 0 and args.model_path is None:
+        logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')
+
     # create model path and save configuration
-    if hvd.rank() == 0:
+    if hvd.rank() == 0 and args.model_path is not None:
         model_path = Path(args.model_path)
         if not model_path.exists():
             Path(model_path).mkdir(parents=True)
@@ -155,14 +169,13 @@ if __name__ == '__main__':
 
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
     global_batch_size = per_worker_batch_size * hvd.size()
-    kwargs = {'pin_memory': True}
+    kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
     # issues with Infiniband implementations that are not fork-safe
     if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
             mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
         kwargs['multiprocessing_context'] = 'forkserver'
-    train_dataloader = DataLoader(train_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
-                                  sampler=train_sampler, **kwargs)
+    train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler, **kwargs)
     # get validation dataset
     if args.valid_data_path:
         if hvd.rank() == 0:
@@ -175,8 +188,7 @@ if __name__ == '__main__':
                                     num_epochs=1, max_num_samples=None,  # take all validation data
                                     max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed)
         valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
-        valid_dataloader = DataLoader(valid_dataset, num_workers=args.data_n_workers, batch_size=per_worker_batch_size,
-                                      sampler=valid_sampler, **kwargs)
+        valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler, **kwargs)
         if args.valid_interval is None:
             args.valid_interval = args.log_interval
     else:
@@ -249,5 +261,8 @@ if __name__ == '__main__':
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
                       batch_transform_fn, get_metrics_fn)
 
-    # train loop
-    trainer.train()
+    if not args.validate_only:
+        # train loop
+        trainer.train()
+    else:
+        trainer.validate(valid_dataloader)
