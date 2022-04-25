@@ -44,7 +44,18 @@ class Trainer:
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
-        if hvd.rank() == 0:
+        if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
+            raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
+                               f'clip_grad_norm = {self.args.clip_grad_norm}, '
+                               f'clip_grad_value = {self.args.clip_grad_value}.')
+
+        self.clip_grad = False
+        if self.args.clip_grad_norm or self.args.clip_grad_value:
+            self.clip_grad = True
+
+        self.tb = None
+        # write tensorboard logs only from rank 0 and if model_path is specified
+        if hvd.rank() == 0 and self.args.model_path is not None:
             self.tb = SummaryWriter(log_dir=self.args.model_path)
 
         # move model to gpu
@@ -143,13 +154,33 @@ class Trainer:
 
             if is_train_mode:
                 if self.args.fp16:
+                    if self.clip_grad:
+                        # grads already in sync
+                        self._clip_gradients()
                     with self.optimizer.skip_synchronize():
                         self.optimizer.step()
                 else:
-                    self.optimizer.step()
+                    if self.clip_grad:
+                        self.optimizer.synchronize()
+                        self._clip_gradients()
+                        with self.optimizer.skip_synchronize():
+                            self.optimizer.step()
+                    else:
+                        self.optimizer.step()
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
         return batch_metrics
+
+    def _clip_gradients(self):
+        if self.args.fp16:
+            # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
+            params = self.amp.master_params(self.optimizer)
+        else:
+            params = self.model.parameters()
+        if self.args.clip_grad_value:
+            torch.nn.utils.clip_grad_value_(params, self.args.clip_grad_value)
+        elif self.args.clip_grad_norm:
+            torch.nn.utils.clip_grad_norm_(params, self.args.clip_grad_norm)
 
     def _train_batch_generator(self):
         while self.n_iter <= self.args.iters:
@@ -219,19 +250,21 @@ class Trainer:
                     # todo: move logging, move to self.log()
                     for k in metrics_mean.keys():
                         logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
-                        self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
-                        self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
-                                           self.n_iter * self.global_batch_size)
+                        if self.tb:
+                            self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
+                            self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
+                                               self.n_iter * self.global_batch_size)
                     # log iteration time
-                    self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
-                    self.tb.add_scalar('time/samples/per_iter', iteration_time,
-                                       self.n_iter * self.global_batch_size)
+                    if self.tb:
+                        self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
+                        self.tb.add_scalar('time/samples/per_iter', iteration_time,
+                                           self.n_iter * self.global_batch_size)
                     # log learning rate
                     for j, param_group in enumerate(self.optimizer.param_groups):
                         # adafactor uses external lr to compute its own lr if scale_parameter is true
                         # adafactor might not have external lr in case if relative_step is used
                         for p in ['lr', 'scaled_lr']:
-                            if p in param_group and param_group[p] is not None:
+                            if p in param_group and param_group[p] is not None and self.tb:
                                 self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
                                 self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
@@ -279,8 +312,9 @@ class Trainer:
         if hvd.rank() == 0:
             for k in metrics_mean.keys():
                 logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
-                self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
-                self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
+                if self.tb:
+                    self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
+                    self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
         return metrics_mean
 
     def load(self, load_path) -> None:
@@ -293,10 +327,14 @@ class Trainer:
             if len(unexpected_k) != 0:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
-        if 'optimizer_state_dict' in checkpoint:
+        if 'optimizer_state_dict' in checkpoint and not self.args.reset_optimizer:
+            if hvd.rank() == 0:
+                logger.info('Loading optimizer state_dict from the checkpoint.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not self.args.reset_lr:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
+            if hvd.rank() == 0:
+                logger.info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
@@ -309,9 +347,11 @@ class Trainer:
                 logger.warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
                                ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
                                ' Current iteration number is ignored.')
+            if self.args.reset_optimizer:
+                logger.warning('Optimizer is not loaded from the checkpoint. New optimizer is created.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
-        if hvd.rank() == 0:
+        if hvd.rank() == 0 and save_path is not None:
             if suffix == '':
                 save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
             else:

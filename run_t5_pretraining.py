@@ -92,6 +92,10 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
 parser.add_argument('--min_loss_scale', type=float, default=None, help='apex min_loss_scale. (default: None)')
+parser.add_argument('--clip_grad_norm', type=float, default=None,
+                    help='torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)')
+parser.add_argument('--clip_grad_value', type=float, default=None,
+                    help='torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)')
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
 parser.add_argument('--weight_decay', type=float, default=0.0, help='optimizer weight decay (default: 0.0)')
 parser.add_argument('--scale_parameter', action='store_true', default=False,
@@ -100,6 +104,9 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+parser.add_argument('--reset_optimizer', action='store_true', default=False,
+                    help='Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
+                    'training of models trained with fp16 O2. Otherwise spikes in loss might happen. (default: False)')
 
 # scheduler args
 parser.add_argument('--lr_scheduler', type=str, default=None,
