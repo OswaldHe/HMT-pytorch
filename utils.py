@@ -73,6 +73,11 @@ def get_optimizer(name):
         return getattr(torch.optim, name)
     if hasattr(transformers.optimization, name):
         return getattr(transformers.optimization, name)
+    try:
+        apex_opt = importlib.import_module('apex.optimizers')
+        return getattr(apex_opt, name)
+    except ImportError:
+        pass
     return None
 
 
