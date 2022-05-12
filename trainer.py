@@ -21,14 +21,21 @@ logger = logging.getLogger(__name__)
 class Trainer:
     def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader,
                  train_sampler=None, batch_transform_fn=None, get_metrics_fn=lambda _, y: {'loss': y['loss']}) -> None:
-        """Implements training loop with horovod multi-gpu & apex fp16 support.
+        """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
         Args:
-            model: torch model to train
-            optimizer: torch optimizer
-            train_dataloader (torch.utils.data.DataLoader): train set torch dataloader
-            valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader, optional.
             args: params from CLI
+            model: torch model to train, model is compatible with HF interfaces
+            optimizer: torch optimizer
+            train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
+            valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader,
+                distributed-aware, optional.
+            batch_transform_fn (Optional): function to be applied to the output from DataLoader, should be used to
+                create inputs compatible with HF model, e.g., {'input_ids': .., 'attention_mask': .., 'labels': .., ..}.
+            get_metrics_fn: function to be applied to model outputs to compute batch-lvl metrics, metrics are averaged
+                across batches: avg_i(metric(batch_i, labels_i)), not metric([batch_1; batch_2; ...], labels). Could be
+                used for large datasets, pre-training, where exact metrics values are not so important or computing
+                exact metrics is resource-exhaustive.
         """
         # we assume that train/valid dataloader are already multi-gpu aware
         self.model = model
@@ -310,6 +317,7 @@ class Trainer:
             metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
             metrics_mean[k] = np.mean(metrics_mean[k])
         if hvd.rank() == 0:
+            # todo: separate logging from validation/training
             for k in metrics_mean.keys():
                 logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
                 if self.tb:
