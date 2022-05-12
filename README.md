@@ -63,6 +63,20 @@ and check installation with
 ```bash
 ds_report
 ```
+#### Triron 1.1.1
+Triton 1.1.1 brings x2 speed-up to sparse operations on A100, but DeepSpeed (0.6.5) currenly supports only triton 1.0.0.
+DeepSpeed fork with triton 1.1.1 support could be used in the cases where such speed-up is needed:
+```bash
+pip install triton==1.1.1
+git clone https://github.com/yurakuratov/DeepSpeed.git
+cd DeepSpeed
+DS_BUILD_SPARSE_ATTN=1 pip install -e . --global-option="build_ext" --global-option="-j8" --no-cache
+```
+and run sparse ops tests with
+```bash
+cd tests/unit
+pytest -v test_sparse_attention.py
+```
 
 ## T5 Pre-training
 ### T5-small baseline
