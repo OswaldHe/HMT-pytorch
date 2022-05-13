@@ -3,7 +3,7 @@ import importlib
 import itertools
 import logging
 import time
-from typing import Dict
+from typing import Dict, Tuple, Union
 
 import numpy as np
 import torch
@@ -19,8 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader,
-                 train_sampler=None, batch_transform_fn=None, get_metrics_fn=lambda _, y: {'loss': y['loss']}) -> None:
+    def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader, train_sampler=None,
+                 batch_transform_fn=None,
+                 batch_metrics_fn=lambda _, y: {'loss': y['loss']},
+                 keep_for_metrics_fn=None,
+                 metrics_fn=None,
+                 ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
         Args:
@@ -31,11 +35,16 @@ class Trainer:
             valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader,
                 distributed-aware, optional.
             batch_transform_fn (Optional): function to be applied to the output from DataLoader, should be used to
-                create inputs compatible with HF model, e.g., {'input_ids': .., 'attention_mask': .., 'labels': .., ..}.
-            get_metrics_fn: function to be applied to model outputs to compute batch-lvl metrics, metrics are averaged
-                across batches: avg_i(metric(batch_i, labels_i)), not metric([batch_1; batch_2; ...], labels). Could be
-                used for large datasets, pre-training, where exact metrics values are not so important or computing
-                exact metrics is resource-exhaustive.
+                create inputs compatible (if not already) with HF model, e.g.:
+                    {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
+            batch_metrics_fn (Optional): function to be applied to model outputs to compute batch-lvl metrics, metrics
+                are averaged across batches: avg_i(metric(batch_i, labels_i)),
+                not metric([batch_1; batch_2; ...], labels). Could be used for computing loss, metrics on large
+                datasets, pre-training, where exact metrics values are not so important or computing exact metrics
+                is resource-exhaustive.
+            keep_for_metrics_fn (Optional): f(batch, outputs) to keep predictions, labels or other data that would be
+                used to compute metrics on full validation set and every log_interval on train set
+            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn
         """
         # we assume that train/valid dataloader are already multi-gpu aware
         self.model = model
@@ -44,7 +53,9 @@ class Trainer:
         self.train_sampler = train_sampler
         self.valid_dataloader = valid_dataloader
         self.batch_transform_fn = batch_transform_fn
-        self.get_metrics_fn = get_metrics_fn
+        self.batch_metrics_fn = batch_metrics_fn
+        self.keep_for_metrics_fn = keep_for_metrics_fn
+        self.metrics_fn = metrics_fn
 
         self.args = args
 
@@ -106,10 +117,12 @@ class Trainer:
 
         self.n_iter = 0
         self.n_epoch = 0
+        self._reset_batch_metrics()
+        self._reset_metrics_data()
         if self.args.init_checkpoint:
             self.load(args.init_checkpoint)
 
-    def step(self, batch, is_train_mode=True) -> Dict[str, float]:
+    def step(self, batch, is_train_mode=True) -> Tuple[Dict[str, float], Dict[str, list]]:
         """Performs one step (forward and optionally backward and optimizer.step()) over data in a batch.
 
         Batch is splitted on sub-batches of self.args.batch_size size, loss and gradients are accumulated.
@@ -135,18 +148,23 @@ class Trainer:
             batch[k] = batch[k].cuda()
 
         batch_metrics = defaultdict(lambda: 0.0)
+        batch_metrics_data = defaultdict(lambda: [])
         with torch.set_grad_enabled(is_train_mode):
             for j in range(0, len(batch['input_ids']), batch_size):
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
                 outputs = self.model(**subbatch)
                 loss = outputs['loss']
-                metrics = self.get_metrics_fn(subbatch, outputs)
+                metrics = self.batch_metrics_fn(subbatch, outputs)
 
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / self.args.gradient_accumulation_steps
                 for k in metrics:
                     metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
                     batch_metrics[k] += metrics[k].detach().item()
+
+                if self.keep_for_metrics_fn and self.metrics_fn:
+                    for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
+                        batch_metrics_data[k] += [v.detach().cpu()]
 
                 if is_train_mode:
                     if self.args.fp16:
@@ -176,7 +194,7 @@ class Trainer:
                         self.optimizer.step()
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
-        return batch_metrics
+        return batch_metrics, batch_metrics_data
 
     def _clip_gradients(self):
         if self.args.fp16:
@@ -212,6 +230,61 @@ class Trainer:
         for _ in tqdm(itertools.islice(train_batches, n), disable=(hvd.rank() != 0), desc='Skipping...', total=n):
             ...
 
+    def _add_batch_metrics(self, batch_metrics: Dict[str, Union[float, torch.Tensor]], split: str):
+        """Adds metrics values for batch-lvl metrics.
+
+        Args:
+            split (str): train / valid
+            batch_metrics (Dict[str, Union[float, torch.Tensor]]): batch-lvl metrics values, scalars.
+        """
+        for k in batch_metrics:
+            self.batch_metrics[split][k] += [batch_metrics[k]]
+
+    def _add_metrics_data(self, metrics_data: Dict[str, torch.Tensor], split: str):
+        """Adds metrics data to keep. These data would be used to compute metrics later with get_metrics.
+
+        Args:
+            split (str): train / valid
+            value (Dict[str, torch.Tensor]): dict with metrics data, data[name].shape[0] is batch size.
+        """
+        for k in metrics_data:
+            self.metrics_data[split][k] += metrics_data[k]
+
+    def _reset_batch_metrics(self, split=None):
+        if split is None:
+            self.batch_metrics = {}
+            self.batch_metrics['train'] = defaultdict(lambda: [])
+            self.batch_metrics['valid'] = defaultdict(lambda: [])
+        else:
+            self.batch_metrics[split] = defaultdict(lambda: [])
+
+    def _reset_metrics_data(self, split=None):
+        if split is None:
+            self.metrics_data = {}
+            self.metrics_data['train'] = defaultdict(lambda: [])
+            self.metrics_data['valid'] = defaultdict(lambda: [])
+        else:
+            self.metrics_data[split] = defaultdict(lambda: [])
+
+    def get_metrics(self, split: str):
+        # batch-lvl metrics
+        metrics = {}
+        for k in self.batch_metrics[split]:
+            metrics[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
+            metrics[k] = np.mean(metrics[k])
+        # compute metrics from metrics data
+        if self.keep_for_metrics_fn and self.metrics_fn:
+            metrics_data = {}
+            for k in self.metrics_data[split]:
+                metrics_data[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
+                metrics_data[k] = torch.cat(metrics_data[k])
+            m = self.metrics_fn(metrics_data)
+            if hvd.rank() == 0 and len(metrics.keys() & m.keys()) != 0:
+                logger.warning(f'metrics ({m.keys()}) and batch-lvl metrics ({metrics.keys()}) have common names. '
+                               f'Batch-lvl metric value would be overwritten.')
+            metrics.update(m)
+        return metrics
+
     def train(self) -> None:
         pbar = None
         if hvd.rank() == 0:
@@ -233,33 +306,33 @@ class Trainer:
             self.n_iter = (self.n_iter // train_size) * train_size if train_size else 0
             self._skip_n_train_batches(train_batches, skip_iter)
 
-        metrics = defaultdict(lambda: [])
+        self._reset_batch_metrics('train')
+        self._reset_metrics_data('train')
         best_valid_loss = np.inf
-        valid_loss = np.nan
-        train_loss = np.nan
+        valid_loss = np.inf
+        train_loss = np.inf
         for batch in train_batches:
             iteration_start = time.time()
-            batch_metrics = self.step(batch, is_train_mode=True)
+            batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=True)
             iteration_time = time.time() - iteration_start
-            for k in batch_metrics:
-                metrics[k] += [batch_metrics[k]]
+            self._add_batch_metrics(batch_metrics, split='train')
+            if self.keep_for_metrics_fn and self.metrics_fn:
+                self._add_metrics_data(batch_metrics_data, split='train')
 
             # logging
             if self.n_iter % self.args.log_interval == 0:
-                # mean loss over last log_interval iterations
-                metrics_mean = {}
-                for k in metrics.keys():
-                    metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
-                    metrics_mean[k] = np.mean(metrics_mean[k])
-                train_loss = metrics_mean['loss']
-                metrics = defaultdict(lambda: [])
+                # batch-lvl averaged metrics:
+                train_metrics = self.get_metrics(split='train')
+                train_loss = train_metrics['loss']
+                self._reset_batch_metrics(split='train')
+                self._reset_metrics_data(split='train')
                 if hvd.rank() == 0:
                     # todo: move logging, move to self.log()
-                    for k in metrics_mean.keys():
-                        logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {metrics_mean[k]:.4f}')
+                    for k in train_metrics:
+                        logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {train_metrics[k]:.4f}')
                         if self.tb:
-                            self.tb.add_scalar(f'{k}/iterations/train', metrics_mean[k], self.n_iter)
-                            self.tb.add_scalar(f'{k}/samples/train', metrics_mean[k],
+                            self.tb.add_scalar(f'{k}/iterations/train', train_metrics[k], self.n_iter)
+                            self.tb.add_scalar(f'{k}/samples/train', train_metrics[k],
                                                self.n_iter * self.global_batch_size)
                     # log iteration time
                     if self.tb:
@@ -306,24 +379,23 @@ class Trainer:
         if hvd.rank() == 0:
             logger.info(f'start validation at step {self.n_iter}')
 
-        metrics = defaultdict(lambda: [])
+        self._reset_batch_metrics('valid')
+        self._reset_metrics_data('valid')
         for batch in tqdm(dataloader, desc='Validation', disable=(hvd.rank() != 0)):
-            batch_metrics = self.step(batch, is_train_mode=False)
-            for k in batch_metrics:
-                metrics[k] += [batch_metrics[k]]
+            batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
+            self._add_batch_metrics(batch_metrics, split='valid')
+            if self.keep_for_metrics_fn and self.metrics_fn:
+                self._add_metrics_data(batch_metrics_data, split='valid')
 
-        metrics_mean = {}
-        for k in metrics.keys():
-            metrics_mean[k] = list(itertools.chain.from_iterable(hvd.allgather_object(metrics[k])))
-            metrics_mean[k] = np.mean(metrics_mean[k])
+        metrics = self.get_metrics(split='valid')
         if hvd.rank() == 0:
             # todo: separate logging from validation/training
-            for k in metrics_mean.keys():
-                logger.info(f'Validation {k}: {metrics_mean[k]:.4f}')
+            for k in metrics:
+                logger.info(f'Validation {k}: {metrics[k]:.4f}')
                 if self.tb:
-                    self.tb.add_scalar(f'{k}/iterations/valid', metrics_mean[k], self.n_iter)
-                    self.tb.add_scalar(f'{k}/samples/valid', metrics_mean[k], self.n_iter * self.global_batch_size)
-        return metrics_mean
+                    self.tb.add_scalar(f'{k}/iterations/valid', metrics[k], self.n_iter)
+                    self.tb.add_scalar(f'{k}/samples/valid', metrics[k], self.n_iter * self.global_batch_size)
+        return metrics
 
     def load(self, load_path) -> None:
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
