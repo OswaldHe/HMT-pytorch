@@ -243,12 +243,18 @@ if __name__ == '__main__':
             metrics['loss_mlm'] = output['mlm_loss']
         if 'nsp_loss' in output:
             metrics['loss_nsp'] = output['nsp_loss']
+        # compute batch-lvl mlm accuracy, cause exact mlm accuracy would require to store [n_steps, bs, seq_len] x 2
+        # which could be too large
+        if 'prediction_logits' in output:
+            p = output['prediction_logits']
+            y = batch['labels']
+            n = (y != -100).sum()
+            metrics['accuracy_mlm'] = (torch.argmax(p, dim=-1) == y).sum() / n if n != 0 else torch.tensor(0.0)
         return metrics
 
     def keep_for_metrics_fn(batch, output):
         # select data from batch and model output that would be used to compute metrics
-        data = {'labels': batch['labels']}
-        data['mlm_predictions'] = torch.argmax(output['prediction_logits'].detach(), dim=-1)
+        data = {}
         if 'seq_relationship_logits' in output:
             data['next_sentence_label'] = batch['next_sentence_label']
             data['nsp_predictions'] = torch.argmax(output['seq_relationship_logits'].detach(), dim=-1)
@@ -257,10 +263,6 @@ if __name__ == '__main__':
     def metrics_fn(data):
         # compute metrics based on stored labels, predictions, ...
         metrics = {}
-        # mlm accuracy
-        y, p = data['labels'], data['mlm_predictions']
-        n = (data['labels'] != -100).sum()
-        metrics['accuracy_mlm'] = (p == y).sum() / n if n != 0 else 0.0
         # nsp accuracy
         if 'next_sentence_label' in data:
             y, p = data['next_sentence_label'], data['nsp_predictions']
