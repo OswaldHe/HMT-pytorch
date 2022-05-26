@@ -128,6 +128,32 @@ parser.add_argument('--num_training_steps', type=int, default=None,
                     help='number of training steps, if not set iters will be used (default: None)')
 parser.add_argument('--reset_lr', action='store_true', default=False,
                     help='Do not load lr_scheduler from checkpoint and setup new (default: False)')
+parser.add_argument('--reset_iteration', action='store_true', default=False,
+                    help='Do not load iteration number from checkpoint and set it to 0 (default: False)')
+
+# ReduceLROnPlateau args
+parser.add_argument('--use_lr_drop', action='store_true', default=False,
+                    help='Enable ReduceLROnPlateau scheduler in addition to --lr_scheduler (default: False)')
+parser.add_argument('--lr_drop_factor', type=float, default=0.1,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau drop parameter. (default: 0.1)')
+parser.add_argument('--lr_drop_patience', type=int, default=10,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau patience parameter. (default: 10)')
+parser.add_argument('--lr_drop_threshold', type=float, default=1e-04,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold parameter. (default: 1e-04)')
+parser.add_argument('--lr_drop_threshold_mode', type=str, default='rel',
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: rel)')
+parser.add_argument('--lr_drop_cooldown', type=int, default=0,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau cooldown parameter. (default: 0)')
+parser.add_argument('--lr_drop_min_lr', type=float, default=0.0,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau min_lr parameter. (default: 0.0)')
+parser.add_argument('--lr_drop_eps', type=float, default=1e-08,
+                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: 1e-08)')
+
+# metrics args
+parser.add_argument('--optimize_metric', type=str, default='loss',
+                    help='metric name to optimize, choose the best model & drop lr on patience (default: loss)')
+parser.add_argument('--optimize_mode', type=str, default='min',
+                    help='metric should be minimized (min) or maximized (max) (default: min)')
 
 if __name__ == '__main__':
     args = parser.parse_args()
