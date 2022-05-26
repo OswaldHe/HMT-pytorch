@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from transformers.optimization import get_scheduler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import horovod.torch as hvd
 
@@ -71,6 +72,13 @@ class Trainer:
         if self.args.clip_grad_norm or self.args.clip_grad_value:
             self.clip_grad = True
 
+        self.args.optimize_mode = getattr(self.args, 'optimize_mode', 'min')
+        self.args.optimize_metric = getattr(self.args, 'optimize_metric', 'loss')
+        if self.args.optimize_mode == 'min':
+            self.metric_improved_fn = lambda old_m, new_m: old_m > new_m
+        else:
+            self.metric_improved_fn = lambda old_m, new_m: old_m < new_m
+
         self.tb = None
         # write tensorboard logs only from rank 0 and if model_path is specified
         if hvd.rank() == 0 and self.args.model_path is not None:
@@ -104,6 +112,24 @@ class Trainer:
         else:
             self.lr_scheduler = None
 
+        self.args.use_lr_drop = getattr(self.args, 'use_lr_drop', False)
+        if self.args.use_lr_drop and self.lr_scheduler is not None:
+            raise RuntimeError('lr drop can not be used with other lr schedulers')
+        if self.args.use_lr_drop and self.valid_dataloader is None:
+            raise RuntimeError('lr drop is based on validation metrics, but validation set is not set')
+        if self.args.use_lr_drop:
+            self.lr_drop_scheduler = ReduceLROnPlateau(self.optimizer, mode=self.args.optimize_mode,
+                                                       factor=self.args.lr_drop_factor,
+                                                       patience=self.args.lr_drop_patience,
+                                                       threshold=self.args.lr_drop_threshold,
+                                                       threshold_mode=self.args.lr_drop_threshold_mode,
+                                                       cooldown=self.args.lr_drop_cooldown,
+                                                       min_lr=self.args.lr_drop_min_lr,
+                                                       eps=self.args.lr_drop_eps,
+                                                       verbose=True)
+        else:
+            self.lr_drop_scheduler = None
+
         # Apex
         if args.fp16:
             try:
@@ -120,7 +146,7 @@ class Trainer:
         self._reset_batch_metrics()
         self._reset_metrics_data()
         if self.args.init_checkpoint:
-            self.load(args.init_checkpoint)
+            self.load(args.init_checkpoint, self.args.reset_optimizer, self.args.reset_lr, self.args.reset_iteration)
 
     def step(self, batch, is_train_mode=True) -> Tuple[Dict[str, float], Dict[str, list]]:
         """Performs one step (forward and optionally backward and optimizer.step()) over data in a batch.
@@ -308,7 +334,8 @@ class Trainer:
 
         self._reset_batch_metrics('train')
         self._reset_metrics_data('train')
-        best_valid_loss = np.inf
+        best_valid_metric = np.inf if self.args.optimize_mode == 'min' else -np.inf
+        valid_metric = best_valid_metric
         valid_loss = np.inf
         train_loss = np.inf
         for batch in train_batches:
@@ -354,10 +381,13 @@ class Trainer:
                 # todo: we can use other metrics than loss here
                 valid_metrics = self.validate(self.valid_dataloader)
                 valid_loss = valid_metrics['loss']
-                if valid_loss < best_valid_loss:
-                    best_valid_loss = valid_loss
+                valid_metric = valid_metrics[self.args.optimize_metric]
+                if self.metric_improved_fn(best_valid_metric, valid_metric):
+                    best_valid_metric = valid_metric
                     if self.args.save_best:
                         self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
+                if self.lr_drop_scheduler:
+                    self.lr_drop_scheduler.step(valid_metric)
 
             # saving model
             if self.n_iter % self.args.save_interval == 0:
@@ -367,7 +397,7 @@ class Trainer:
                 pbar.update(1)
                 pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
                                   'valid_loss': f'{valid_loss:.3f}',
-                                  'best_valid_loss': f'{best_valid_loss:.3f}'
+                                  f'best_valid_{self.args.optimize_metric}': f'{valid_metric:.3f}'
                                   })
 
         if hvd.rank() == 0:
@@ -375,7 +405,7 @@ class Trainer:
             pbar.close()
             logger.info('Done!')
 
-    def validate(self, dataloader) -> Dict[str, float]:
+    def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         if hvd.rank() == 0:
             logger.info(f'start validation at step {self.n_iter}')
 
@@ -391,13 +421,13 @@ class Trainer:
         if hvd.rank() == 0:
             # todo: separate logging from validation/training
             for k in metrics:
-                logger.info(f'Validation {k}: {metrics[k]:.4f}')
-                if self.tb:
-                    self.tb.add_scalar(f'{k}/iterations/valid', metrics[k], self.n_iter)
-                    self.tb.add_scalar(f'{k}/samples/valid', metrics[k], self.n_iter * self.global_batch_size)
+                logger.info(f'Validation on {split} {k}: {metrics[k]:.4f}')
+                if self.tb and write_tb:
+                    self.tb.add_scalar(f'{k}/iterations/{split}', metrics[k], self.n_iter)
+                    self.tb.add_scalar(f'{k}/samples/{split}', metrics[k], self.n_iter * self.global_batch_size)
         return metrics
 
-    def load(self, load_path) -> None:
+    def load(self, load_path, reset_optimizer=False, reset_lr=False, reset_iteration=False) -> None:
         # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
         checkpoint = torch.load(load_path, map_location='cpu')
         missing_k, unexpected_k = self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -407,27 +437,28 @@ class Trainer:
             if len(unexpected_k) != 0:
                 logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
 
-        if 'optimizer_state_dict' in checkpoint and not self.args.reset_optimizer:
+        if 'optimizer_state_dict' in checkpoint and not reset_optimizer:
             if hvd.rank() == 0:
                 logger.info('Loading optimizer state_dict from the checkpoint.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not self.args.reset_lr:
+        if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not reset_lr:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
             if hvd.rank() == 0:
                 logger.info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         if 'amp' in checkpoint and self.args.fp16:
             self.amp.load_state_dict(checkpoint['amp'])
-        self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
-        self.n_epoch = checkpoint.get('epoch', 0)
+        if not reset_iteration:
+            self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
+            self.n_epoch = checkpoint.get('epoch', 0)
         if hvd.rank() == 0:
-            logger.info(f'Model was loaded from: {self.args.init_checkpoint}')
+            logger.info(f'Model was loaded from: {load_path}')
             logger.info(f'Start iteration = {self.n_iter}')
-            if self.lr_scheduler and self.args.reset_lr:
+            if self.lr_scheduler and reset_lr:
                 logger.warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
                                ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
                                ' Current iteration number is ignored.')
-            if self.args.reset_optimizer:
+            if reset_optimizer:
                 logger.warning('Optimizer is not loaded from the checkpoint. New optimizer is created.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
