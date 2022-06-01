@@ -1,9 +1,10 @@
 from collections import defaultdict
+from dataclasses import dataclass, field
 import importlib
 import itertools
 import logging
 import time
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, Optional
 
 import numpy as np
 import torch
@@ -19,6 +20,114 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class TrainerArgs:
+    model_path: Optional[str] = field(
+        default=None,
+        metadata={'help': 'path where to save model (default: None)'})
+    log_interval: Optional[int] = field(
+        default=None,
+        metadata={'help': 'log to report loss, metrics on training data every N batches (default: None)'})
+    valid_interval: Optional[int] = field(
+        default=None,
+        metadata={'help': 'log on validation data every N batches (default: None)'})
+    save_interval: Optional[int] = field(
+        default=None,
+        metadata={'help': 'save model every N steps (default: None)'})
+    save_best: bool = field(
+        default=False, metadata={'help': 'Save best checkpoint if validation set is provided (default: False)'})
+    # load model args
+    init_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={'help': 'path to init checkpoint to load a model from (default: None).'})
+    skip_used_data: bool = field(
+        default=False,
+        metadata={'help': 'skip batches that were already seen by init_checkpoint (default: False)'})
+    reset_lr: bool = field(
+        default=False,
+        metadata={'help': 'Do not load lr_scheduler from checkpoint and setup new lr (default: False)'})
+    reset_iteration: bool = field(
+        default=False,
+        metadata={'help': 'Do not load iteration number from checkpoint and set it to 0 (default: False)'})
+    reset_optimizer: bool = field(
+        default=False,
+        metadata={'help': 'Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
+                          'training from ckpt saved from fp16 O2. Otherwise loss spikes might happen (default: False)'})
+    # training args
+    lr: Optional[float] = field(
+        default=None,
+        metadata={'help': 'learning rate (default: None)'})
+    batch_size: int = field(
+        default=1,
+        metadata={'help': 'input batch size for training (default: 1)'})
+    iters: int = field(
+        default=1,
+        metadata={'help': 'number of training steps (i.e., gradient updates) (default: 100)'})
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={'help': 'number of batches to accumulate gradients for each worker, it multiplies total batch size.'})
+    fp16: bool = field(
+        default=False,
+        metadata={'help': 'use apex.amp for fp16 training (default: False)'})
+    fp16_allreduce: bool = field(
+        default=False, metadata={'help': 'use hvd fp16 compression during allreduce (default: False)'})
+    apex_opt_lvl: str = field(
+        default='O1',
+        metadata={'help': 'apex opt level, O1, O2. (default: O1)'})
+    min_loss_scale: Optional[float] = field(
+        default=None,
+        metadata={'help': 'apex min_loss_scale. (default: None)'})
+    clip_grad_norm: Optional[float] = field(
+        default=None,
+        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)'})
+    clip_grad_value: Optional[float] = field(
+        default=None,
+        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)'})
+    # scheduler args
+    lr_scheduler: Optional[str] = field(
+        default=None,
+        metadata={'help': 'scheduler name from transformers.optimization: linear, cosine, cosine_with_restarts, '
+                          'polynomial, constant, constant_with_warmup (default: None)'})
+    num_warmup_steps: Optional[int] = field(
+        default=None,
+        metadata={'help': 'number of warming steps to get to lr (default: None)'})
+    num_training_steps: Optional[int] = field(
+        default=None,
+        metadata={'help': 'number of training steps for scheduler, if not set iters will be used (default: None)'})
+    # LRReduceOnPlateau args
+    use_lr_drop: bool = field(
+        default=False,
+        metadata={'help': 'Enable ReduceLROnPlateau scheduler in addition to --lr_scheduler (default: False)'})
+    lr_drop_factor: float = field(
+        default=0.1,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau drop parameter. (default: 0.1)'})
+    lr_drop_patience: int = field(
+        default=10,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau patience parameter. (default: 10)'})
+    lr_drop_threshold: float = field(
+        default=1e-04,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau threshold parameter. (default: 1e-04)'})
+    lr_drop_threshold_mode: str = field(
+        default='rel',
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: rel)'})
+    lr_drop_cooldown: int = field(
+        default=0,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau cooldown parameter. (default: 0)'})
+    lr_drop_min_lr: float = field(
+        default=0.0,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau min_lr parameter. (default: 0.0)'})
+    lr_drop_eps: float = field(
+        default=1e-08,
+        metadata={'help': 'torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: 1e-08)'})
+    # metrics args
+    optimize_metric: str = field(
+        default='loss',
+        metadata={'help': 'metric name to optimize, choose the best model & drop lr on patience (default: loss)'})
+    optimize_mode: str = field(
+        default='min',
+        metadata={'help': 'metric should be minimized (min) or maximized (max) (default: min)'})
+
+
 class Trainer:
     def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader, train_sampler=None,
                  batch_transform_fn=None,
@@ -29,7 +138,7 @@ class Trainer:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
         Args:
-            args: params from CLI
+            args: TrainerArgs passed from CLI
             model: torch model to train, model is compatible with HF interfaces
             optimizer: torch optimizer
             train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
@@ -347,7 +456,7 @@ class Trainer:
                 self._add_metrics_data(batch_metrics_data, split='train')
 
             # logging
-            if self.n_iter % self.args.log_interval == 0:
+            if self.args.log_interval and self.n_iter % self.args.log_interval == 0:
                 # batch-lvl averaged metrics:
                 train_metrics = self.get_metrics(split='train')
                 train_loss = train_metrics['loss']
@@ -390,7 +499,7 @@ class Trainer:
                     self.lr_drop_scheduler.step(valid_metric)
 
             # saving model
-            if self.n_iter % self.args.save_interval == 0:
+            if self.args.save_interval and self.n_iter % self.args.save_interval == 0:
                 self.save(self.args.model_path)
 
             if hvd.rank() == 0:

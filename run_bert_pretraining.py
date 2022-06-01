@@ -1,4 +1,3 @@
-import argparse
 import json
 import logging
 import os
@@ -13,8 +12,9 @@ from dotenv import load_dotenv
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
+from transformers import HfArgumentParser
 
-from trainer import Trainer
+from trainer import Trainer, TrainerArgs
 
 load_dotenv()
 
@@ -45,19 +45,11 @@ torch.set_num_threads(2)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 torch.cuda.set_device(hvd.local_rank())
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--model_path', type=str, default=None, help='path where to save model (default: None)')
+parser = HfArgumentParser(TrainerArgs)
 parser.add_argument('--data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--valid_data_path', type=str, help='path with the indexed data in bin format')
-parser.add_argument('--log_interval', type=int, default=10,
-                    help='how many batches to wait for logging training status')
-parser.add_argument('--valid_interval', type=int, default=None,
-                    help='how many batches to wait for logging training status')
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
-parser.add_argument('--save_interval', type=int, default=5000, help='save model every steps')
-parser.add_argument('--save_best', action='store_true', default=False,
-                    help='Save best checkpoint if validation set is provided.')
 parser.add_argument('--working_dir', type=str, default='.',
                     help='working dir, should be a dir with t5-experiments repo (default: .)')
 parser.add_argument('--seed', type=int, default=42, help='random seed')
@@ -80,30 +72,10 @@ parser.add_argument('--data_n_workers', type=int, default=2, help='number of dat
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: None)')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
-parser.add_argument('--init_checkpoint', type=str, help='path to init checkpoint to load a model from (default: None).')
-parser.add_argument('--skip_used_data', action='store_true', default=False,
-                    help='skip batches that were already seen by init_checkpoint (default: False)')
 
 # tokenizer
 # todo: add wordpiece tokenizers support?
 parser.add_argument('--tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
-
-# training args
-parser.add_argument('--lr', type=float, default=None, help='learning rate (default: None)')
-parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
-parser.add_argument('--iters', type=int, default=100,
-                    help='number of training steps (i.e., gradient updates) (default: 100).')
-parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
-                    help='number of batches to accumulate gradients for each worker; it multiplies total batch size.')
-parser.add_argument('--fp16-allreduce', action='store_true', default=False,
-                    help='use fp16 compression during allreduce')
-parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
-parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
-parser.add_argument('--min_loss_scale', type=float, default=None, help='apex min_loss_scale. (default: None)')
-parser.add_argument('--clip_grad_norm', type=float, default=None,
-                    help='torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)')
-parser.add_argument('--clip_grad_value', type=float, default=None,
-                    help='torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)')
 
 # optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
@@ -114,46 +86,6 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
-parser.add_argument('--reset_optimizer', action='store_true', default=False,
-                    help='Do not load optimizer from checkpoint and setup a new one. It might help for continuing '
-                    'training of models trained with fp16 O2. Otherwise spikes in loss might happen. (default: False)')
-
-# scheduler args
-parser.add_argument('--lr_scheduler', type=str, default=None,
-                    help='scheduler name from transformers.optimization: linear, cosine, cosine_with_restarts, '
-                    'polynomial, constant, constant_with_warmup (default: None)')
-parser.add_argument('--num_warmup_steps', type=int, default=None,
-                    help='number of warming steps to get to lr (default: None)')
-parser.add_argument('--num_training_steps', type=int, default=None,
-                    help='number of training steps, if not set iters will be used (default: None)')
-parser.add_argument('--reset_lr', action='store_true', default=False,
-                    help='Do not load lr_scheduler from checkpoint and setup new (default: False)')
-parser.add_argument('--reset_iteration', action='store_true', default=False,
-                    help='Do not load iteration number from checkpoint and set it to 0 (default: False)')
-
-# ReduceLROnPlateau args
-parser.add_argument('--use_lr_drop', action='store_true', default=False,
-                    help='Enable ReduceLROnPlateau scheduler in addition to --lr_scheduler (default: False)')
-parser.add_argument('--lr_drop_factor', type=float, default=0.1,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau drop parameter. (default: 0.1)')
-parser.add_argument('--lr_drop_patience', type=int, default=10,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau patience parameter. (default: 10)')
-parser.add_argument('--lr_drop_threshold', type=float, default=1e-04,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold parameter. (default: 1e-04)')
-parser.add_argument('--lr_drop_threshold_mode', type=str, default='rel',
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: rel)')
-parser.add_argument('--lr_drop_cooldown', type=int, default=0,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau cooldown parameter. (default: 0)')
-parser.add_argument('--lr_drop_min_lr', type=float, default=0.0,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau min_lr parameter. (default: 0.0)')
-parser.add_argument('--lr_drop_eps', type=float, default=1e-08,
-                    help='torch.optim.lr_scheduler.ReduceLROnPlateau threshold_mode parameter. (default: 1e-08)')
-
-# metrics args
-parser.add_argument('--optimize_metric', type=str, default='loss',
-                    help='metric name to optimize, choose the best model & drop lr on patience (default: loss)')
-parser.add_argument('--optimize_mode', type=str, default='min',
-                    help='metric should be minimized (min) or maximized (max) (default: min)')
 
 if __name__ == '__main__':
     args = parser.parse_args()
