@@ -1,4 +1,5 @@
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass, field
 import importlib
 import itertools
@@ -35,7 +36,11 @@ class TrainerArgs:
         default=None,
         metadata={'help': 'save model every N steps (default: None)'})
     save_best: bool = field(
-        default=False, metadata={'help': 'Save best checkpoint if validation set is provided (default: False)'})
+        default=False,
+        metadata={'help': 'Save best checkpoint if validation set is provided (default: False)'})
+    use_generate_on_valid: bool = field(
+        default=False,
+        metadata={'help': 'Use model.generate method when running validation step (default: False)'})
     # load model args
     init_checkpoint: Optional[str] = field(
         default=None,
@@ -122,7 +127,7 @@ class TrainerArgs:
     # metrics args
     optimize_metric: str = field(
         default='loss',
-        metadata={'help': 'metric name to optimize, choose the best model & drop lr on patience (default: loss)'})
+        metadata={'help': 'metric name to optimize on validation set, save the best model, drop lr (default: loss)'})
     optimize_mode: str = field(
         default='min',
         metadata={'help': 'metric should be minimized (min) or maximized (max) (default: min)'})
@@ -134,6 +139,7 @@ class Trainer:
                  batch_metrics_fn=lambda _, y: {'loss': y['loss']},
                  keep_for_metrics_fn=None,
                  metrics_fn=None,
+                 generate_kwargs={},
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
@@ -166,6 +172,7 @@ class Trainer:
         self.batch_metrics_fn = batch_metrics_fn
         self.keep_for_metrics_fn = keep_for_metrics_fn
         self.metrics_fn = metrics_fn
+        self.generate_kwargs = generate_kwargs
 
         self.args = args
 
@@ -289,8 +296,17 @@ class Trainer:
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
                 outputs = self.model(**subbatch)
                 loss = outputs['loss']
-                metrics = self.batch_metrics_fn(subbatch, outputs)
 
+                if not is_train_mode and self.args.use_generate_on_valid:
+                    generate_kwargs = deepcopy(self.generate_kwargs)
+                    if 'attention_mask' in subbatch:
+                        generate_kwargs['attention_mask'] = subbatch['attention_mask']
+                    if 'global_attention_mask' in subbatch:
+                        generate_kwargs['global_attention_mask'] = subbatch['global_attention_mask']
+                    generation_outputs = self.model.generate(subbatch['input_ids'], **generate_kwargs)
+                    outputs['generation_outputs'] = generation_outputs
+
+                metrics = self.batch_metrics_fn(subbatch, outputs)
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / self.args.gradient_accumulation_steps
                 for k in metrics:
@@ -506,7 +522,7 @@ class Trainer:
                 pbar.update(1)
                 pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
                                   'valid_loss': f'{valid_loss:.3f}',
-                                  f'best_valid_{self.args.optimize_metric}': f'{valid_metric:.3f}'
+                                  f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
                                   })
 
         if hvd.rank() == 0:
