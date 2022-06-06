@@ -151,7 +151,9 @@ if __name__ == '__main__':
 
     labels_map = {'false': 0, 'true': 1}
     # collate_fn depends on model type (encoder, encoder-decoder)
+    # collate_fn defines how data is prepared for the model
     if args.model_type == 'encoder':
+        num_labels = len(labels_map)
         encode_plus_kwargs = {'max_length': args.input_seq_len,
                               'truncation': True,
                               'padding': 'longest',
@@ -160,15 +162,20 @@ if __name__ == '__main__':
         def collate_fn(batch):
             inputs, labels = zip(*batch)
             features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs)
+            # map labels to ids
             labels = np.array([labels_map[t] for t in labels])
             labels = {'labels': torch.from_numpy(labels)}
             return {**features, **labels}
     elif args.model_type == 'encoder-decoder':
         global_attention_first_token = False  # should be True for LED
+        num_labels = 0
         encode_plus_kwargs = {'truncation': True,
                               'padding': 'longest',
                               'pad_to_multiple_of': 1}
+        # generate predictions to fixed length
         generate_kwargs = {'max_length': args.target_seq_len, 'min_length': args.target_seq_len}
+        # generate predictions to max targets length in batch
+        generate_kwargs = {}
 
         def collate_fn(batch):
             inputs, labels = zip(*batch)
@@ -182,8 +189,7 @@ if __name__ == '__main__':
             labels[labels == tokenizer.pad_token_id] = -100
             features['labels'] = labels
             if 'global_attention_mask' in features:
-                # features["global_attention_mask"] = [[1] + [0] * (len(attn_mask) - 1) for attn_mask in features["attention_mask"]]
-                logger.warning('WHAT SHOULD BE HERE FOR LED??')
+                raise RuntimeError('What global attention mask for Longformer and LongformerEncoder-Decoder should be?')
             return features
     else:
         raise NotImplementedError('only encoder & encoder-decoder type of model is supported')
@@ -232,11 +238,12 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
         model_cfg = AutoConfig.from_pretrained(args.model_cfg)
+        model_cfg.num_labels = num_labels
         model = model_cls(config=model_cfg)
     else:
         if hvd.rank() == 0:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-        model = model_cls.from_pretrained(args.from_pretrained)
+        model = model_cls.from_pretrained(args.from_pretrained, num_labels=num_labels)
 
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
@@ -279,15 +286,17 @@ if __name__ == '__main__':
         elif args.model_type == 'encoder-decoder' and 'generation_outputs' in data:
             y = tokenizer.batch_decode(data['labels'], skip_special_tokens=True)
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
-            # for _y, _p in zip(y, p):
-            #     logger.info(f'{_y}: {labels_map.get(_y, 0)},  {_p}: {labels_map.get(_p, 0)}')
+            # if hvd.rank() == 0:
+            #     logger.info(f'{y}')
+            #     logger.info(f'{p}')
+            #     for label, out in zip(data['labels'][:10], data['generation_outputs'][:10]):
+            #         logger.info(f'{label} {out}')
             # map to labels
             y = [labels_map.get(normalize_answer(_y), 0) for _y in y]
             p = [labels_map.get(normalize_answer(_p), 0) for _p in p]
         if y is not None and p is not None:
-            # accuracy
+            # accuracy, f1, precision, recall
             metrics['accuracy'] = accuracy_score(y, p)
-            # f1, precision, recall, mcc
             metrics['f1'] = f1_score(y, p)
             metrics['precision'] = precision_score(y, p)
             metrics['recall'] = recall_score(y, p)

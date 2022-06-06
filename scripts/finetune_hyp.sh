@@ -24,7 +24,7 @@ horovodrun --gloo -np $NP python run_finetuning_hyp.py \
         --model_cls $MODEL_CLS \
         --use_generate_on_valid \
         --input_seq_len 512 \
-        --target_seq_len 2 \
+        --target_seq_len 4 \
         --batch_size 4 --gradient_accumulation_steps 2 \
         --save_best --iters 1000 \
         --optimizer AdamW  --weight_decay 0.001 \
