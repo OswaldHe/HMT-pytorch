@@ -292,7 +292,7 @@ if __name__ == '__main__':
                 for metric_name in task_to_metric[args.task_name]:
                     metrics[metric_name] = result[metric_name]
             elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
-                metrics['exact_match'] = accuracy_score(y, p)
+                metrics['exact_match'] = accuracy_score(y, p) * 100
                 metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
 
