@@ -9,9 +9,11 @@ from megatron.data.dataset_utils import get_indexed_dataset_
 import horovod.torch as hvd
 from dotenv import load_dotenv
 import torch
+import numpy as np
 from torch.utils.data import DataLoader, DistributedSampler
 import datasets
 from huggingface_hub import hf_hub_download
+from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 
 from trainer import Trainer, TrainerArgs
 
@@ -154,8 +156,33 @@ if __name__ == '__main__':
             if 'global_attention_mask' in features:
                 raise RuntimeError('What global attention mask for Longformer and LongformerEncoder-Decoder should be?')
             return features
+
+    elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+        if args.use_generate_on_valid:
+            raise RuntimeError('use_generate_on_valid should be set to False for encoder-only models')
+
+        encode_plus_kwargs = {'max_length': args.input_seq_len,
+                              'truncation': True,
+                              'padding': 'longest',
+                              'pad_to_multiple_of': 64}
+        generate_kwargs = {}
+        labels_map = {'Contradiction': 0, 'Entailment': 1, 'Not mentioned': 2}
+        num_labels = len(labels_map)
+
+        def collate_fn(batch):
+            # cut too long strings because they may slow down tokenization
+            inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
+            labels = [b['output'][:args.target_seq_len * 10] for b in batch]
+            if args.input_prefix:
+                inputs = [args.input_prefix + inp for inp in inputs]
+            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs)
+            labels = np.array([labels_map[t] for t in labels])
+            features['labels'] = torch.from_numpy(labels)
+            return features
+
     else:
-        raise NotImplementedError('only encoder-decoder type of model is supported for scrolls datasets')
+        raise NotImplementedError('only encoder-decoder models are supported for scrolls datasets or '
+                                  'encoder models only for contract_nli task')
 
     # get train dataset
     if hvd.rank() == 0:
@@ -187,11 +214,16 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
         model_cfg = AutoConfig.from_pretrained(args.model_cfg)
+        if args.model_type == 'encoder' and args.task_name == 'contract_nli':
+            model_cfg.num_labels = num_labels
         model = model_cls(config=model_cfg)
     else:
         if hvd.rank() == 0:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-        model = model_cls.from_pretrained(args.from_pretrained)
+        if args.model_type == 'encoder-decoder':
+            model = model_cls.from_pretrained(args.from_pretrained)
+        elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+            model = model_cls.from_pretrained(args.from_pretrained, num_labels=num_labels)
 
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
@@ -219,6 +251,9 @@ if __name__ == '__main__':
         if 'generation_outputs' in output:
             data['labels'] = batch['labels']
             data['generation_outputs'] = output['generation_outputs']
+        if args.model_type == 'encoder':
+            data['labels'] = batch['labels']
+            data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
         return data
 
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -248,10 +283,17 @@ if __name__ == '__main__':
             y = tokenizer.batch_decode(data['labels'], skip_special_tokens=True)
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
             # todo: do we need to better clean P to remove tokens after eos? not remove special tokens only
+        elif args.model_type == 'encoder':
+            y, p = data['labels'], data['predictions']
+
         if y is not None and p is not None:
-            result = scrolls_metric.compute(predictions=p, references=[[_y] for _y in y])
-            for metric_name in task_to_metric[args.task_name]:
-                metrics[metric_name] = result[metric_name]
+            if args.model_type == 'encoder-decoder':
+                result = scrolls_metric.compute(predictions=p, references=[[_y] for _y in y])
+                for metric_name in task_to_metric[args.task_name]:
+                    metrics[metric_name] = result[metric_name]
+            elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+                metrics['exact_match'] = accuracy_score(y, p)
+                metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
 
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
