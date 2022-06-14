@@ -5,35 +5,42 @@ cd ..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
+#todo: large
+MODEL_NAMES=(bert-base-cased roberta-base microsoft/deberta-v3-base google/electra-base-discriminator)
+MODEL_TYPE=encoder
+MODEL_CLSS=(Bert Roberta DebertaV2 Electra)
 
-MODEL_NAME=t5-base
-MODEL_TYPE=encoder-decoder
-MODEL_CLS=transformers:T5ForConditionalGeneration
+SRC_LEN=512
 
+for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
+do
+MODEL_NAME=${MODEL_NAMES[i]}
+MODEL_CLS=${MODEL_CLSS[i]}
+for LR in 1e-04 5e-05 1e-05
+do
 for SCHEDULER in linear constant_with_warmup
 do
-for N in 1 2 3 4 5
+for N in 1 2 3
 do
 horovodrun --gloo -np $NP python run_finetuning_hyp.py \
-        --data_path /home/kuratov/data/hyperpartisan_news_detection/train.jsonl \
-        --valid_data_path /home/kuratov/data/hyperpartisan_news_detection/dev.jsonl \
-        --test_data_path /home/kuratov/data/hyperpartisan_news_detection/test.jsonl \
-        --model_path ./runs/finetune/$MODEL_NAME/hyperpartisan_news_detection/lr1e-04_${SCHEDULER}_adamw_wd1e-03/run_$N \
+        --data_path /home/jovyan/data/hyperpartisan_news_detection/train.jsonl \
+        --valid_data_path /home/jovyan/data/hyperpartisan_news_detection/dev.jsonl \
+        --test_data_path /home/jovyan/data/hyperpartisan_news_detection/test.jsonl \
+        --model_path ./runs/finetune/hyperpartisan_news_detection/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
-        --model_cls $MODEL_CLS \
-        --use_generate_on_valid \
-        --input_seq_len 512 \
-        --target_seq_len 4 \
-        --batch_size 4 --gradient_accumulation_steps 2 \
+        --model_cls transformers:${MODEL_CLS}ForSequenceClassification \
+        --input_seq_len $SRC_LEN \
+        --batch_size 4 --gradient_accumulation_steps 4 \
         --save_best --iters 1000 \
         --optimizer AdamW  --weight_decay 0.001 \
-        --lr 1e-04 --lr_scheduler $SCHEDULER --num_warmup_steps 100 \
-        --data_n_workers 2 \
+        --lr ${LR} --lr_scheduler $SCHEDULER --num_warmup_steps 100 \
         --log_interval 50 --valid_interval 50 \
         --optimize_metric f1 --optimize_mode max \
         --seed $(($N+42)) \
         --clip_grad_value 5.0
+done
+done
 done
 done
 echo "run_bert_pretraining.py done"
