@@ -13,7 +13,7 @@ import numpy as np
 from torch.utils.data import DataLoader, DistributedSampler
 import datasets
 from huggingface_hub import hf_hub_download
-from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score
 
 from trainer import Trainer, TrainerArgs
 
