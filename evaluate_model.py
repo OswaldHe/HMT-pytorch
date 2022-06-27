@@ -20,7 +20,6 @@ dill.extend(False)
 import cloudpickle  # noqa: F401, E402
 dill.extend(True)
 
-from utils import expand_dp_path  # noqa: E402
 from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E402
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,6 +30,15 @@ pd.options.mode.chained_assignment = None
 
 n_gpus = torch.cuda.device_count()
 app = typer.Typer()
+
+
+def expand_dp_path(path, variables):
+    """Expand paths from DeepPavlov configs, uses variables from config's metadata.
+    """
+    while '{' in path and '}' in path:
+        path = path.format(**variables)
+    path = Path(path).expanduser()
+    return path
 
 
 def hvd_dp_run(config, fn=evaluate_model, check_metrics=False):
