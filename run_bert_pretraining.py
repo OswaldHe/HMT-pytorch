@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import HfArgumentParser
 
-from trainer import Trainer, TrainerArgs
+from lm_experiments_tools import Trainer, TrainerArgs
 
 load_dotenv()
 
@@ -35,8 +35,8 @@ hvd.init()
 import transformers  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
-from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-import optimizers  # noqa: E402
+from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
 # > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
@@ -132,7 +132,8 @@ if __name__ == '__main__':
     # issues with Infiniband implementations that are not fork-safe
     if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
             mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
-        kwargs['multiprocessing_context'] = 'forkserver'
+        # kwargs['multiprocessing_context'] = 'forkserver'
+        ...
     train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler, **kwargs)
     # get validation dataset
     if args.valid_data_path:
