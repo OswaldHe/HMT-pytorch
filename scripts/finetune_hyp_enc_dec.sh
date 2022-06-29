@@ -23,10 +23,10 @@ do
 for N in 1 2 3
 do
 horovodrun --gloo -np $NP python run_finetuning_hyp.py \
-        --data_path /home/jovyan/data/hyperpartisan_news_detection/train.jsonl \
-        --valid_data_path /home/jovyan/data/hyperpartisan_news_detection/dev.jsonl \
-        --test_data_path /home/jovyan/data/hyperpartisan_news_detection/test.jsonl \
-        --model_path ./runs/finetune/hyperpartisan_news_detection/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}/run_$N \
+        --data_path /home/kuratov/data/hyperpartisan_news_detection/train.jsonl \
+        --valid_data_path /home/kuratov/data/hyperpartisan_news_detection/dev.jsonl \
+        --test_data_path /home/kuratov/data/hyperpartisan_news_detection/test.jsonl \
+        --model_path ../runs/debug/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SIZE}_mem${MEMORY_SIZE}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls transformers:${MODEL_CLS}ForConditionalGeneration \

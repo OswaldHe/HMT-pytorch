@@ -68,6 +68,8 @@ parser.add_argument('--from_pretrained', type=str, help='model name in HF Model 
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
+parser.add_argument('--backbone_cls', type=str, default=None,
+                    help='backbone class name to use for RMT')
 parser.add_argument('--model_type', type=str, default='encoder-decoder',
                     help='model type, encoder, encoder-decoder, decoder, affects preprocessing '
                          '(default: encoder-decoder)')
@@ -237,14 +239,17 @@ if __name__ == '__main__':
 
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
+        backbone_cls = get_cls_by_name(args.backbone_cls) if args.backbone_cls is not None else None
         model.set_params(num_mem_tokens=args.num_mem_tokens, 
                     input_size=args.input_size,
                     input_seg_size=args.input_seg_size,
                     model_attr=args.model_attr,
+                    backbone_cls=backbone_cls,
                     bptt_depth=args.bptt_depth, 
                     pad_token_id=tokenizer.pad_token_id,
                     cls_token_id=tokenizer.cls_token_id, 
-                    sep_token_id=tokenizer.sep_token_id)
+                    sep_token_id=tokenizer.sep_token_id,
+                    eos_token_id=tokenizer.eos_token_id,)
 
     if not args.backbone_trainable:
         for name, param in model.named_parameters():
