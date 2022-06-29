@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
@@ -20,10 +21,23 @@ class RMTEncoderForSequenceClassification():
         return rmt
         
 
-    def set_params(self, model_attr='bert', input_size=None, input_seg_size=None, num_mem_tokens=0, bptt_depth=-1, 
-                    pad_token_id=0, cls_token_id=101, sep_token_id=102):
+    def set_params(self, 
+                model_attr='bert', 
+                drop_empty_segments=True,
+                input_size=None, 
+                input_seg_size=None, 
+                backbone_cls=None,
+                num_mem_tokens=0, 
+                bptt_depth=-1, 
+                pad_token_id=0, 
+                eos_token_id=1,
+                cls_token_id=101, 
+                sep_token_id=102):
         self.net = getattr(self.model, model_attr)
-        self.input_size =  self.net.embeddings.position_embeddings.weight.shape[0] if input_size is None else input_size
+        if input_size is not None:
+            self.input_size = input_size
+        else:
+            self.input_size =  self.net.embeddings.position_embeddings.weight.shape[0]
         self.input_seg_size = input_seg_size
 
         self.bptt_depth = bptt_depth
@@ -31,6 +45,7 @@ class RMTEncoderForSequenceClassification():
         self.cls_token = torch.tensor([cls_token_id])
         self.sep_token = torch.tensor([sep_token_id])
         self.num_mem_tokens = num_mem_tokens
+        self.drop_empty_segments = drop_empty_segments
         self.extend_word_embeddings()
 
 
@@ -61,36 +76,60 @@ class RMTEncoderForSequenceClassification():
             if (self.bptt_depth > -1) and (len(segmented) - seg_num > self.bptt_depth): 
                 memory = memory.detach()
 
-            inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
-            inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
-
             seg_kwargs = dict(**kwargs)
+            if self.drop_empty_segments:
+                # print('input_ids == self.empty')
+                # print(input_ids.shape, self.empty.shape)
+                # print(input_ids == self.empty)
+                # print(np.where(input_ids == self.empty))
+                # print([torch.equal(input_ids[i], self.empty) for i in range(len(input_ids))])
+
+                non_empty_mask = [not torch.equal(input_ids[i], self.empty) for i in range(len(input_ids))]
+                if sum(non_empty_mask) == 0:
+                    continue
+                # print(f'{sum(non_empty_mask)} non-empty segments at step {seg_num}: {non_empty_mask}')
+                input_ids = input_ids[non_empty_mask]
+                attention_mask = attention_mask[non_empty_mask]
+                token_type_ids = token_type_ids[non_empty_mask]
+                seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
+
+                inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
+                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory[non_empty_mask]
+
+                # print('inputs_embeds.shape', inputs_embeds.shape)
+                # print('memory: ', memory)
+            else:
+                inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
+                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
+
+            # print('inputs_embeds', inputs_embeds.shape)
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
             seg_kwargs['token_type_ids'] = token_type_ids
             
             out = self.model.forward(**seg_kwargs, output_hidden_states=True)
-            memory = out.hidden_states[-1][:, :self.num_mem_tokens]
+
+            if self.drop_empty_segments:
+                memory[non_empty_mask] = out.hidden_states[-1][:, :self.num_mem_tokens]
+            else:
+                memory = out.hidden_states[-1][:, :self.num_mem_tokens]
 
         return out
 
     def pad_and_segment(self, input_ids):
         
         sequence_len = input_ids.shape[1]
-        
-        input_seg_size = self.input_size if self.input_seg_size is None else self.input_seg_size
-        input_seg_size = input_seg_size - self.num_mem_tokens - 3 
+        input_seg_size = self.input_size - self.num_mem_tokens - 3 
+        if self.input_seg_size is not None and self.input_seg_size < input_seg_size:
+            input_seg_size = self.input_seg_size
             
         n_segments = math.ceil(sequence_len / input_seg_size)
-        print(f'sequence_len: {sequence_len}, input_seg_size: {input_seg_size}')
 
         augmented_inputs = []
         for input in input_ids:
             input = input[input != self.pad_token_id][1:-1]
-            print(f'raw input: {input.shape}')
 
             seg_sep_inds = [0] + list(range(len(input), 0, -input_seg_size))[::-1] # chunk so that first segment has various size
-            print(f'splitting to {seg_sep_inds}')
             input_segments = [input[s:e] for s, e in zip(seg_sep_inds, seg_sep_inds[1:])]
 
             def pad_add_special_tokens(tensor, seg_size):
@@ -105,11 +144,10 @@ class RMTEncoderForSequenceClassification():
                 return tensor
 
             input_segments = [pad_add_special_tokens(t, self.input_size) for t in input_segments]
-            print(f'got input segments {input_segments}, {[len(i) for i in input_segments]}')
             empty = torch.Tensor([]).int()
-            empty_segments = [pad_add_special_tokens(empty, self.input_size) for i in range(n_segments - len(input_segments))]
+            self.empty = pad_add_special_tokens(empty, self.input_size)
+            empty_segments = [self.empty for i in range(n_segments - len(input_segments))]
             input_segments = empty_segments + input_segments
-            print(f'padded input segments {input_segments}, {[len(i) for i in input_segments]}')
 
             augmented_input = torch.cat(input_segments)
             augmented_inputs.append(augmented_input)

@@ -28,18 +28,15 @@ class RMTEncoderDecoderForConditionalGeneration():
         return rmt
         
 
-    def set_params(self, 
+    def set_params(self, tokenizer,
+                    encode_plus_kwargs={},
                     model_attr='', 
                     drop_empty_segments=True,
                     backbone_cls=None,
                     input_size=None, 
                     input_seg_size=None, 
                     num_mem_tokens=0, 
-                    bptt_depth=-1, 
-                    pad_token_id=0, 
-                    eos_token_id=1,
-                    cls_token_id=101, 
-                    sep_token_id=102):
+                    bptt_depth=-1):
         # print('model attr: ', model_attr)
 
         if backbone_cls is not None:
@@ -54,8 +51,11 @@ class RMTEncoderDecoderForConditionalGeneration():
         self.input_seg_size = input_seg_size
 
         self.bptt_depth = bptt_depth
-        self.pad_token_id = pad_token_id
-        self.eos_token = torch.tensor([eos_token_id])
+        self.pad_token_id = tokenizer.pad_token_id
+        self.eos_token = torch.tensor([tokenizer.eos_token_id])
+        self.tokenizer = tokenizer
+        self.encode_plus_kwargs = encode_plus_kwargs
+        # self.dot_id = tokenizer.encode('.')[1]
         # print(pad_token_id, eos_token_id)
         self.num_mem_tokens = num_mem_tokens
         self.drop_empty_segments = drop_empty_segments
@@ -77,15 +77,14 @@ class RMTEncoderDecoderForConditionalGeneration():
         self.mem_token_ids = torch.arange(vocab_size, vocab_size + self.num_mem_tokens)
         self.resize_token_embeddings(extended_vocab_size)
         self.embeddings = self.encoder.embed_tokens
-        # print('extended_vocab_size', extended_vocab_size)
-        # print('self.embeddings', self.embeddings.weight.shape)
-        # print('self.mem_token_ids', self.mem_token_ids)
 
 
     def __call__(self, input_ids, **kwargs):
         memory = self.set_memory()
         segmented = self.pad_and_segment(input_ids)
-        for seg_num, segment_data in enumerate(zip(*segmented)):
+        segmented = list(zip(*segmented))
+        segmented = segmented + [segmented[0]]
+        for seg_num, segment_data in enumerate(segmented):
             input_ids, attention_mask, token_type_ids = segment_data
             if memory.ndim == 2:
                 memory = memory.repeat(input_ids.shape[0], 1, 1)
@@ -120,6 +119,8 @@ class RMTEncoderDecoderForConditionalGeneration():
             # print('out', out.keys())
             # print('memory3',  memory.shape)
 
+        # print('out,', out.keys())
+
         return out
 
 
@@ -131,7 +132,8 @@ class RMTEncoderDecoderForConditionalGeneration():
             min_length = kwargs.pop('min_length')
         if 'max_length' in kwargs:
             max_length = kwargs.pop('max_length')
-        for seg_num, segment_data in enumerate(zip(*segmented)):
+        segmented = list(zip(*segmented))
+        for seg_num, segment_data in enumerate(segmented):
             input_ids, attention_mask, token_type_ids = segment_data
             if memory.ndim == 2:
                 memory = memory.repeat(input_ids.shape[0], 1, 1)
@@ -156,7 +158,9 @@ class RMTEncoderDecoderForConditionalGeneration():
                 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
-            if seg_num < len(segmented[0])-1:
+            # print('seg_num', 'len(segmented)')
+            # print(seg_num, len(segmented))
+            if seg_num < len(segmented)-1:
                 labels = torch.zeros(inputs_embeds.shape[0], inputs_embeds.shape[1], device=inputs_embeds.device, dtype=input_ids.dtype)
                 out = self.model.forward(**seg_kwargs, output_hidden_states=True, labels=labels)
                 if self.drop_empty_segments:
@@ -164,7 +168,10 @@ class RMTEncoderDecoderForConditionalGeneration():
                 else:
                     memory = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
             else:
+                # print('\n\n\nGENERATION')
                 out = self.model.generate(**seg_kwargs, output_hidden_states=True, min_length=min_length, max_length=max_length)
+
+        # print('\n\n\n\nout,', out.keys())
             
         return out
 
@@ -181,10 +188,19 @@ class RMTEncoderDecoderForConditionalGeneration():
         for input in input_ids:
             # print('input != self.pad_token_id ', (input != self.pad_token_id).shape, (input != self.pad_token_id).sum())
             # 1/0
-            input = input[input != self.pad_token_id][1:-1]
+            input = input[input != self.pad_token_id][:-1]
+
+            # Duplicate question
+            decoded_input = self.tokenizer.decode(input)
+            # print("\n\n\ninput was: ", decoded_input)
+            decoded_input = self.duplicate_question(decoded_input)
+            # print("input became: ", decoded_input)
+            input = self.tokenizer.encode_plus(decoded_input, return_tensors='pt')['input_ids'][0]
 
             seg_sep_inds = [0] + list(range(len(input), 0, -input_seg_size))[::-1] # chunk so that first segment has various size
             input_segments = [input[s:e] for s, e in zip(seg_sep_inds, seg_sep_inds[1:])]
+            # print('input_segments', input_segments)
+            # print('input_segments', [len(i) for i in input_segments])
 
             def pad_add_special_tokens(tensor, seg_size):
                 tensor = torch.cat([
@@ -220,6 +236,23 @@ class RMTEncoderDecoderForConditionalGeneration():
         token_type_ids = torch.chunk(token_type_ids, n_segments, dim=1)
     
         return input_segments, attention_mask, token_type_ids
+
+
+    def duplicate_question(self, text, symbol_gap=100):
+        # print('\n\n\nsource text len ', len(text))
+        D_pos = text.find('(D)')
+        dot_pos = text[D_pos:].find('.')
+        question = text[:D_pos + dot_pos]
+
+        shortened_text = text[:-(D_pos + dot_pos + symbol_gap)]
+        # print('\n\n\nshortened text len ', len(shortened_text)) 
+        last_dot_pos = len(shortened_text) - shortened_text[::-1].find('.')
+        shortened_text = shortened_text[:last_dot_pos]
+        # print('\n\n\nshortened text len ', len(shortened_text)) 
+        text = shortened_text + question
+        # print('\n\n\ndoubled text len ', len(text)) 
+
+        return text
 
 
     def to(self, device):

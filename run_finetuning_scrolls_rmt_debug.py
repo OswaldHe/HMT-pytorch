@@ -1,8 +1,7 @@
 import json
 import logging
 import os
-import re
-import string
+import shutil
 from pathlib import Path
 
 from megatron.data.dataset_utils import get_indexed_dataset_
@@ -10,11 +9,14 @@ from megatron.data.dataset_utils import get_indexed_dataset_
 import horovod.torch as hvd
 from dotenv import load_dotenv
 import torch
-from torch.utils.data import DataLoader, DistributedSampler, Dataset
 import numpy as np
+from torch.utils.data import DataLoader, DistributedSampler
+import datasets
+from huggingface_hub import hf_hub_download
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 
 from trainer import Trainer, TrainerArgs
+
 
 load_dotenv()
 
@@ -46,9 +48,8 @@ torch.set_num_threads(4)
 torch.cuda.set_device(hvd.local_rank())
 
 parser = HfArgumentParser(TrainerArgs)
-parser.add_argument('--data_path', type=str, help='path the training data, could be a folder')
-parser.add_argument('--valid_data_path', type=str, help='path the valid data, could be a folder')
-parser.add_argument('--test_data_path', type=str, help='path the test data, could be a folder')
+parser.add_argument('--task_name', type=str, help='Scrolls task name: "gov_report", "summ_screen_fd", "qmsum", '
+                                                  '"narrative_qa", "qasper", "quality", "contract_nli"')
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
 parser.add_argument('--working_dir', type=str, default='.',
@@ -56,25 +57,28 @@ parser.add_argument('--working_dir', type=str, default='.',
 parser.add_argument('--seed', type=int, default=42, help='random seed')
 
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
-parser.add_argument('--target_seq_len', type=int, default=16, help='input sequnce length (default: 16).')
+parser.add_argument('--target_seq_len', type=int, default=16, help='target sequnce length, should be set to '
+                                                                   'max(len(target))+1 for EOS (default: 16).')
 parser.add_argument('--data_n_workers', type=int, default=2, help='number of dataloader workers (default: 2)')
 
-parser.add_argument('--source_prefix', type=str, default='', help='add task prefix to a source string (default: "")')
+parser.add_argument('--input_prefix', type=str, default='', help='add task prefix to an input string (default: "")')
 
 # model args
 parser.add_argument('--from_pretrained', type=str, help='model name in HF Model Hub (default: "")')
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
-parser.add_argument('--model_type', type=str, default='encoder',
-                    help='model type, encoder, encoder-decoder, decoder, affects preprocessing (default: encoder)')
+parser.add_argument('--backbone_cls', type=str, default=None,
+                    help='backbone class name to use for RMT')
+parser.add_argument('--model_type', type=str, default='encoder-decoder',
+                    help='model type, encoder, encoder-decoder, decoder, affects preprocessing '
+                         '(default: encoder-decoder)')
+
 
 # Aydar # RMT args 
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
 parser.add_argument('--input_seg_size', type=int, default=None, help='maximal number of non-special sequence tokens in a segment')
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
-parser.add_argument('--backbone_cls', type=str, default=None,
-                    help='backbone class name to use for RMT')
 parser.add_argument('--backbone_trainable', action='store_true', default=False,
                     help='make all model weights trainable, not only task-specific head.')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
@@ -95,44 +99,26 @@ parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
 
-class HyperpartisanDataset(Dataset):
-    def __init__(self, datafile, x_field='text', label_field='label'):
-        if isinstance(datafile, str):
-            # convert str path to folder to Path
-            datafile = Path(datafile)
-        self.data = []
-        for line in datafile.open('r'):
-            self.data += [json.loads(line)]
-        self.x_field = x_field
-        self.label_field = label_field
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        x = self.data[idx][self.x_field]
-        label = self.data[idx][self.label_field]
-        return x, label
+def download_metric():
+    scrolls_metric_path = hf_hub_download(repo_id="datasets/tau/scrolls", filename="metrics/scrolls.py")
+    updated_scrolls_metric_path = (
+        os.path.dirname(scrolls_metric_path) + os.path.basename(scrolls_metric_path).replace(".", "_") + ".py"
+    )
+    shutil.copy(scrolls_metric_path, updated_scrolls_metric_path)
+    return updated_scrolls_metric_path
 
 
-def normalize_answer(s):
-    """Lower text and remove punctuation, articles and extra whitespace."""
+scrolls_metric_path = download_metric()
 
-    def remove_articles(text):
-        return re.sub(r"\b(a|an|the)\b", " ", text)
-
-    def white_space_fix(text):
-        return " ".join(text.split())
-
-    def remove_punc(text):
-        exclude = set(string.punctuation)
-        return "".join(ch for ch in text if ch not in exclude)
-
-    def lower(text):
-        return text.lower()
-
-    return white_space_fix(remove_articles(remove_punc(lower(s))))
-
+task_to_metric = {
+    'gov_report': ['rouge/rouge1', 'rouge/rouge2', 'rouge/rougeL', 'rouge/rougeLsum', 'rouge/geometric_mean'],
+    'summ_screen_fd': ['rouge/rouge1', 'rouge/rouge2', 'rouge/rougeL', 'rouge/rougeLsum', 'rouge/geometric_mean'],
+    'qmsum': ['rouge/rouge1', 'rouge/rouge2', 'rouge/rougeL', 'rouge/rougeLsum', 'rouge/geometric_mean'],
+    'narrative_qa': ['f1'],
+    'qasper': ['f1'],
+    'quality': ['exact_match'],
+    'contract_nli': ['exact_match']
+}
 
 if __name__ == '__main__':
     args = parser.parse_args()
@@ -160,51 +146,61 @@ if __name__ == '__main__':
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
 
-    labels_map = {'false': 0, 'true': 1}
-    # collate_fn depends on model type (encoder, encoder-decoder)
-    if args.model_type == 'encoder':
+    if args.model_type == 'encoder-decoder':
+        global_attention_first_token = False  # should be True for LED
+        encode_plus_kwargs = {'truncation': True, 'padding': 'longest', 'pad_to_multiple_of': 1}
+        # generate_kwargs = {'max_length': args.target_seq_len, 'min_length': args.target_seq_len}
+        generate_kwargs = {}
+
+        def collate_fn(batch):
+            # cut too long strings because they may slow down tokenization
+            inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
+            labels = [b['output'][:args.target_seq_len * 10] for b in batch]
+            if args.input_prefix:
+                inputs = [args.input_prefix + inp for inp in inputs]
+            features = tokenizer.batch_encode_plus(list(inputs), max_length=args.input_seq_len, return_tensors='pt',
+                                                   **encode_plus_kwargs)
+            with tokenizer.as_target_tokenizer():
+                labels = tokenizer.batch_encode_plus(list(labels), max_length=args.target_seq_len, return_tensors='pt',
+                                                     **encode_plus_kwargs).input_ids
+            labels[labels == tokenizer.pad_token_id] = -100
+            features['labels'] = labels
+            if 'global_attention_mask' in features:
+                raise RuntimeError('What global attention mask for Longformer and LongformerEncoder-Decoder should be?')
+            return features
+
+    elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+        if args.use_generate_on_valid:
+            raise RuntimeError('use_generate_on_valid should be set to False for encoder-only models')
+
         encode_plus_kwargs = {'max_length': args.input_seq_len,
                               'truncation': True,
                               'padding': 'longest',
                               'pad_to_multiple_of': 1}
+        generate_kwargs = {}
+        labels_map = {'Contradiction': 0, 'Entailment': 1, 'Not mentioned': 2}
+        num_labels = len(labels_map)
 
         def collate_fn(batch):
-            inputs, labels = zip(*batch)
+            # cut too long strings because they may slow down tokenization
+            inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
+            labels = [b['output'][:args.target_seq_len * 10] for b in batch]
+            if args.input_prefix:
+                inputs = [args.input_prefix + inp for inp in inputs]
             features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs)
             labels = np.array([labels_map[t] for t in labels])
-            labels = {'labels': torch.from_numpy(labels)}
-            return {**features, **labels}
-
-    elif args.model_type == 'encoder-decoder':
-        global_attention_first_token = False  # should be True for LED
-        encode_plus_kwargs = {'truncation': True,
-                              'padding': 'longest',
-                              'pad_to_multiple_of': 1}
-        generate_kwargs = {'max_length': args.target_seq_len, 'min_length': args.target_seq_len}
-
-        def collate_fn(batch):
-            inputs, labels = zip(*batch)
-            if args.source_prefix:
-                inputs = [args.source_prefix + inp for inp in inputs]
-            features = tokenizer.batch_encode_plus(list(inputs), max_length=args.input_seq_len,
-                                                   return_tensors='pt', **encode_plus_kwargs)
-            with tokenizer.as_target_tokenizer():
-                labels = tokenizer.batch_encode_plus(list(labels), max_length=args.target_seq_len,
-                                                     return_tensors='pt', **encode_plus_kwargs).input_ids
-            labels[labels == tokenizer.pad_token_id] = -100
-            features['labels'] = labels
-            if 'global_attention_mask' in features:
-                # features["global_attention_mask"] = [[1] + [0] * (len(attn_mask) - 1) for attn_mask in features["attention_mask"]]
-                logger.warning('WHAT SHOULD BE HERE FOR LED??')
+            features['labels'] = torch.from_numpy(labels)
             return features
+
     else:
-        raise NotImplementedError('only encoder & encoder-decoder type of model is supported')
+        raise NotImplementedError('only encoder-decoder models are supported for scrolls datasets or '
+                                  'encoder models only for contract_nli task')
 
     # get train dataset
     if hvd.rank() == 0:
-        logger.info(f'preparing training data from: {args.data_path}')
-    data_path = Path(args.data_path).expanduser().absolute()
-    train_dataset = HyperpartisanDataset(data_path)
+        logger.info(f'preparing dataset for: {args.task_name}')
+    dataset = datasets.load_dataset('tau/scrolls', args.task_name)
+    train_dataset = dataset['train']
     # shuffle train data each epoch (one loop over train_dataset)
     train_sampler = DistributedSampler(train_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=True,
                                        drop_last=False, seed=args.seed)
@@ -214,41 +210,32 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler,
                                   collate_fn=collate_fn, **kwargs)
     # get validation dataset
-    if args.valid_data_path:
-        if hvd.rank() == 0:
-            logger.info(f'preparing validation data from: {args.valid_data_path}')
-        valid_data_path = Path(args.valid_data_path).expanduser().absolute()
-        valid_dataset = HyperpartisanDataset(valid_data_path)
-        valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
-        valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler,
-                                      collate_fn=collate_fn, **kwargs)
-        if args.valid_interval is None:
-            args.valid_interval = args.log_interval
-    else:
-        valid_dataloader = None
-        if hvd.rank() == 0:
-            logger.info('No validation data is used.')
-    # get test dataset
-    if args.test_data_path:
-        if hvd.rank() == 0:
-            logger.info(f'preparing test data from: {args.test_data_path}')
-        test_data_path = Path(args.test_data_path).expanduser().absolute()
-        test_dataset = HyperpartisanDataset(test_data_path)
-        test_sampler = DistributedSampler(test_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
-        test_dataloader = DataLoader(test_dataset, batch_size=per_worker_batch_size, sampler=test_sampler,
-                                     collate_fn=collate_fn, **kwargs)
+    valid_dataloader = None
+    if hvd.rank() == 0:
+        logger.info(f'preparing validation data from: {args.task_name}')
+    valid_dataset = dataset['validation']
+    valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler,
+                                  collate_fn=collate_fn, **kwargs)
+    if args.valid_interval is None:
+        args.valid_interval = args.log_interval
 
     # define model
     model_cls = get_cls_by_name(args.model_cls)
     if hvd.rank() == 0:
         logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
-        model_cfg = AutoConfig.from_pretrained(args.model_cfg) # <- read RMT config
+        model_cfg = AutoConfig.from_pretrained(args.model_cfg)
+        if args.model_type == 'encoder' and args.task_name == 'contract_nli':
+            model_cfg.num_labels = num_labels
         model = model_cls(config=model_cfg)
     else:
         if hvd.rank() == 0:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-        model = model_cls.from_pretrained(args.from_pretrained)
+        if args.model_type == 'encoder-decoder':
+            model = model_cls.from_pretrained(args.from_pretrained)
+        elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+            model = model_cls.from_pretrained(args.from_pretrained, num_labels=num_labels)
 
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
@@ -259,10 +246,8 @@ if __name__ == '__main__':
                     model_attr=args.model_attr,
                     backbone_cls=backbone_cls,
                     bptt_depth=args.bptt_depth, 
-                    pad_token_id=tokenizer.pad_token_id,
-                    cls_token_id=tokenizer.cls_token_id, 
-                    sep_token_id=tokenizer.sep_token_id,
-                    eos_token_id=tokenizer.eos_token_id,)
+                    tokenizer=tokenizer,
+                    encode_plus_kwargs=encode_plus_kwargs)
 
     if not args.backbone_trainable:
         for name, param in model.named_parameters():
@@ -271,11 +256,7 @@ if __name__ == '__main__':
                 param.requires_grad = False
             else:
                 print(f'{name} remains trainable')
-
-    # print(f'Set {model.num_mem_tokens} memory tokens')
-    # for n, p in model.net.named_parameters():
-    #     print(n, p.shape, p.grad)
-
+    
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
     if optimizer_cls is None:
@@ -299,36 +280,58 @@ if __name__ == '__main__':
     def keep_for_metrics_fn(batch, output):
         # select data from batch and model output that would be used to compute metrics
         data = {}
+        if 'generation_outputs' in output:
+            data['labels'] = batch['labels']
+            data['generation_outputs'] = output['generation_outputs']
         if args.model_type == 'encoder':
             data['labels'] = batch['labels']
             data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
-        elif args.model_type == 'encoder-decoder' and 'generation_outputs' in output:
-            # logger.info(f'{output["generation_outputs"].shape}')
-            data['labels'] = batch['labels']
-            data['generation_outputs'] = output['generation_outputs']
         return data
+
+    # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
+    # synchronization is done by using temporay files on a shared filesystem
+    # rank and number of workers is set by num_process and process_id params
+    # BUT our Trainer aggregates all prediction from all gpus!
+    #   this will lead to computing metrics for predictions repeated xN_GPUS times
+    # need to try:
+    # - keep_in_memory=True, may lead to OOM for large validation sets, after sync predictions and targets for the full
+    #       validation set would be stored on each GPU -> xN_GPUs RAM
+    #   - implemented currently
+    # - compute metrics on batch lvl
+    # - add support of HF metrics and turn off aggregation in case if metric has .add_batch method
+    scrolls_metric = datasets.load_metric(scrolls_metric_path, args.task_name, keep_in_memory=True)
 
     def metrics_fn(data):
         # compute metrics based on stored labels, predictions, ...
         metrics = {}
         y, p = None, None
-        if args.model_type == 'encoder':
-            y, p = data['labels'], data['predictions']
-        elif args.model_type == 'encoder-decoder' and 'generation_outputs' in data:
+        if args.model_type == 'encoder-decoder' and 'generation_outputs' in data:
+            # replace -100 with pad token in labels
+            pad_token_id = tokenizer.pad_token_id
+            if isinstance(data['labels'], list):
+                data['labels'] = [[t if t != -100 else pad_token_id for t in labels] for labels in data['labels']]
+            else:
+                data['labels'][data['labels'] == -100] = pad_token_id
             y = tokenizer.batch_decode(data['labels'], skip_special_tokens=True)
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
-            for _y, _p in zip(y, p):
-                logger.info(f'{_y}: {labels_map.get(_y, 0)},  {_p}: {labels_map.get(_p, 0)}')
-            # map to labels
-            y = [labels_map.get(normalize_answer(_y), 0) for _y in y]
-            p = [labels_map.get(normalize_answer(_p), 0) for _p in p]
+            
+            if hvd.rank() == 0:
+                logger.info(f'{y[:10]}')
+                logger.info(f'{p[:10]}')
+                for label, out in zip(data['labels'][:10], data['generation_outputs'][:10]):
+                    logger.info(f'{label} {out}')
+            # todo: do we need to better clean P to remove tokens after eos? not remove special tokens only
+        elif args.model_type == 'encoder':
+            y, p = data['labels'], data['predictions']
+
         if y is not None and p is not None:
-            # accuracy
-            metrics['accuracy'] = accuracy_score(y, p)
-            # f1, precision, recall, mcc
-            metrics['f1'] = f1_score(y, p)
-            metrics['precision'] = precision_score(y, p)
-            metrics['recall'] = recall_score(y, p)
+            if args.model_type == 'encoder-decoder':
+                result = scrolls_metric.compute(predictions=p, references=[[_y] for _y in y])
+                for metric_name in task_to_metric[args.task_name]:
+                    metrics[metric_name] = result[metric_name]
+            elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+                metrics['exact_match'] = accuracy_score(y, p) * 100
+                metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
 
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
@@ -346,24 +349,16 @@ if __name__ == '__main__':
             if hvd.rank() == 0:
                 logger.info(f'Loading best saved model from {best_model_path}')
             trainer.load(best_model_path)
-        if args.valid_data_path:
+        if valid_dataloader is not None:
             if hvd.rank() == 0:
                 logger.info('Runnning validation on valid data:')
             trainer.validate(valid_dataloader, write_tb=False)
-        if args.test_data_path:
-            if hvd.rank() == 0:
-                logger.info('Runnning validation on test data:')
-            trainer.validate(test_dataloader, split='test', write_tb=True)
     else:
         # run validation, do not write to tensorboard
         if hvd.rank() == 0:
             logger.info('Running validation on train set:')
         trainer.validate(train_dataloader, write_tb=False)
-        if args.valid_data_path:
+        if valid_dataloader is not None:
             if hvd.rank() == 0:
                 logger.info('Running validation on valid data:')
             trainer.validate(valid_dataloader, write_tb=False)
-        if args.test_data_path:
-            if hvd.rank() == 0:
-                logger.info('Running validation on test data:')
-            trainer.validate(test_dataloader, split='test', write_tb=False)
