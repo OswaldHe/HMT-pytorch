@@ -52,3 +52,11 @@ def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
     args_dict['MACHINE'] = platform.node()
     args_dict['COMMIT'] = get_git_hash_commit()
     return args_dict
+
+
+def get_distributed_rank():
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    if hvd.is_initialized():
+        return hvd.rank()
+    return 0
