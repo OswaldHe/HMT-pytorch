@@ -49,3 +49,11 @@ def print_rank_last(message):
             print(message, flush=True)
     else:
         print(message, flush=True)
+
+
+def get_distributed_rank():
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    if hvd.is_initialized():
+        return hvd.rank()
+    return 0
