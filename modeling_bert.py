@@ -57,7 +57,7 @@ from transformers.modeling_utils import (
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 
-from utils import get_cls_by_name
+from lm_experiments_tools.utils import get_cls_by_name
 
 
 logger = logging.get_logger(__name__)

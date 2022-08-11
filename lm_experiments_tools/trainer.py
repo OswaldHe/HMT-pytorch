@@ -347,16 +347,14 @@ class Trainer:
                             self.optimizer.step()
                     else:
                         self.optimizer.step()
+
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
         return batch_metrics, batch_metrics_data
 
     def _clip_gradients(self):
-        if self.args.fp16:
-            # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
-            params = self.amp.master_params(self.optimizer)
-        else:
-            params = self.model.parameters()
+        # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
+        params = self.amp.master_params(self.optimizer) if self.args.fp16 else self.model.parameters()
         if self.args.clip_grad_value:
             torch.nn.utils.clip_grad_value_(params, self.args.clip_grad_value)
         elif self.args.clip_grad_norm:
