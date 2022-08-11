@@ -54,7 +54,7 @@ class BertDataset(torch.utils.data.Dataset):
                                                    data_prefix,
                                                    num_epochs,
                                                    max_num_samples,
-                                                   self.max_seq_length - 3, # account for added tokens
+                                                   self.max_seq_length - (3 if binary_head else 2),  # account for added tokens
                                                    short_seq_prob,
                                                    self.seed,
                                                    self.name,

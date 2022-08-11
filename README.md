@@ -8,8 +8,10 @@ BERT model supports such additional features as pre-attention layer norm, sparse
 
 T5 and BERT pre-training is implemented in `run_(model_type)_pretraining.py` scripts.
 
-## Install requirements
-Install requirements after cloning the repo:
+Training tools, such as Trainer, are in `lm_experiments_tools` package.
+
+## Install all requirements
+Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
 ```bash
 grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
 ```
@@ -18,6 +20,20 @@ Currenty, T5 text-to-text installation might install tf2.8.0+, downgrade TF rela
 pip install tensorflow==2.6.0 tensorflow-estimator==2.6.0 tensorflow-text==2.6.0 tensorflow-io-gcs-filesystem==0.21.0 keras==2.6.0
 ```
 > todo: reorder reqs in requirements.txt.
+
+### Install lm_experiments_tools
+`lm_experiments_tools` include Trainer with multi-gpu/node with Horovod and APEX FP16 for models compatible with 
+HF interface. Most of the scripts in the repo use Trainer from `lm_experiments_tools`.
+
+> note: install torch and horovod according to your setup before `lm_experiments_tools` installation.
+
+```bash
+pip install -e .
+```
+This command will install `lm_experiments_tools` with only required packages for Trainer and tools.
+
+`lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
+based on metrics, custom metrics and data transformations support.
 
 ###  Install Horovod
 Depending on your setup just `pip install horovod==0.24.2` might work.

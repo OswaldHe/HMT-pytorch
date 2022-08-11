@@ -43,7 +43,7 @@ from transformers.modeling_utils import PreTrainedModel, find_pruneable_heads_an
 from transformers.utils import logging
 from transformers.models.t5.configuration_t5 import T5Config
 
-from utils import get_cls_by_name
+from lm_experiments_tools.utils import get_cls_by_name
 
 
 logger = logging.get_logger(__name__)

@@ -1,6 +1,7 @@
 import os
 from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
+import json
 
 from overrides import overrides
 
@@ -22,7 +23,7 @@ from deeppavlov.core.data.data_learning_iterator import DataLearningIterator
 from deeppavlov.core.models.torch_model import TorchModel
 from deeppavlov.core.common.metrics_registry import register_metric
 
-import optimizers
+from lm_experiments_tools.utils import get_optimizer, get_cls_by_name, get_git_hash_commit
 
 import logging
 
@@ -47,7 +48,7 @@ import transformers  # noqa: E402
 # # list of official t5 models
 from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E402
 from transformers.data.processors.utils import InputFeatures  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
+from transformers import AutoTokenizer, T5Tokenizer, T5Config  # noqa: E402
 
 
 class T5DatasetReader(DatasetReader):
@@ -233,7 +234,6 @@ class T5Text2TextModel(TorchModel):
             raise NotImplementedError
         elif Path(self.pretrained_model).is_dir():
             # model from experiments - one folder one model with configuration file and possible multiple checkpoints
-            from utils import load_experiment
             self.model, self.tokenizer = load_experiment(self.pretrained_model, t5_configs_path=self.t5_configs_path,
                                                          checkpoint=self.checkpoint, check_commit=self.check_commit)
         else:
@@ -241,13 +241,8 @@ class T5Text2TextModel(TorchModel):
 
         self.model.to(self.device)
 
-        if hasattr(optimizers, self.optimizer_name):
-            optimizer_cls = getattr(optimizers, self.optimizer_name)
-        elif hasattr(torch.optim, self.optimizer_name):
-            optimizer_cls = getattr(torch.optim, self.optimizer_name)
-        elif hasattr(transformers.optimization, self.optimizer_name):
-            optimizer_cls = getattr(transformers.optimization, self.optimizer_name)
-        else:
+        optimizer_cls = get_optimizer(self.optimizer_name)
+        if optimizer_cls is None:
             raise RuntimeError(f'Optimizer {self.optimizer_name} was not found')
         log.info(f'Using optimizer {optimizer_cls}')
         self.optimizer = optimizer_cls(self.model.parameters(), **self.optimizer_parameters)
@@ -438,3 +433,31 @@ def f1_score_with_invalid(y_true, y_predicted) -> float:
 @register_metric('t5_bleu')
 def bleu(y_true, y_predicted) -> float:
     return t5_bleu(y_true, y_predicted)['bleu']
+
+
+def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True):
+    path = Path(path)
+    cfg = json.load((path / 'config.json').open('r'))
+    model_cfg = Path(t5_configs_path) / cfg['model_cfg'] if cfg['model_cfg'] is not None else None
+    model_cls = get_cls_by_name(cfg['model_cls'])
+    if check_commit:
+        assert cfg['COMMIT'] == get_git_hash_commit(), f"expected commit {cfg['COMMIT']}, " \
+                                                       f"but current is {get_git_hash_commit()}"
+    # take latest checkpoint
+    if checkpoint is None:
+        checkpoint = list(sorted(path.glob('*.pth'), key=lambda x: x.stat().st_ctime))[-1]
+
+    if model_cfg is None:
+        t5config = T5Config.from_pretrained(cfg['base_model'])
+    else:
+        t5config = T5Config.from_json_file(model_cfg)
+
+    t5tokenizer = T5Tokenizer.from_pretrained(cfg['base_model'])
+
+    model = model_cls(config=t5config)
+
+    state_dict = torch.load(str(checkpoint), map_location='cpu')
+    model.load_state_dict(state_dict["model_state_dict"])
+    print(f'Model was loaded from: {checkpoint}')
+    model.eval()
+    return model, t5tokenizer
