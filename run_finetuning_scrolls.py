@@ -55,6 +55,8 @@ parser.add_argument('--validate_only', action='store_true', default=False,
 parser.add_argument('--working_dir', type=str, default='.',
                     help='working dir, should be a dir with t5-experiments repo (default: .)')
 parser.add_argument('--seed', type=int, default=42, help='random seed')
+parser.add_argument('--show_valid_examples', type=int, default=0,
+                    help='how many valid examples to show during training (default: 0)')
 
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=16, help='target sequnce length, should be set to '
@@ -282,6 +284,13 @@ if __name__ == '__main__':
                 data['labels'][data['labels'] == -100] = pad_token_id
             y = tokenizer.batch_decode(data['labels'], skip_special_tokens=True)
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
+            if hvd.rank() == 0 and args.show_valid_examples > 0:
+                for i in range(min(args.show_valid_examples, len(y))):
+                    logger.info(f'y: {data["labels"][i]}')
+                    logger.info(f'y decoded: {y[i]}')
+                    logger.info(f'p: {data["generation_outputs"][i]}')
+                    logger.info(f'p decoded: {p[i]}')
+                    logger.info('-' * 50)
             # todo: do we need to better clean P to remove tokens after eos? not remove special tokens only
         elif args.model_type == 'encoder':
             y, p = data['labels'], data['predictions']
