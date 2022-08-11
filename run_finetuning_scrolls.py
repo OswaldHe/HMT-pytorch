@@ -110,6 +110,28 @@ task_to_metric = {
     'contract_nli': ['exact_match']
 }
 
+tasks_with_duplicates = {'narrative_qa', 'qasper'}
+
+
+# https://github.com/tau-nlp/scrolls/blob/5bfb8dbaf3a0128ac8c65922096fd95a645f6ba2/baselines/src/utils/duplicates.py#L1
+# some tasks have multiple possible labels for single input, drop_duplicates_in_input will collect such labels
+def drop_duplicates_in_input(untokenized_dataset):
+    indices_to_keep = []
+    id_to_idx = {}
+    outputs = []
+    for i, (id_, output) in enumerate(zip(untokenized_dataset["id"], untokenized_dataset["output"])):
+        if id_ in id_to_idx:
+            outputs[id_to_idx[id_]].append(output)
+            continue
+        indices_to_keep.append(i)
+        id_to_idx[id_] = len(outputs)
+        outputs.append([output])
+    untokenized_dataset = untokenized_dataset.select(indices_to_keep).flatten_indices()
+    untokenized_dataset = untokenized_dataset.remove_columns("output")
+    untokenized_dataset = untokenized_dataset.add_column("outputs", outputs)
+    return untokenized_dataset
+
+
 if __name__ == '__main__':
     args = parser.parse_args()
     # set current working dir
@@ -145,7 +167,12 @@ if __name__ == '__main__':
         def collate_fn(batch):
             # cut too long strings because they may slow down tokenization
             inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-            labels = [b['output'][:args.target_seq_len * 10] for b in batch]
+            if 'outputs' in batch[0]:
+                # if we have more than 1 label per example (only in valid) take only one of them
+                # to compute loss on valid
+                labels = [b['outputs'][0][:args.target_seq_len * 10] for b in batch]
+            else:
+                labels = [b['output'][:args.target_seq_len * 10] for b in batch]
             if args.input_prefix:
                 inputs = [args.input_prefix + inp for inp in inputs]
             features = tokenizer.batch_encode_plus(list(inputs), max_length=args.input_seq_len, return_tensors='pt',
@@ -155,6 +182,11 @@ if __name__ == '__main__':
                                                      **encode_plus_kwargs).input_ids
             labels[labels == tokenizer.pad_token_id] = -100
             features['labels'] = labels
+            features['id'] = [b['id'] for b in batch]
+            if 'outputs' in batch[0]:
+                features['target_text'] = [b['outputs'] for b in batch]
+            else:
+                features['target_text'] = [b['output'] for b in batch]
             if 'global_attention_mask' in features:
                 raise RuntimeError('What global attention mask for Longformer and LongformerEncoder-Decoder should be?')
             return features
@@ -204,6 +236,8 @@ if __name__ == '__main__':
     if hvd.rank() == 0:
         logger.info(f'preparing validation data from: {args.task_name}')
     valid_dataset = dataset['validation']
+    if args.task_name in tasks_with_duplicates:
+        valid_dataset = drop_duplicates_in_input(valid_dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler,
                                   collate_fn=collate_fn, **kwargs)
@@ -251,7 +285,7 @@ if __name__ == '__main__':
         # select data from batch and model output that would be used to compute metrics
         data = {}
         if 'generation_outputs' in output:
-            data['labels'] = batch['labels']
+            data['labels'] = batch['target_text']
             data['generation_outputs'] = output['generation_outputs']
         if args.model_type == 'encoder':
             data['labels'] = batch['labels']
@@ -277,19 +311,13 @@ if __name__ == '__main__':
         y, p = None, None
         if args.model_type == 'encoder-decoder' and 'generation_outputs' in data:
             # replace -100 with pad token in labels
-            pad_token_id = tokenizer.pad_token_id
-            if isinstance(data['labels'], list):
-                data['labels'] = [[t if t != -100 else pad_token_id for t in labels] for labels in data['labels']]
-            else:
-                data['labels'][data['labels'] == -100] = pad_token_id
-            y = tokenizer.batch_decode(data['labels'], skip_special_tokens=True)
+            y = data['labels']
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
             if hvd.rank() == 0 and args.show_valid_examples > 0:
                 for i in range(min(args.show_valid_examples, len(y))):
-                    logger.info(f'y: {data["labels"][i]}')
-                    logger.info(f'y decoded: {y[i]}')
-                    logger.info(f'p: {data["generation_outputs"][i]}')
-                    logger.info(f'p decoded: {p[i]}')
+                    logger.info(f'y: {y[i]}')
+                    logger.info(f'p: {p[i]}')
+                    logger.info(f'p ids: {data["generation_outputs"][i]}')
                     logger.info('-' * 50)
             # todo: do we need to better clean P to remove tokens after eos? not remove special tokens only
         elif args.model_type == 'encoder':
@@ -297,7 +325,9 @@ if __name__ == '__main__':
 
         if y is not None and p is not None:
             if args.model_type == 'encoder-decoder':
-                result = scrolls_metric.compute(predictions=p, references=[[_y] for _y in y])
+                if not isinstance(y[0], list):
+                    y = [[_y] for _y in y]
+                result = scrolls_metric.compute(predictions=p, references=y)
                 for metric_name in task_to_metric[args.task_name]:
                     metrics[metric_name] = result[metric_name]
             elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
