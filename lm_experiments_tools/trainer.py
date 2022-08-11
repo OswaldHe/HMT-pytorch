@@ -2,6 +2,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 import importlib
+import inspect
 import itertools
 import logging
 import time
@@ -179,6 +180,8 @@ class Trainer:
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
+        self.model_forward_args = set(inspect.getfullargspec(self.model.forward).args)
+
         if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
             raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
                                f'clip_grad_norm = {self.args.clip_grad_norm}, '
@@ -287,14 +290,16 @@ class Trainer:
         if self.batch_transform_fn:
             batch = self.batch_transform_fn(batch)
         for k in batch:
-            batch[k] = batch[k].cuda()
+            if k in self.model_forward_args:
+                batch[k] = batch[k].cuda()
 
         batch_metrics = defaultdict(lambda: 0.0)
         batch_metrics_data = defaultdict(lambda: [])
         with torch.set_grad_enabled(is_train_mode):
             for j in range(0, len(batch['input_ids']), batch_size):
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
-                outputs = self.model(**subbatch)
+                # filter items from batch that are not used by model forward
+                outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args})
                 loss = outputs['loss']
 
                 if not is_train_mode and self.args.use_generate_on_valid:
@@ -319,7 +324,7 @@ class Trainer:
 
                 if self.keep_for_metrics_fn and self.metrics_fn:
                     for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
-                        batch_metrics_data[k] += [v.detach().cpu()]
+                        batch_metrics_data[k] += [v.detach().cpu() if isinstance(v, torch.Tensor) else v]
 
                 if is_train_mode:
                     if self.args.fp16:
@@ -441,8 +446,11 @@ class Trainer:
             metrics_data = {}
             for k in self.metrics_data[split]:
                 metrics_data[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
-                m_shape = metrics_data[k][0].shape
-                if len(m_shape) == 0:
+                m_shape = getattr(metrics_data[k][0], 'shape', None)
+                if m_shape is None:
+                    # data is not a tensor, collect it into python list
+                    metrics_data[k] = list(itertools.chain.from_iterable(metrics_data[k]))
+                elif len(m_shape) == 0:
                     # if scalars
                     metrics_data[k] = torch.stack(metrics_data[k])
                 elif all(m_shape[1:] == t.shape[1:] for t in metrics_data[k]):
