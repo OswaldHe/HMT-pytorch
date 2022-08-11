@@ -328,7 +328,7 @@ if __name__ == '__main__':
         # run validation, do not write to tensorboard
         if hvd.rank() == 0:
             logger.info('Running validation on train set:')
-        trainer.validate(train_dataloader, write_tb=False)
+        trainer.validate(train_dataloader, split='train', write_tb=False)
         if valid_dataloader is not None:
             if hvd.rank() == 0:
                 logger.info('Running validation on valid data:')
