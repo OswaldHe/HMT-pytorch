@@ -15,7 +15,7 @@ import datasets
 from huggingface_hub import hf_hub_download
 from sklearn.metrics import f1_score, accuracy_score
 
-from trainer import Trainer, TrainerArgs
+from lm_experiments_tools import Trainer, TrainerArgs
 
 
 load_dotenv()
@@ -37,8 +37,8 @@ hvd.init()
 import transformers  # noqa: E402
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser  # noqa: E402
 
-from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-import optimizers  # noqa: E402
+from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
 # > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
