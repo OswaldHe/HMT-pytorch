@@ -31,6 +31,7 @@ class RMTEncoderDecoderForConditionalGeneration():
     def set_params(self, 
                     model_attr='', 
                     drop_empty_segments=True,
+                    sum_loss=False,
                     backbone_cls=None,
                     input_size=None, 
                     input_seg_size=None, 
@@ -59,6 +60,7 @@ class RMTEncoderDecoderForConditionalGeneration():
         # print(pad_token_id, eos_token_id)
         self.num_mem_tokens = num_mem_tokens
         self.drop_empty_segments = drop_empty_segments
+        self.sum_loss = sum_loss
         self.extend_word_embeddings()
         
 
@@ -85,6 +87,8 @@ class RMTEncoderDecoderForConditionalGeneration():
     def __call__(self, input_ids, **kwargs):
         memory = self.set_memory()
         segmented = self.pad_and_segment(input_ids)
+
+        outputs = []
         for seg_num, segment_data in enumerate(zip(*segmented)):
             input_ids, attention_mask, token_type_ids = segment_data
             if memory.ndim == 2:
@@ -113,12 +117,17 @@ class RMTEncoderDecoderForConditionalGeneration():
             seg_kwargs['attention_mask'] = attention_mask
 
             out = self.model.forward(**seg_kwargs, output_hidden_states=True)
+            outputs.append(out)
+            
             if self.drop_empty_segments:
                 memory[non_empty_mask] = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
             else:
                 memory = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
             # print('out', out.keys())
             # print('memory3',  memory.shape)
+
+        if self.sum_loss:
+            out['loss'] = torch.stack([o['loss'] for o in outputs]).sum(dim=-1)
 
         return out
 
