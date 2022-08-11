@@ -24,6 +24,7 @@ class RMTEncoderForSequenceClassification():
     def set_params(self, 
                 model_attr='bert', 
                 drop_empty_segments=True,
+                sum_loss=False,
                 input_size=None, 
                 input_seg_size=None, 
                 backbone_cls=None,
@@ -46,6 +47,7 @@ class RMTEncoderForSequenceClassification():
         self.sep_token = torch.tensor([sep_token_id])
         self.num_mem_tokens = num_mem_tokens
         self.drop_empty_segments = drop_empty_segments
+        self.sum_loss = sum_loss
         self.extend_word_embeddings()
 
 
@@ -63,12 +65,10 @@ class RMTEncoderForSequenceClassification():
 
 
     def __call__(self, input_ids, **kwargs):
-        # print(kwargs)
-        # np.save('kwargs.npy', kwargs, allow_pickle=True)
-        # return
         memory = self.set_memory()
-        
         segmented = self.pad_and_segment(input_ids)
+
+        outputs = []
         for seg_num, segment_data in enumerate(zip(*segmented)):
             input_ids, attention_mask, token_type_ids = segment_data
             if memory.ndim == 2:
@@ -78,16 +78,10 @@ class RMTEncoderForSequenceClassification():
 
             seg_kwargs = dict(**kwargs)
             if self.drop_empty_segments:
-                # print('input_ids == self.empty')
-                # print(input_ids.shape, self.empty.shape)
-                # print(input_ids == self.empty)
-                # print(np.where(input_ids == self.empty))
-                # print([torch.equal(input_ids[i], self.empty) for i in range(len(input_ids))])
 
                 non_empty_mask = [not torch.equal(input_ids[i], self.empty) for i in range(len(input_ids))]
                 if sum(non_empty_mask) == 0:
                     continue
-                # print(f'{sum(non_empty_mask)} non-empty segments at step {seg_num}: {non_empty_mask}')
                 input_ids = input_ids[non_empty_mask]
                 attention_mask = attention_mask[non_empty_mask]
                 token_type_ids = token_type_ids[non_empty_mask]
@@ -95,24 +89,24 @@ class RMTEncoderForSequenceClassification():
 
                 inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
                 inputs_embeds[:, 1:1+self.num_mem_tokens] = memory[non_empty_mask]
-
-                # print('inputs_embeds.shape', inputs_embeds.shape)
-                # print('memory: ', memory)
             else:
                 inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
                 inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
 
-            # print('inputs_embeds', inputs_embeds.shape)
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
             seg_kwargs['token_type_ids'] = token_type_ids
             
             out = self.model.forward(**seg_kwargs, output_hidden_states=True)
+            outputs.append(out)
 
             if self.drop_empty_segments:
                 memory[non_empty_mask] = out.hidden_states[-1][:, :self.num_mem_tokens]
             else:
                 memory = out.hidden_states[-1][:, :self.num_mem_tokens]
+
+        if self.sum_loss:
+            out['loss'] = torch.stack([o['loss'] for o in outputs]).sum(dim=-1)
 
         return out
 
