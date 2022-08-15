@@ -41,7 +41,7 @@ MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
 for SRC_LEN in 1024
 do
-for LR in 1e-04 5e-05 2e-05
+for LR in 2e-04 1e-04 5e-05 2e-05
 do
 for N in 1 2 3
 do
@@ -59,10 +59,9 @@ horovodrun --gloo -np $NP python run_finetuning_scrolls.py \
         --optimizer AdamW  --weight_decay 0.001 \
         --lr ${LR} --lr_scheduler $SCHEDULER --num_warmup_steps $(($ITERS/10)) \
         --data_n_workers 2 \
-        --log_interval 100 --valid_interval 225 \
+        --log_interval $(($ITERS/40)) --valid_interval $(($ITERS/40)) \
         --optimize_metric $METRIC --optimize_mode max \
-        --seed $(($N+42)) \
-        --clip_grad_value 5.0
+        --seed $(($N+42))
 done
 done
 done
