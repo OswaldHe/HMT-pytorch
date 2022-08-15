@@ -2,6 +2,7 @@ import importlib
 import os
 import platform
 import subprocess
+import functools
 
 import horovod.torch as hvd
 import torch
@@ -60,3 +61,12 @@ def get_distributed_rank():
     if hvd.is_initialized():
         return hvd.rank()
     return 0
+
+
+def rank_0(fn):
+    @functools.wraps(fn)
+    def rank_0_wrapper(*args, **kwargs):
+        if get_distributed_rank() == 0:
+            return fn(*args, **kwargs)
+        return None
+    return rank_0_wrapper
