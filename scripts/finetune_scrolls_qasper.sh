@@ -63,6 +63,7 @@ horovodrun --gloo -np $NP python run_finetuning_scrolls.py \
         --log_interval $(($ITERS/20)) --valid_interval $(($ITERS/20)) \
         --optimize_metric $METRIC --optimize_mode max \
         --show_valid_examples 5 \
+        --early_stopping_patience 15 \
         --seed $(($N+42))
 done
 done
