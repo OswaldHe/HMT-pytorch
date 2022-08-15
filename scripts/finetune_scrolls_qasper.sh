@@ -10,7 +10,6 @@ MODEL_NAMES=(facebook/bart-base t5-base)
 MODEL_TYPE=encoder-decoder
 MODEL_CLSS=(Bart T5)
 TASK_NAME=qasper
-# PREFIX="summarize: "
 
 # SCROLLS TASKS (train/valid/test)
 # gov_report (17457/972/973) 10ep ~5500 iters with bs 32
@@ -40,15 +39,16 @@ for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
 do
 MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
-for LR in 1e-04 5e-05 2e-05
+for LR in 2e-04 1e-04 5e-05 2e-05
 do
 for SRC_LEN in 256 512 1024
 do
 for N in 1 2 3
 do
+echo RUNNING: $TASK_NAME $SRC_LEN $MODEL_NAME $LR $N
 horovodrun --gloo -np $NP python run_finetuning_scrolls.py \
         --task_name $TASK_NAME \
-        --model_path ./runs/finetune/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}-${TGT_LEN}_bs${TBS}_iters${ITERS}/run_$N \
+        --model_path ./runs/finetune/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}-${TGT_LEN}_bs${TBS}_iters${ITERS}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls transformers:${MODEL_CLS}ForConditionalGeneration \
