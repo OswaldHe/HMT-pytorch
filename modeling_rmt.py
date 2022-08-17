@@ -104,8 +104,7 @@ class RMTEncoderForSequenceClassification():
 
         if self.sum_loss:
             out['loss'] = torch.stack([o['loss'] for o in outputs]).sum(dim=-1)
-
-        return out
+            out['losses'] = tuple([o['loss'] for o in outputs])
 
     def pad_and_segment(self, input_ids):
         
