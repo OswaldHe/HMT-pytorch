@@ -83,8 +83,12 @@ class Encoder(object):
             doc_ids = []
 
             def get_sentences(text):
+                # text is already split on sentences
                 if isinstance(text, list):
-                    return text
+                    if self.args.split_sentences:
+                        return text
+                    # text is split on sentences, but we ignore sentence boundaries
+                    return [''.join(text)]
                 return Encoder.splitter.tokenize(text)
 
             for sentence in get_sentences(text):

@@ -13,7 +13,7 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from transformers import HfArgumentParser
 
-from trainer import Trainer, TrainerArgs
+from lm_experiments_tools import Trainer, TrainerArgs
 
 load_dotenv()
 
@@ -35,8 +35,8 @@ import transformers  # noqa: E402
 from transformers import T5Config, T5Tokenizer  # noqa: E402
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
-from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-import optimizers  # noqa: E402
+from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 # limit cpu threads for tf
