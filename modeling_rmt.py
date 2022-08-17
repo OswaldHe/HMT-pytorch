@@ -22,23 +22,20 @@ class RMTEncoderForSequenceClassification():
         
 
     def set_params(self, 
-                model_attr='bert', 
                 drop_empty_segments=True,
                 sum_loss=False,
                 input_size=None, 
                 input_seg_size=None, 
-                backbone_cls=None,
                 num_mem_tokens=0, 
                 bptt_depth=-1, 
                 pad_token_id=0, 
                 eos_token_id=1,
                 cls_token_id=101, 
                 sep_token_id=102):
-        self.net = getattr(self.model, model_attr)
         if input_size is not None:
             self.input_size = input_size
         else:
-            self.input_size =  self.net.embeddings.position_embeddings.weight.shape[0]
+            self.input_size =  self.base_model.embeddings.position_embeddings.weight.shape[0]
         self.input_seg_size = input_seg_size
 
         self.bptt_depth = bptt_depth
@@ -54,14 +51,14 @@ class RMTEncoderForSequenceClassification():
     def set_memory(self, memory=None):
         if memory is None:
             mem_token_ids = self.mem_token_ids.to(device=self.device)
-            memory = self.net.embeddings.word_embeddings(mem_token_ids)
+            memory = self.base_model.embeddings.word_embeddings(mem_token_ids)
         return memory
     
     def extend_word_embeddings(self):
-        vocab_size = self.net.embeddings.word_embeddings.weight.shape[0]
+        vocab_size = self.base_model.embeddings.word_embeddings.weight.shape[0]
         extended_vocab_size = vocab_size + self.num_mem_tokens
         self.mem_token_ids = torch.arange(vocab_size, vocab_size + self.num_mem_tokens)
-        self.net.resize_token_embeddings(extended_vocab_size)
+        self.base_model.resize_token_embeddings(extended_vocab_size)
 
 
     def __call__(self, input_ids, **kwargs):
@@ -87,10 +84,10 @@ class RMTEncoderForSequenceClassification():
                 token_type_ids = token_type_ids[non_empty_mask]
                 seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
 
-                inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
+                inputs_embeds = self.base_model.embeddings.word_embeddings(input_ids)
                 inputs_embeds[:, 1:1+self.num_mem_tokens] = memory[non_empty_mask]
             else:
-                inputs_embeds = self.net.embeddings.word_embeddings(input_ids)
+                inputs_embeds = self.base_model.embeddings.word_embeddings(input_ids)
                 inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
 
             seg_kwargs['inputs_embeds'] = inputs_embeds
