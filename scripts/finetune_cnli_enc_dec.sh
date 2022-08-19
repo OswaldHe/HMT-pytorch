@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # CUDA_VISIBLE_DEVICES=1,2 NP=2 ./test_bert_sparse_pretrain_train_valid.sh
 set -e
-cd ../..
+cd ..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
 
+TASK_NAME=hyperpartisan_news_detection
+MODEL_TYPE=encoder-decoder
 MODEL_NAME=t5-base
 MODEL_CLS=modeling_rmt_enc_dec:RMTEncoderDecoderForConditionalGeneration
 BACKBONE_CLS=transformers:T5ForConditionalGeneration
-MODEL_TYPE=encoder-decoder
 TASK_NAME=contract_nli
 METRIC=exact_match
 
-INPUT_SEQ_LENS=(1497 998 972 1377)
-MEMORY_SIZES=(10 10 25 50)
+INPUT_SEQ_LENS=(1002 972)
+MEMORY_SIZES=(10 25)
 
-SCHEDULERS=(constant_with_warmup linear)
 
-for N in 1 2
+for N in 3 4
+do
+
+for SCHEDULER in linear constant_with_warmup
 do
 
 for (( j=0; j<${#MEMORY_SIZES[@]}; j++ ))
@@ -26,20 +29,16 @@ do
 MEMORY_SIZE=${MEMORY_SIZES[j]}
 INPUT_SEQ_LEN=${INPUT_SEQ_LENS[j]}
 
-# for (( i=1; i<${#MODEL_NAMES[@]}; i++ ))
-
-LR=1e-03
-
-for (( s=0; s<2; s++ ))
+for LR in 1e-03 5e-04 2e-03
 do
-SCHEDULER=${SCHEDULERS[s]}
 
-echo N, MODEL_NAME MODEL_ATTR, MEMORY_SIZE, INPUT_SEQ_LEN
-echo $N, $MODEL_NAME $MODEL_ATTR, $MEMORY_SIZE, $INPUT_SEQ_LEN
+
+echo N, MODEL_NAME, MODEL_ATTR, MEMORY_SIZE, INPUT_SEQ_LEN, SCHEDULER
+echo $N, $MODEL_NAME, $MODEL_ATTR, $MEMORY_SIZE, $INPUT_SEQ_LEN, $SCHEDULER
 
 horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt.py \
         --task_name $TASK_NAME \
-        --model_path ../runs/finetune/gridsearch/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}_mem${MEMORY_SIZE}/run_$N \
+        --model_path ../runs/finetune/debug/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}_mem${MEMORY_SIZE}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls $MODEL_CLS \
@@ -55,7 +54,7 @@ horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt.py \
         --iters 3000 \
         --optimizer AdamW  --weight_decay 0.001 \
         --lr $LR --lr_scheduler $SCHEDULER --num_warmup_steps 100 \
-        --data_n_workers 2 \
+        --data_n_workers 0 \
         --log_interval 50 --valid_interval 250 \
         --optimize_metric $METRIC --optimize_mode max \
         --seed $(($N+42)) \
