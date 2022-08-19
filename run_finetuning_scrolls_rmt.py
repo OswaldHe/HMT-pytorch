@@ -82,6 +82,8 @@ parser.add_argument('--input_seg_size', type=int, default=None, help='maximal nu
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
 parser.add_argument('--backbone_trainable', action='store_true', default=False,
                     help='make all model weights trainable, not only task-specific head.')
+parser.add_argument('--sum_loss', action='store_true', default=False,
+                    help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
 
@@ -278,8 +280,8 @@ if __name__ == '__main__':
         model.set_params(num_mem_tokens=args.num_mem_tokens, 
                     input_size=args.input_size,
                     input_seg_size=args.input_seg_size,
-                    model_attr=args.model_attr,
                     backbone_cls=backbone_cls,
+                    sum_loss=args.sum_loss,
                     bptt_depth=args.bptt_depth, 
                     pad_token_id=tokenizer.pad_token_id,
                     cls_token_id=tokenizer.cls_token_id, 

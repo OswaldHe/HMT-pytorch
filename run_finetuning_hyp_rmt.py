@@ -77,6 +77,8 @@ parser.add_argument('--backbone_cls', type=str, default=None,
                     help='backbone class name to use for RMT')
 parser.add_argument('--backbone_trainable', action='store_true', default=False,
                     help='make all model weights trainable, not only task-specific head.')
+parser.add_argument('--sum_loss', action='store_true', default=False,
+                    help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
 
@@ -258,6 +260,7 @@ if __name__ == '__main__':
                     input_seg_size=args.input_seg_size,
                     model_attr=args.model_attr,
                     backbone_cls=backbone_cls,
+                    sum_loss=args.sum_loss,
                     bptt_depth=args.bptt_depth, 
                     pad_token_id=tokenizer.pad_token_id,
                     cls_token_id=tokenizer.cls_token_id, 
@@ -341,6 +344,7 @@ if __name__ == '__main__':
         # make sure all workers are done
         hvd.barrier()
         # run validation after training
+
         if args.save_best:
             best_model_path = str(Path(args.model_path) / 'model_best.pth')
             if hvd.rank() == 0:

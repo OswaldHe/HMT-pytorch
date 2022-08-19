@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CUDA_VISIBLE_DEVICES=1,2 NP=2 ./test_bert_sparse_pretrain_train_valid.sh
 set -e
-cd ../..
+cd ..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
@@ -12,25 +12,24 @@ MODEL_NAME=t5-base
 MODEL_CLS=modeling_rmt_enc_dec:RMTEncoderDecoderForConditionalGeneration
 BACKBONE_CLS=transformers:T5ForConditionalGeneration
 
-INPUT_SEQ_LENS=(2004)
-MEMORY_SIZES=(10)
+INPUT_SEQ_LENS=(1002 1503)
+MEMORY_SIZES=(10 10)
 
-SCHEDULERS=(linear constant_with_warmup)
 
-for N in 2
+for SCHEDULER in constant_with_warmup linear
 do
-
-for (( j=0; j<${#MEMORY_SIZES[@]}; j++ ))
-do
-MEMORY_SIZE=${MEMORY_SIZES[j]}
-INPUT_SEQ_LEN=${INPUT_SEQ_LENS[j]}
 
 for LR in 5e-05 1e-04
 do
 
-for (( s=0; s<2; s++ ))
+for N in 1 2
 do
-SCHEDULER=${SCHEDULERS[s]}
+
+for (( j=0; j<${#MEMORY_SIZES[@]}; j++ ))
+do 
+MEMORY_SIZE=${MEMORY_SIZES[j]}
+INPUT_SEQ_LEN=${INPUT_SEQ_LENS[j]}
+
 
 echo N, MODEL_NAME MODEL_ATTR, MEMORY_SIZE, INPUT_SEQ_LEN
 echo $N, $MODEL_NAME $MODEL_ATTR, $MEMORY_SIZE, $INPUT_SEQ_LEN
@@ -39,7 +38,7 @@ horovodrun --gloo -np $NP python run_finetuning_hyp_rmt.py \
         --data_path /home/kuratov/data/hyperpartisan_news_detection/train.jsonl \
         --valid_data_path /home/kuratov/data/hyperpartisan_news_detection/dev.jsonl \
         --test_data_path /home/kuratov/data/hyperpartisan_news_detection/test.jsonl \
-        --model_path ../runs/finetune/gridsearch/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}_mem${MEMORY_SIZE}/run_$N \
+        --model_path ../runs/finetune/debug/$TASK_NAME/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}_mem${MEMORY_SIZE}_sum_loss/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls $MODEL_CLS \
@@ -51,6 +50,7 @@ horovodrun --gloo -np $NP python run_finetuning_hyp_rmt.py \
         --num_mem_tokens $MEMORY_SIZE \
         --bptt_depth -1 \
         --backbone_trainable \
+        --sum_loss \
         --batch_size 1 --gradient_accumulation_steps 8 \
         --iters 1000 \
         --optimizer AdamW  --weight_decay 0.001 \
