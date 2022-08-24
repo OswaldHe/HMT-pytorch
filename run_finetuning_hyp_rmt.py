@@ -1,8 +1,7 @@
 import json
 import logging
 import os
-import re
-import string
+import shutil
 from pathlib import Path
 
 from megatron.data.dataset_utils import get_indexed_dataset_
@@ -10,11 +9,22 @@ from megatron.data.dataset_utils import get_indexed_dataset_
 import horovod.torch as hvd
 from dotenv import load_dotenv
 import torch
-from torch.utils.data import DataLoader, DistributedSampler, Dataset
 import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+from torch.utils.data import DataLoader, DistributedSampler
+import datasets
+from torch.utils.data import DataLoader, DistributedSampler, Dataset
+from huggingface_hub import hf_hub_download
+from sklearn.metrics import f1_score, accuracy_score
 
-from trainer import Trainer, TrainerArgs
+from lm_experiments_tools import Trainer, TrainerArgs
+
+
+load_dotenv()
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 load_dotenv()
 
@@ -35,8 +45,8 @@ hvd.init()
 import transformers  # noqa: E402
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser  # noqa: E402
 
-from utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-import optimizers  # noqa: E402
+from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
 # > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
@@ -81,6 +91,13 @@ parser.add_argument('--sum_loss', action='store_true', default=False,
                     help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
+
+parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
+                    choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
+parser.add_argument('--padding_side', type=str,help='???',
+                    choices=['left', 'right'])
+parser.add_argument('--inter_layer_memory', action='store_true', default=False,
+                    help='pass hidden states of intermediate layers between segments')
 
 # tokenizer
 # todo: add wordpiece tokenizers support?
@@ -255,17 +272,20 @@ if __name__ == '__main__':
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
         backbone_cls = get_cls_by_name(args.backbone_cls) if args.backbone_cls is not None else None
-        model.set_params(num_mem_tokens=args.num_mem_tokens, 
+        model.set_params(
+                    backbone_cls=backbone_cls,
+                    num_mem_tokens=args.num_mem_tokens, 
+                    inter_layer_memory=args.inter_layer_memory,
+                    segment_ordering=args.segment_ordering,
+                    padding_side=args.padding_side,
                     input_size=args.input_size,
                     input_seg_size=args.input_seg_size,
-                    model_attr=args.model_attr,
-                    backbone_cls=backbone_cls,
-                    sum_loss=args.sum_loss,
                     bptt_depth=args.bptt_depth, 
-                    pad_token_id=tokenizer.pad_token_id,
-                    cls_token_id=tokenizer.cls_token_id, 
-                    sep_token_id=tokenizer.sep_token_id,
-                    eos_token_id=tokenizer.eos_token_id,)
+                    sum_loss=args.sum_loss,
+                    tokenizer=tokenizer,
+                    # special_tokens=tokenizer.special_tokens_map,
+                    # encode_plus_kwargs=encode_plus_kwargs
+                    )
 
     if not args.backbone_trainable:
         for name, param in model.named_parameters():
@@ -274,10 +294,6 @@ if __name__ == '__main__':
                 param.requires_grad = False
             else:
                 print(f'{name} remains trainable')
-
-    # print(f'Set {model.num_mem_tokens} memory tokens')
-    # for n, p in model.net.named_parameters():
-    #     print(n, p.shape, p.grad)
 
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
