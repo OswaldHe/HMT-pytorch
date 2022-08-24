@@ -87,6 +87,13 @@ parser.add_argument('--sum_loss', action='store_true', default=False,
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
 
+parser.add_argument('--segment_ordering', type=str,help='????',
+                    choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
+parser.add_argument('--padding_side', type=str,help='???',
+                    choices=['left', 'right'])
+parser.add_argument('--inter_layer_memory', action='store_true', default=False,
+                    help='pass hidden states of intermediate layers between segments')
+
 # tokenizer
 # todo: add wordpiece tokenizers support?
 parser.add_argument('--tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
@@ -277,16 +284,20 @@ if __name__ == '__main__':
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
         backbone_cls = get_cls_by_name(args.backbone_cls) if args.backbone_cls is not None else None
-        model.set_params(num_mem_tokens=args.num_mem_tokens, 
+        model.set_params(
+                    backbone_cls=backbone_cls,
+                    num_mem_tokens=args.num_mem_tokens, 
+                    inter_layer_memory=args.inter_layer_memory,
+                    segment_ordering=args.segment_ordering,
+                    padding_side=args.padding_side,
                     input_size=args.input_size,
                     input_seg_size=args.input_seg_size,
-                    backbone_cls=backbone_cls,
-                    sum_loss=args.sum_loss,
                     bptt_depth=args.bptt_depth, 
-                    pad_token_id=tokenizer.pad_token_id,
-                    cls_token_id=tokenizer.cls_token_id, 
-                    sep_token_id=tokenizer.sep_token_id,
-                    eos_token_id=tokenizer.eos_token_id,)
+                    sum_loss=args.sum_loss,
+                    tokenizer=tokenizer,
+                    # special_tokens=tokenizer.special_tokens_map,
+                    # encode_plus_kwargs=encode_plus_kwargs
+                    )
 
     if not args.backbone_trainable:
         for name, param in model.named_parameters():
@@ -324,7 +335,12 @@ if __name__ == '__main__':
 
             data['generation_outputs'] = output['generation_outputs']
         if args.model_type == 'encoder':
+            
+            ##### booydar
             data['labels'] = batch['labels']
+            for key in batch.keys():
+                if 'loss' in key: 
+                    data[key] = batch[key]
             data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
         return data
 
@@ -367,12 +383,20 @@ if __name__ == '__main__':
                 for metric_name in task_to_metric[args.task_name]:
                     metrics[metric_name] = result[metric_name]
             elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
+                ##### booydar
+                # for key in data.keys():
+                #     if 'loss' in key:
+                #         metrics[key] = data[key]
                 metrics['exact_match'] = accuracy_score(y, p) * 100
                 metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
 
+    ### booydar
+    batch_metrics_fn = lambda _, y: {key: y[key] for key in y.keys() if 'loss' in key}
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
+                      ###booydar
+                      batch_metrics_fn=batch_metrics_fn,
                       generate_kwargs=generate_kwargs if args.use_generate_on_valid else {})
 
     if not args.validate_only:
