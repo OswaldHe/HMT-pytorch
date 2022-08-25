@@ -83,7 +83,7 @@ class RMTEncoderDecoderForConditionalGeneration():
         elif self.segment_ordering == 'repeat_first':
             segmented = segmented + segmented[:1]
         else:
-            raise ValueError(f'Unknown segment ordering: {segment_ordering}')
+            raise ValueError(f'Unknown segment ordering: {self.segment_ordering}')
 
         outputs = []
         for seg_num, segment_data in enumerate(segmented):
@@ -178,7 +178,7 @@ class RMTEncoderDecoderForConditionalGeneration():
                 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
-            if seg_num < len(segmented[0])-1:
+            if seg_num < len(segmented)-1:
                 labels = torch.zeros(inputs_embeds.shape[0], inputs_embeds.shape[1], device=inputs_embeds.device, dtype=input_ids.dtype)
                 out = self.model.forward(**seg_kwargs, output_hidden_states=True, labels=labels)
                 if self.drop_empty_segments:
