@@ -25,6 +25,7 @@ class RMTEncoderDecoderForConditionalGeneration():
 
     def set_params(self, 
                     backbone_cls=None,
+                    model_attr=None,
                     num_mem_tokens=0, 
                     inter_layer_memory=False,
                     segment_ordering='regular',
@@ -39,7 +40,10 @@ class RMTEncoderDecoderForConditionalGeneration():
         if backbone_cls is not None:
             self.model = backbone_cls.from_pretrained(self.from_pretrained)
 
-        self.encoder = self.model.encoder
+        if model_attr is not None:
+            self.encoder = self.model.__getattr__(model_attr).encoder
+        else:
+            self.encoder = self.model.encoder
         self.embeddings = self.encoder.embed_tokens
         self.input_size = self.embeddings.weight.shape[0] if input_size is None else input_size
         self.input_seg_size = input_seg_size
