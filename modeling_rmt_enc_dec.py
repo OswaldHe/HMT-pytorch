@@ -51,6 +51,8 @@ class RMTEncoderDecoderForConditionalGeneration():
         self.bptt_depth = bptt_depth
         self.pad_token_id = tokenizer.pad_token_id
         self.eos_token = torch.tensor([tokenizer.eos_token_id])
+        self.bos_token = torch.tensor([tokenizer.bos_token_id]) if 'bos_token' in tokenizer.special_tokens_map else None
+        self.num_special_tokens_to_add = tokenizer.num_special_tokens_to_add()
         self.num_mem_tokens = num_mem_tokens
         self.segment_ordering = segment_ordering
         self.padding_side = padding_side
@@ -75,6 +77,7 @@ class RMTEncoderDecoderForConditionalGeneration():
 
     def __call__(self, input_ids, **kwargs):
         memory = self.set_memory()
+        mem_start_ind = 1 if self.bos_token is not None else 0
         segmented = self.pad_and_segment(input_ids)
         segmented = list(zip(*segmented))
         
@@ -108,11 +111,11 @@ class RMTEncoderDecoderForConditionalGeneration():
                 seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
 
                 inputs_embeds = self.embeddings(input_ids)
-                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory[non_empty_mask]
+                inputs_embeds[:, mem_start_ind:mem_start_ind+self.num_mem_tokens] = memory[non_empty_mask]
 
             else:
                 inputs_embeds = self.embeddings(input_ids)
-                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
+                inputs_embeds[:, mem_start_ind:mem_start_ind+self.num_mem_tokens] = memory
 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
@@ -136,6 +139,7 @@ class RMTEncoderDecoderForConditionalGeneration():
 
     def generate(self, input_ids, **kwargs):
         memory = self.set_memory()
+        mem_start_ind = 1 if self.bos_token is not None else 0
         min_length, max_length = None, None
         if 'min_length' in kwargs:
             min_length = kwargs.pop('min_length')
@@ -155,7 +159,7 @@ class RMTEncoderDecoderForConditionalGeneration():
             segmented = segmented + segmented[:1]
         else:
             raise ValueError(f'Unknown segment ordering: {self.segment_ordering}')
-        
+
         outputs = []
         for seg_num, segment_data in enumerate(segmented):
             input_ids, attention_mask, token_type_ids = segment_data
@@ -174,11 +178,11 @@ class RMTEncoderDecoderForConditionalGeneration():
                 token_type_ids = token_type_ids[non_empty_mask]
 
                 inputs_embeds = self.embeddings(input_ids)
-                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory[non_empty_mask]
+                inputs_embeds[:, mem_start_ind:mem_start_ind+self.num_mem_tokens] = memory[non_empty_mask]
 
             else:
                 inputs_embeds = self.embeddings(input_ids)
-                inputs_embeds[:, 1:1+self.num_mem_tokens] = memory
+                inputs_embeds[:, mem_start_ind:mem_start_ind+self.num_mem_tokens] = memory
                 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
@@ -197,7 +201,7 @@ class RMTEncoderDecoderForConditionalGeneration():
     def pad_and_segment(self, input_ids):
         
         sequence_len = input_ids.shape[1]
-        input_seg_size = self.input_size - self.num_mem_tokens - 1
+        input_seg_size = self.input_size - self.num_mem_tokens - self.num_special_tokens_to_add
         if self.input_seg_size is not None and self.input_seg_size < input_seg_size:
             input_seg_size = self.input_seg_size
             

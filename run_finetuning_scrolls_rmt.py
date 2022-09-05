@@ -87,7 +87,7 @@ parser.add_argument('--sum_loss', action='store_true', default=False,
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
 
-parser.add_argument('--segment_ordering', type=str,help='????',
+parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
 parser.add_argument('--padding_side', type=str,help='???',
                     choices=['left', 'right'])
@@ -286,6 +286,7 @@ if __name__ == '__main__':
         backbone_cls = get_cls_by_name(args.backbone_cls) if args.backbone_cls is not None else None
         model.set_params(
                     backbone_cls=backbone_cls,
+                    model_attr=args.model_attr,
                     num_mem_tokens=args.num_mem_tokens, 
                     inter_layer_memory=args.inter_layer_memory,
                     segment_ordering=args.segment_ordering,
@@ -295,8 +296,6 @@ if __name__ == '__main__':
                     bptt_depth=args.bptt_depth, 
                     sum_loss=args.sum_loss,
                     tokenizer=tokenizer,
-                    # special_tokens=tokenizer.special_tokens_map,
-                    # encode_plus_kwargs=encode_plus_kwargs
                     )
 
     if not args.backbone_trainable:
@@ -383,10 +382,6 @@ if __name__ == '__main__':
                 for metric_name in task_to_metric[args.task_name]:
                     metrics[metric_name] = result[metric_name]
             elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
-                ##### booydar
-                # for key in data.keys():
-                #     if 'loss' in key:
-                #         metrics[key] = data[key]
                 metrics['exact_match'] = accuracy_score(y, p) * 100
                 metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
