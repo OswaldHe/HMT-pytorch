@@ -148,6 +148,7 @@ class RMTEncoderForSequenceClassification():
 
     def set_params(self, 
                 backbone_cls=None,
+                model_attr=None,
                 num_mem_tokens=0, 
                 inter_layer_memory=False,
                 segment_ordering='regular',
