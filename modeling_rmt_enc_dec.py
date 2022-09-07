@@ -124,9 +124,9 @@ class RMTEncoderDecoderForConditionalGeneration():
             outputs.append(out)
             
             if self.drop_empty_segments:
-                memory[non_empty_mask] = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
+                memory[non_empty_mask] = out.encoder_hidden_states[-1][:, mem_start_ind:mem_start_ind+self.num_mem_tokens]
             else:
-                memory = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
+                memory = out.encoder_hidden_states[-1][:, mem_start_ind:mem_start_ind+self.num_mem_tokens]
 
         for i, o in enumerate(outputs):
             out[f'loss_{i}'] = o['loss'].mean()
@@ -190,9 +190,9 @@ class RMTEncoderDecoderForConditionalGeneration():
                 labels = torch.zeros(inputs_embeds.shape[0], inputs_embeds.shape[1], device=inputs_embeds.device, dtype=input_ids.dtype)
                 out = self.model.forward(**seg_kwargs, output_hidden_states=True, labels=labels)
                 if self.drop_empty_segments:
-                    memory[non_empty_mask] = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
+                    memory[non_empty_mask] = out.encoder_hidden_states[-1][:, mem_start_ind:mem_start_ind+self.num_mem_tokens]
                 else:
-                    memory = out.encoder_hidden_states[-1][:, :self.num_mem_tokens]
+                    memory = out.encoder_hidden_states[-1][:, mem_start_ind:mem_start_ind+self.num_mem_tokens]
             else:
                 out = self.model.generate(**seg_kwargs, output_hidden_states=True, min_length=min_length, max_length=max_length)
             
@@ -209,7 +209,9 @@ class RMTEncoderDecoderForConditionalGeneration():
 
         augmented_inputs = []
         for input in input_ids:
-            input = input[input != self.pad_token_id][1:-1]
+            input = input[input != self.pad_token_id][:-1]
+            if self.bos_token is not None:
+                input = input[1:]
 
             if self.padding_side == 'left':
                 seg_sep_inds = [0] + list(range(len(input), 0, -input_seg_size))[::-1] # chunk so that first segment has various size
@@ -218,11 +220,17 @@ class RMTEncoderDecoderForConditionalGeneration():
             input_segments = [input[s:e] for s, e in zip(seg_sep_inds, seg_sep_inds[1:])]
 
             def pad_add_special_tokens(tensor, seg_size):
-                tensor = torch.cat([
-                                    self.mem_token_ids.to(device=self.device),
-                                    tensor.to(device=self.device),
-                                    self.eos_token.to(device=self.device)
-                                    ])
+                input_elements = []
+                if self.bos_token is not None:
+                    input_elements.append(self.bos_token.to(device=self.device))
+
+                input_elements += [
+                                self.mem_token_ids.to(device=self.device),
+                                tensor.to(device=self.device),
+                                self.eos_token.to(device=self.device)
+                                ]
+
+                tensor = torch.cat(input_elements)
                 pad_size = seg_size - tensor.shape[0]
                 if pad_size > 0:
                     tensor = F.pad(tensor, (0, pad_size))
