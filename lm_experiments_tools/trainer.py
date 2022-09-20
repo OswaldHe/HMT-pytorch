@@ -13,7 +13,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from transformers.optimization import get_scheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import horovod.torch as hvd
 
 from lm_experiments_tools.utils import rank_0
@@ -280,14 +280,13 @@ class Trainer:
         Batch is splitted on sub-batches of self.args.batch_size size, loss and gradients are accumulated.
 
         Args:
-            batch (dict): dict with inputs, inputs_mask, targets
+            batch (dict): dict with inputs, inputs_mask, targets, & all the data that is required by model.forward()
             is_train_mode (bool, optional): In train mode we compute gradients, do backprop and optimizer.step().
                 Defaults to True.
 
         Returns:
             float: loss on batch
         """
-        batch_size = self.args.batch_size
         if is_train_mode:
             self.model.train()
             self.optimizer.zero_grad()
@@ -296,15 +295,22 @@ class Trainer:
 
         if self.batch_transform_fn:
             batch = self.batch_transform_fn(batch)
+
+        batch_sizes = []
         for k in batch:
+            # filter keys in batch to pass to model only supported arguments
             if k in self.model_forward_args:
                 batch[k] = batch[k].cuda()
+                batch_sizes += [batch[k].size(dim=0)]
+        if not np.all(np.array(batch_sizes) == batch_sizes[0]):
+            raise RuntimeError(f'not all elements in a batch have equal dim 0 size: {batch_sizes}')
+        batch_size = batch_sizes[0]
 
         batch_metrics = defaultdict(lambda: 0.0)
         batch_metrics_data = defaultdict(lambda: [])
         with torch.set_grad_enabled(is_train_mode):
-            for j in range(0, len(batch['input_ids']), batch_size):
-                subbatch = {k: batch[k][j: j + batch_size] for k in batch}
+            for j in range(0, batch_size, self.args.batch_size):
+                subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
                 # filter items from batch that are not used by model forward
                 outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args})
                 loss = outputs['loss']
@@ -327,7 +333,9 @@ class Trainer:
                 loss = loss / self.args.gradient_accumulation_steps
                 for k in metrics:
                     metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
-                    batch_metrics[k] += metrics[k].detach().item()
+                    if isinstance(metrics[k], torch.Tensor):
+                        metrics[k] = metrics[k].detach().item()
+                    batch_metrics[k] += metrics[k]
 
                 if self.keep_for_metrics_fn and self.metrics_fn:
                     for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
@@ -339,7 +347,7 @@ class Trainer:
                             scaled_loss.backward()
                             # last sub-batch, call synchronize within amp.scale_loss scope
                             # mb move to just above with optimizer.skip_synchronize()
-                            if j == (len(batch['input_ids']) // batch_size - 1) * batch_size:
+                            if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
                                 self.optimizer.synchronize()
                     else:
                         loss.backward()
@@ -485,10 +493,8 @@ class Trainer:
         return metrics
 
     def train(self) -> None:
-        pbar = None
-        if hvd.rank() == 0:
-            pbar = tqdm(total=self.args.iters, desc='Train')
-            pbar.update(self.n_iter)
+        pbar = tqdm(total=self.args.iters, desc='Train', disable=(hvd.rank() != 0))
+        pbar.update(self.n_iter)
 
         train_batches = self._train_batch_generator()
 
@@ -570,33 +576,40 @@ class Trainer:
             if self.args.save_interval and self.n_iter % self.args.save_interval == 0:
                 self.save(self.args.model_path)
 
-            if hvd.rank() == 0:
-                pbar.update(1)
-                pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
-                                  'valid_loss': f'{valid_loss:.3f}',
-                                  f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
-                                  })
+            pbar.update(1)
+            pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
+                              'valid_loss': f'{valid_loss:.3f}',
+                              f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
+                              })
 
             if self.args.early_stopping_patience is not None and \
                     self.early_stopping_counter > self.args.early_stopping_patience:
                 self._log_info('Early stopping triggered: stopping training...')
                 break
 
-        if hvd.rank() == 0:
-            # todo: run validation, call save model?
-            pbar.close()
+        pbar.close()
         self._log_info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         self._log_info(f'start validation at step {self.n_iter}')
-
         self._reset_batch_metrics('valid')
         self._reset_metrics_data('valid')
-        for batch in tqdm(dataloader, desc='Validation', disable=(hvd.rank() != 0)):
+
+        n_valid_batches = None
+        try:
+            n_valid_batches = len(dataloader)
+        except TypeError:
+            # in case if dataset has no len() method (IterableDataset?)
+            n_valid_batches = None
+
+        pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
+        for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
             self._add_batch_metrics(batch_metrics, split='valid')
             if self.keep_for_metrics_fn and self.metrics_fn:
                 self._add_metrics_data(batch_metrics_data, split='valid')
+            pbar.update()
+        pbar.close()
 
         metrics = self.collect_metrics(split='valid')
         if hvd.rank() == 0:
