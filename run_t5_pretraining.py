@@ -36,6 +36,7 @@ from transformers import T5Config, T5Tokenizer  # noqa: E402
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
 from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+from lm_experiments_tools.utils import get_git_diff  # noqa: E402
 import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
@@ -106,7 +107,8 @@ if __name__ == '__main__':
             Path(model_path).mkdir(parents=True)
         args_dict = collect_run_configuration(args)
         # todo: if model path exists and there is config file, write new config file aside
-        json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
+        json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
+        open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     # get train dataset shards
     data_path = Path(args.data_path).expanduser().absolute()
