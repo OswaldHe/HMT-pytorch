@@ -134,7 +134,7 @@ class RMTEncoderForSequenceClassification():
     '''
     def __init__(self, config=None, base_model=None, **kwargs):
         if config is not None:
-            self.model = AutoModelForSequenceClassification(config, **kwargs)
+            self.model = AutoModelForSequenceClassification.from_config(config, **kwargs)
         
         if base_model is not None:
             self.model = base_model

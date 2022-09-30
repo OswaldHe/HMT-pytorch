@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import datasets
 from torch.utils.data import DataLoader, DistributedSampler, Dataset
 from huggingface_hub import hf_hub_download
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 
 from lm_experiments_tools import Trainer, TrainerArgs
 

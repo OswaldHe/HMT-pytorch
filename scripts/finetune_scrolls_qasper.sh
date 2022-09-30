@@ -6,9 +6,9 @@ cd ..
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
 
-MODEL_NAMES=(facebook/bart-base t5-base)
+MODEL_NAMES=(t5-base)
 MODEL_TYPE=encoder-decoder
-MODEL_CLSS=(Bart T5)
+MODEL_CLSS=(T5)
 TASK_NAME=qasper
 
 # SCROLLS TASKS (train/valid/test)
@@ -33,22 +33,22 @@ SCHEDULER=linear
 
 ITERS=1600
 TBS=32
-BS=8
+BS=4
 
 for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
 do
 MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
-for LR in 2e-04 1e-04 5e-05 2e-05
+for LR in 2e-04
 do
-for SRC_LEN in 256 512 1024
+for SRC_LEN in 512
 do
 for N in 1 2 3
 do
 echo RUNNING: $TASK_NAME $SRC_LEN $MODEL_NAME $LR $N
 horovodrun --gloo -np $NP python run_finetuning_scrolls.py \
         --task_name $TASK_NAME \
-        --model_path ./runs/finetune/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}-${TGT_LEN}_bs${TBS}_iters${ITERS}/run_$N \
+        --model_path ../runs/finetune/debug/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${SRC_LEN}-${TGT_LEN}_baseline_bs${TBS}_iters${ITERS}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls transformers:${MODEL_CLS}ForConditionalGeneration \
