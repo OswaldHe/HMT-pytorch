@@ -36,6 +36,7 @@ import transformers  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
 from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
+from lm_experiments_tools.utils import get_git_diff  # noqa: E402
 import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
@@ -106,7 +107,8 @@ if __name__ == '__main__':
             Path(model_path).mkdir(parents=True)
         args_dict = collect_run_configuration(args)
         # todo: if model path exists and there is config file, write new config file aside
-        json.dump(args_dict, open(model_path/'config.json', 'w'), indent=4)
+        json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
+        open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     tokenizer = _HFAutoTokenizer(args.tokenizer)
     # get train dataset

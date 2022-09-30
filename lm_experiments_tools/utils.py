@@ -24,7 +24,21 @@ def get_cls_by_name(name: str) -> type:
 
 
 def get_git_hash_commit() -> str:
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+    except subprocess.CalledProcessError:
+        # no git installed or we are not in repository
+        commit = ''
+    return commit
+
+
+def get_git_diff() -> str:
+    try:
+        diff = subprocess.check_output(['git', 'diff', 'HEAD', '--binary']).decode('utf8')
+    except subprocess.CalledProcessError:
+        # no git installed or we are not in repository
+        diff = ''
+    return diff
 
 
 def get_optimizer(name):
