@@ -6,7 +6,7 @@ from tensorboard.backend.event_processing import event_accumulator
 import pandas as pd
 from tqdm.notebook import tqdm
 
-TGT_COLS = ['task_name', 'from_pretrained', 'model_cfg', 'model_cls', 'model_type', 'lr', 'batch_size', 'HVD_SIZE', 'lr_scheduler', 'input_seq_len', 'input_seg_size', 'num_mem_tokens', 'model_path', 'sum_loss']
+TGT_COLS = ['task_name', 'from_pretrained', 'model_cfg', 'model_cls', 'model_type', 'lr', 'batch_size', 'HVD_SIZE', 'lr_scheduler', 'input_seq_len', 'input_seg_size', 'num_mem_tokens','segment_ordering','padding_side', 'model_path', 'sum_loss', 'inter_layer_memory', 'num_steps']
 
 def parse_tensorboard(path, scalars):
     """returns a dictionary of pandas dataframes for each requested scalar"""
@@ -48,9 +48,13 @@ def parse_to_csv(path, out_path, target_cols, metric_names):
             if f'{m}/iterations/test' in metrics:
                 expr[m] = metrics[f'{m}/iterations/test']['value'].item()
             expr[f'best_valid_{m}'] = metrics[f'{m}/iterations/valid']['value'].max()
+
+        # print(parse_tensorboard(str(p), ['loss/iterations/train'])['loss/iterations/train'].step)
+        expr['num_steps'] = parse_tensorboard(str(p), ['loss/iterations/train'])['loss/iterations/train'].step.max()
         experiments += [expr]
 
     experiments = pd.DataFrame(experiments)
+    # print('\n\ncolumns: ', experiments.columns)
     
     not_found_cols = [col for col in target_cols if col not in experiments.columns]
     if not_found_cols:
@@ -58,6 +62,7 @@ def parse_to_csv(path, out_path, target_cols, metric_names):
     
     found_cols = [col for col in target_cols if col in experiments.columns]
     experiments = experiments[found_cols]
+    # print('\n\ncolumns: ', experiments.columns)
 
     experiments.to_csv(out_path, index=False)
 
@@ -66,12 +71,12 @@ def parse_to_csv(path, out_path, target_cols, metric_names):
     
 # # HYP
 
-# path = Path('/home/bulatov/bulatov/runs/finetune/debug/hyperpartisan_news_detection')
-# metric_names = ['f1', 'precision', 'recall', 'accuracy']
-# target_cols = ['f1', 'best_valid_f1', 'precision', 'best_valid_precision', 'recall', 'best_valid_recall', 'accuracy', 'best_valid_accuracy']
-# out_path = 'results/debug_hyp.csv'
+path = Path('/home/bulatov/bulatov/runs/finetune/debug/hyperpartisan_news_detection')
+metric_names = ['f1', 'precision', 'recall', 'accuracy']
+target_cols = ['f1', 'best_valid_f1', 'precision', 'best_valid_precision', 'recall', 'best_valid_recall', 'accuracy', 'best_valid_accuracy']
+out_path = 'results/hyp_new.csv'
 
-# parse_to_csv(path, out_path, target_cols, metric_names)
+parse_to_csv(path, out_path, target_cols, metric_names)
 
 # CNLI
 
@@ -82,9 +87,36 @@ out_path = 'results/contract_nli.csv'
 
 parse_to_csv(path, out_path, target_cols, metric_names)
 
+
+# QAsper
+
+path = Path('/home/bulatov/bulatov/runs/finetune/debug/qasper')
+metric_names = ['f1']
+target_cols = TGT_COLS + ['best_valid_f1']
+out_path = 'results/qasper.csv'
+
+parse_to_csv(path, out_path, target_cols, metric_names)
+
 # path = Path('/home/bulatov/bulatov/runs_hyp_good_cnli_ok_080822/finetune/debug/contract_nli')
 # metric_names = ['exact_match']
 # target_cols = TGT_COLS + ['best_valid_exact_match']
 # out_path = 'results/debug_cnli.csv'
 
 # parse_to_csv(path, out_path, target_cols, metric_names)
+
+path = Path('/home/bulatov/bulatov/runs/finetune/debug/qmsum')
+metric_names = ['rouge/geometric_mean']
+target_cols = TGT_COLS + ['best_valid_rouge/geometric_mean']
+out_path = 'results/qmsum.csv'
+
+parse_to_csv(path, out_path, target_cols, metric_names)
+
+
+# quality
+
+path = Path('/home/bulatov/bulatov/runs/finetune/debug/quality')
+metric_names = ['exact_match']
+target_cols = TGT_COLS + ['best_valid_exact_match']
+out_path = 'results/quality_new.csv'
+
+parse_to_csv(path, out_path, target_cols, metric_names)
