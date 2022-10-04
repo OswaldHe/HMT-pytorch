@@ -353,6 +353,8 @@ class Trainer:
                         loss.backward()
 
             if is_train_mode:
+                # log gradients norm, clip gradients and step()
+                self.global_grad_norms += [self._get_gradients_global_norm()]
                 if self.args.fp16:
                     if self.clip_grad:
                         # grads already in sync
@@ -367,7 +369,6 @@ class Trainer:
                             self.optimizer.step()
                     else:
                         self.optimizer.step()
-
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
         return batch_metrics, batch_metrics_data
@@ -385,8 +386,8 @@ class Trainer:
         params = self.amp.master_params(self.optimizer) if self.args.fp16 else self.model.parameters()
         params = [p for p in params if p.grad is not None]
         if len(params) == 0:
-            return torch.tensor(0.)
-        total_norm = torch.linalg.norm(torch.stack([torch.linalg.norm(p.grad.detach()) for p in params]))
+            return 0.0
+        total_norm = torch.linalg.norm(torch.stack([torch.linalg.norm(p.grad.detach()) for p in params])).item()
         return total_norm
 
     def _train_batch_generator(self):
@@ -521,6 +522,7 @@ class Trainer:
 
         self._reset_batch_metrics('train')
         self._reset_metrics_data('train')
+        self.global_grad_norms = []
         best_valid_metric = np.inf if self.args.optimize_mode == 'min' else -np.inf
         valid_metric = best_valid_metric
         valid_loss = np.inf
@@ -539,7 +541,8 @@ class Trainer:
                 # batch-lvl averaged metrics:
                 train_metrics = self.collect_metrics(split='train')
                 train_loss = train_metrics['loss']
-
+                global_grad_norms = list(itertools.chain.from_iterable(hvd.allgather_object(self.global_grad_norms)))
+                self.global_grad_norms = []
                 if hvd.rank() == 0:
                     # todo: move logging, move to self.log()
                     for k in train_metrics:
@@ -563,7 +566,7 @@ class Trainer:
                                 self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
                     # log gradients global norm
-                    gnorm = self._get_gradients_global_norm()
+                    gnorm = np.mean(global_grad_norms) if len(global_grad_norms) > 0 else 0
                     self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
                     self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
 
