@@ -380,6 +380,15 @@ class Trainer:
         elif self.args.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(params, self.args.clip_grad_norm)
 
+    def _get_gradients_global_norm(self):
+        # get gradients global norm (in the same way as in torch.nn.utils.clip_grad_norm_)
+        params = self.amp.master_params(self.optimizer) if self.args.fp16 else self.model.parameters()
+        params = [p for p in params if p.grad is not None]
+        if len(params) == 0:
+            return torch.tensor(0.)
+        total_norm = torch.linalg.norm(torch.stack([torch.linalg.norm(p.grad.detach()) for p in params]))
+        return total_norm
+
     def _train_batch_generator(self):
         while self.n_iter <= self.args.iters:
             if self.train_sampler:
@@ -553,6 +562,10 @@ class Trainer:
                                 self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
                                 self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
+                    # log gradients global norm
+                    gnorm = self._get_gradients_global_norm()
+                    self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
+                    self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
 
             # validation
             if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:

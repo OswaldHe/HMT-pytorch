@@ -41,7 +41,9 @@ def get_git_diff() -> str:
     return diff
 
 
-def get_optimizer(name):
+def get_optimizer(name: str):
+    if ':' in name:
+        return get_cls_by_name(name)
     if hasattr(lm_experiments_tools.optimizers, name):
         return getattr(lm_experiments_tools.optimizers, name)
     if hasattr(torch.optim, name):
