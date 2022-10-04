@@ -4,7 +4,7 @@ with open('requirements-lm-tools.txt') as fp:
     install_requires = fp.read()
 
 setup(name='lm_experiments_tools',
-      version='0.5.0',
+      version='0.5.1',
       description='Tools for training language models with HF compatible interface.',
       author='Yura Kuratov',
       author_email='yurakuratov@gmail.com',
