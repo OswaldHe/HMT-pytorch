@@ -343,11 +343,13 @@ class Trainer:
 
                 if is_train_mode:
                     if self.args.fp16:
-                        with self.amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        is_last_batch = (j == (batch_size // self.args.batch_size - 1) * self.args.batch_size)
+                        # delay unscale allows not to run self.optimizer.synchronize() for every subbatch
+                        # which leads to performance improvements when many grad_acc_steps are performed
+                        # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                        with self.amp.scale_loss(loss, self.optimizer, delay_unscale=not is_last_batch) as scaled_loss:
                             scaled_loss.backward()
-                            # last sub-batch, call synchronize within amp.scale_loss scope
-                            # mb move to just above with optimizer.skip_synchronize()
-                            if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
+                            if is_last_batch:
                                 self.optimizer.synchronize()
                     else:
                         loss.backward()
@@ -434,19 +436,16 @@ class Trainer:
 
     def _reset_batch_metrics(self, split=None):
         if split is None:
-            self.batch_metrics = {}
-            self.batch_metrics['train'] = defaultdict(lambda: [])
-            self.batch_metrics['valid'] = defaultdict(lambda: [])
+            # e.g., self.batch_metrics['train']['metric_name'] is a list of metric values
+            self.batch_metrics = defaultdict(lambda: defaultdict(list))
         else:
-            self.batch_metrics[split] = defaultdict(lambda: [])
+            self.batch_metrics[split] = defaultdict(list)
 
     def _reset_metrics_data(self, split=None):
         if split is None:
-            self.metrics_data = {}
-            self.metrics_data['train'] = defaultdict(lambda: [])
-            self.metrics_data['valid'] = defaultdict(lambda: [])
+            self.metrics_data = defaultdict(lambda: defaultdict(list))
         else:
-            self.metrics_data[split] = defaultdict(lambda: [])
+            self.metrics_data[split] = defaultdict(list)
 
     @staticmethod
     @rank_0
@@ -585,6 +584,10 @@ class Trainer:
                 else:
                     self.early_stopping_counter += 1
                     self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
+                if hvd.rank() == 0 and self.tb:
+                    self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
+                    self.tb.add_scalar('patience/samples', self.early_stopping_counter,
+                                        self.n_iter * self.global_batch_size)
                 if self.lr_drop_scheduler:
                     self.lr_drop_scheduler.step(valid_metric)
 
@@ -608,8 +611,8 @@ class Trainer:
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         self._log_info(f'start validation at step {self.n_iter}')
-        self._reset_batch_metrics('valid')
-        self._reset_metrics_data('valid')
+        self._reset_batch_metrics(split)
+        self._reset_metrics_data(split)
 
         n_valid_batches = None
         try:
@@ -621,13 +624,13 @@ class Trainer:
         pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
         for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
-            self._add_batch_metrics(batch_metrics, split='valid')
+            self._add_batch_metrics(batch_metrics, split=split)
             if self.keep_for_metrics_fn and self.metrics_fn:
-                self._add_metrics_data(batch_metrics_data, split='valid')
+                self._add_metrics_data(batch_metrics_data, split=split)
             pbar.update()
         pbar.close()
 
-        metrics = self.collect_metrics(split='valid')
+        metrics = self.collect_metrics(split=split)
         if hvd.rank() == 0:
             # todo: separate logging from validation/training
             for k in metrics:
@@ -672,9 +675,9 @@ class Trainer:
     def save(self, save_path, suffix='', metrics=None) -> None:
         if save_path is not None:
             if suffix == '':
-                save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
+                save_path = f'{save_path}/model_{self.n_iter}.pth'
             else:
-                save_path = f'{self.args.model_path}/model_{suffix}.pth'
+                save_path = f'{save_path}/model_{suffix}.pth'
             to_save = {
                        "model_state_dict": self.model.state_dict(),
                        "optimizer_state_dict": self.optimizer.state_dict(),
