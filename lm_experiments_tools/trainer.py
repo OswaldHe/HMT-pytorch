@@ -82,6 +82,9 @@ class TrainerArgs:
     min_loss_scale: Optional[float] = field(
         default=None,
         metadata={'help': 'apex min_loss_scale. (default: None)'})
+    max_loss_scale: Optional[float] = field(
+        default=2**24,
+        metadata={'help': 'apex max_loss_scale, default value is taken from apex.amp. (default: 2**24)'})
     clip_grad_norm: Optional[float] = field(
         default=None,
         metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)'})
@@ -262,6 +265,7 @@ class Trainer:
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
                                                              enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
                                                              min_loss_scale=self.args.min_loss_scale,
+                                                             max_loss_scale=self.args.max_loss_scale,
                                                              verbosity=int(hvd.rank() == 0))
 
         self.n_iter = 0
