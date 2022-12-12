@@ -658,7 +658,8 @@ class Trainer:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
             self._log_info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
-        if 'amp' in checkpoint and self.args.fp16:
+        if 'amp' in checkpoint and self.args.fp16 and not reset_optimizer:
+            self._log_info('Loading apex.amp state_dict from the checkpoint.')
             self.amp.load_state_dict(checkpoint['amp'])
         if not reset_iteration:
             self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
