@@ -93,11 +93,15 @@ def rank_0(fn):
     return rank_0_wrapper
 
 
-def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
-    """creates experiment directory, saves confugration and git diff, setups logging
+def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                add_file_logging=True):
+    """creates experiment directory, saves configuration and git diff, setups logging
 
     Args:
         args: arguments parsed by argparser
+        logger: python logger object
+        logger_fmt (str): string with logging format
+        add_file_logging (bool): whether to write logs into files or not
     """
 
     # create model path and save configuration
@@ -112,7 +116,7 @@ def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %
         open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     # configure logging to a file
-    if args.model_path is not None and logger is not None:
+    if args.model_path is not None and logger is not None and add_file_logging:
         if hvd.is_initialized():
             # sync workers to make sure that model_path is already created by worker 0
             hvd.barrier()
