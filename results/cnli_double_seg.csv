@@ -1,4 +1,0 @@
-from_pretrained,model_cfg,model_cls,model_type,lr,batch_size,HVD_SIZE,lr_scheduler,input_seq_len,input_seg_size,num_mem_tokens,model_path,best_valid_exact_match
-roberta-base,,modeling_rmt_double_segment:RMTEncoderForSequenceClassification,encoder,5e-05,1,2,constant_with_warmup,998,,10,../runs/finetune/debug/double_segment/contract_nli/roberta-base/lr5e-05_constant_with_warmup_adamw_wd1e-03_998_mem10/run_1,54.81695556640625
-roberta-base,,modeling_rmt_double_segment:RMTEncoderForSequenceClassification,encoder,1e-05,1,2,constant_with_warmup,998,,10,../runs/finetune/debug/double_segment/contract_nli/roberta-base/lr1e-05_constant_with_warmup_adamw_wd1e-03_998_mem10/run_1,72.73603057861328
-roberta-base,,modeling_rmt_double_segment:RMTEncoderForSequenceClassification,encoder,5e-05,1,2,linear,998,,10,../runs/finetune/debug/double_segment/contract_nli/roberta-base/lr5e-05_linear_adamw_wd1e-03_998_mem10/run_1,72.25433349609375
