@@ -26,21 +26,21 @@ CUDA_LAUNCH_BLOCKING=1
 
 MODEL_NAME=t5-base
 MODEL_TYPE=encoder-decoder
-MODEL_CLS=modeling_rmt_enc_dec_mem_layers_log:RMTEncoderDecoderForConditionalGeneration
+MODEL_CLS=modeling_rmt_enc_dec:RMTEncoderDecoderForConditionalGeneration
 BACKBONE_CLS=transformers:T5ForConditionalGeneration
 TASK_NAME=qasper
 
 ITERS=5000
 TBS=32
-BS=4
+BS=2
 
 TGT_LEN=1024
 INPUT_SEQ_LEN=1024
 
-MAX_N_SEGMENTSS=(2 2 2 )
-MEMORY_SIZES=(1 10 25)
+MAX_N_SEGMENTSS=(3 3)
+MEMORY_SIZES=(1 10 )
 
-for N in 1
+for N in 10
 do
 
 for (( j=0; j<${#MEMORY_SIZES[@]}; j++ ))
@@ -60,9 +60,9 @@ do
 
 echo RUNNING: TASK_NAME SRC_LEN MODEL_NAME N_SEG MEMORY_SIZE INPUT_SEQ_LEN LR N
 echo RUNNING: $TASK_NAME $SRC_LEN $MODEL_NAME $MAX_N_SEGMENTS $MEMORY_SIZE $INPUT_SEQ_LEN $LR $N
-horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt_log.py \
+horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt.py \
         --task_name $TASK_NAME \
-        --model_path ../runs/debug/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-{$MAX_N_SEGMENTS}seg_mem${MEMORY_SIZE}_bs${TBS}_iters${ITERS}_${SEGMENT_ORDERING}_mem_layers/run_$N \
+        --model_path ../runs/finetune/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-{$MAX_N_SEGMENTS}seg_mem${MEMORY_SIZE}_bs${TBS}_iters${ITERS}_${SEGMENT_ORDERING}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls $MODEL_CLS \
