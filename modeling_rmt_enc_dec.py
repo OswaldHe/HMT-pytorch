@@ -109,7 +109,7 @@ class RMTEncoderDecoderForConditionalGeneration():
             non_empty_mask = [s is not None for s in segment_input_ids]
             if sum(non_empty_mask) == 0:
                 continue
-            input_ids = torch.stack(segment_input_ids)[non_empty_mask]
+            input_ids = torch.stack([s for s in segment_input_ids if s is not None])
             attention_mask = self.get_attention_mask(input_ids)
             token_type_ids = self.get_token_type_ids(input_ids)
 
