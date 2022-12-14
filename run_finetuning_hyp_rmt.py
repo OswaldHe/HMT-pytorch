@@ -25,13 +25,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-load_dotenv()
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # if CUDA_VISIBLE_DEVICES is not set make all gpus visible
 if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
     os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([str(i) for i in range(torch.cuda.device_count())])
@@ -64,40 +57,41 @@ parser.add_argument('--validate_only', action='store_true', default=False,
 parser.add_argument('--working_dir', type=str, default='.',
                     help='working dir, should be a dir with t5-experiments repo (default: .)')
 parser.add_argument('--seed', type=int, default=42, help='random seed')
-
+parser.add_argument('--show_valid_examples', type=int, default=0,
+                    help='how many valid examples to show during training (default: 0)')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
-parser.add_argument('--target_seq_len', type=int, default=16, help='input sequnce length (default: 16).')
+parser.add_argument('--target_seq_len', type=int, default=16, help='target sequnce length, should be set to '
+                                                                   'max(len(target))+1 for EOS (default: 16).')
 parser.add_argument('--data_n_workers', type=int, default=2, help='number of dataloader workers (default: 2)')
 
-parser.add_argument('--source_prefix', type=str, default='', help='add task prefix to a source string (default: "")')
+parser.add_argument('--input_prefix', type=str, default='', help='add task prefix to an input string (default: "")')
 
 # model args
 parser.add_argument('--from_pretrained', type=str, help='model name in HF Model Hub (default: "")')
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
-parser.add_argument('--model_type', type=str, default='encoder',
-                    help='model type, encoder, encoder-decoder, decoder, affects preprocessing (default: encoder)')
-
-# Aydar # RMT args 
-parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
-parser.add_argument('--input_seg_size', type=int, default=None, help='maximal number of non-special sequence tokens in a segment')
-parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
 parser.add_argument('--backbone_cls', type=str, default=None,
                     help='backbone class name to use for RMT')
 parser.add_argument('--backbone_trainable', action='store_true', default=False,
                     help='make all model weights trainable, not only task-specific head.')
+parser.add_argument('--model_type', type=str, default='encoder-decoder',
+                    help='model type, encoder, encoder-decoder, decoder, affects preprocessing '
+                         '(default: encoder-decoder)')
+
+
+# Aydar # RMT args 
+parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
+parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
+parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--sum_loss', action='store_true', default=False,
                     help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
-parser.add_argument('--model_attr', type=str, help='name of attribute for torch model')
-
-parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
+parser.add_argument('--segment_ordering', type=str, help='segment order', default='regular',
                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
-parser.add_argument('--padding_side', type=str,help='???',
-                    choices=['left', 'right'])
-parser.add_argument('--inter_layer_memory', action='store_true', default=False,
-                    help='pass hidden states of intermediate layers between segments')
+
+# parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
+#                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
 
 # tokenizer
 # todo: add wordpiece tokenizers support?
@@ -112,6 +106,7 @@ parser.add_argument('--relative_step', action='store_true', default=False,
                     help='Adafactor relative_step (default: False)')
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
+
 
 
 class HyperpartisanDataset(Dataset):
@@ -258,7 +253,7 @@ if __name__ == '__main__':
                                      collate_fn=collate_fn, **kwargs)
 
     # define model
-    model_cls = get_cls_by_name(args.model_cls)
+    model_cls = get_cls_by_name(args.backbone_cls)
     if hvd.rank() == 0:
         logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
@@ -271,21 +266,19 @@ if __name__ == '__main__':
 
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
-        backbone_cls = get_cls_by_name(args.backbone_cls) if args.backbone_cls is not None else None
-        model.set_params(
-                    backbone_cls=backbone_cls,
-                    num_mem_tokens=args.num_mem_tokens, 
-                    inter_layer_memory=args.inter_layer_memory,
-                    segment_ordering=args.segment_ordering,
-                    padding_side=args.padding_side,
-                    input_size=args.input_size,
-                    input_seg_size=args.input_seg_size,
-                    bptt_depth=args.bptt_depth, 
-                    sum_loss=args.sum_loss,
-                    tokenizer=tokenizer,
-                    # special_tokens=tokenizer.special_tokens_map,
-                    # encode_plus_kwargs=encode_plus_kwargs
-                    )
+        rmt_config = {
+            'num_mem_tokens': args.num_mem_tokens, 
+            'max_n_segments': args.max_n_segments,
+            # 'segment_ordering': args.segment_ordering,
+            'input_size': args.input_size,
+            'bptt_depth': args.bptt_depth, 
+            'sum_loss': args.sum_loss,
+            'tokenizer': tokenizer,
+        }
+        rmt_cls = get_cls_by_name(args.model_cls)
+        if hvd.rank() == 0:
+            logger.info(f'Wrapping in: {rmt_cls}')
+        model = rmt_cls(model, **rmt_config)
 
     if not args.backbone_trainable:
         for name, param in model.named_parameters():

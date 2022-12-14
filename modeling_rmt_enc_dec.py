@@ -70,6 +70,7 @@ class RMTEncoderDecoderForConditionalGeneration():
 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
+            seg_kwargs['token_type_ids'] = token_type_ids
 
             out = self.model.forward(**seg_kwargs)
             memory[non_empty_mask] = out.encoder_hidden_states[-1][:, self.memory_position]
@@ -117,6 +118,7 @@ class RMTEncoderDecoderForConditionalGeneration():
 
             seg_kwargs['inputs_embeds'] = inputs_embeds
             seg_kwargs['attention_mask'] = attention_mask
+            seg_kwargs['token_type_ids'] = token_type_ids
 
             if seg_num == len(segmented) - 1:
                 out = self.model.generate(**seg_kwargs)
