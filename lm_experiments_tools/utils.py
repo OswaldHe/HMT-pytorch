@@ -98,7 +98,7 @@ def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %
     """creates experiment directory, saves configuration and git diff, setups logging
 
     Args:
-        args: arguments parsed by argparser
+        args: arguments parsed by argparser, model_path is a required field in args
         logger: python logger object
         logger_fmt (str): string with logging format
         add_file_logging (bool): whether to write logs into files or not
@@ -117,11 +117,13 @@ def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %
 
     # configure logging to a file
     if args.model_path is not None and logger is not None and add_file_logging:
+        # todo: make it independent from horovod
         if hvd.is_initialized():
             # sync workers to make sure that model_path is already created by worker 0
             hvd.barrier()
         # RotatingFileHandler will keep logs only of a limited size to not overflow available disk space.
-        # Each gpu has its own logfile.
+        # Each gpu worker has its own logfile.
+        # todo: make logging customizable? reconsider file size limit?
         fh = RotatingFileHandler(Path(args.model_path) / f"{time.strftime('%Y.%m.%d_%H:%M:%S')}_rank_{rank}.log",
                                  mode='w', maxBytes=100*1024*1024, backupCount=2)
         fh.setLevel(logger.level)
