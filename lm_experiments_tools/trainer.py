@@ -87,10 +87,10 @@ class TrainerArgs:
         metadata={'help': 'apex max_loss_scale, default value is taken from apex.amp. (default: 2**24)'})
     clip_grad_norm: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. 0 or None is no clip (default: None)'})
     clip_grad_value: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. 0 or None is no clip (default: None)'})
     early_stopping_patience: Optional[int] = field(
         default=None,
         metadata={'help': 'stop training if `early_stopping_patience` subsequent evalutations did not improve value of '
@@ -150,26 +150,36 @@ class Trainer:
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
+        Trainer logs all metrics returned by batch_metrics_fn and metrics_fn.
+
         Args:
             args: TrainerArgs passed from CLI
-            model: torch model to train, model is compatible with HF interfaces
+            model: torch model to train, model should be compatible with HF interface:
+                # batch = batch_transform_fn(batch)
+                output = model(**batch)
+                loss = output['loss']
             optimizer: torch optimizer
             train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
             valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader,
                 distributed-aware, optional.
             batch_transform_fn (Optional): function to be applied to the output from DataLoader, should be used to
-                create inputs compatible (if not already) with HF model, e.g.:
-                    {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
-            batch_metrics_fn (Optional): function to be applied to model outputs to compute batch-lvl metrics, metrics
-                are averaged across batches: avg_i(metric(batch_i, labels_i)),
-                not metric([batch_1; batch_2; ...], labels). Could be used for computing loss, metrics on large
-                datasets, pre-training, where exact metrics values are not so important or computing exact metrics
-                is resource-exhaustive.
-            keep_for_metrics_fn (Optional): f(batch, outputs) to keep predictions, labels or other data that would be
-                used to compute metrics on full validation set and every log_interval on train set
-            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn
+                create inputs compatible (if not already) with training model, e.g.:
+                    f(batch) -> {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
+            batch_metrics_fn (Optional): function f(batch, model_output) to compute batch-lvl metrics.
+                Metrics are averaged across batches: avg_i(metric(batch_i, labels_i)),
+                not metric([batch_1; batch_2; ...], labels). batch_metrics_fn could be used for computing loss, metrics
+                on large datasets, pre-training, where exact metrics values are not so important or computing exact
+                metrics is resource-exhaustive.
+                Should return dict: {'metric_name': metric_value, ...}
+            keep_for_metrics_fn (Optional): f(batch, model_output) to keep predictions, labels or other data that would
+                be used to compute metrics on full validation set and every log_interval on train set.
+                Should return dict {'key_1': tensor/np.array/scalar/list, 'key_2': ...}.
+                The result of keep_for_metrics_fn will be aggregated into tensor/list and passed to metrics_fn.
+                Check `collect_metrics` function for further details.
+            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn.
+                Should return dict: {'metric_name': metric_value, ...}
         """
-        # we assume that train/valid dataloader are already multi-gpu aware
+        # we assume that train/valid/test dataloaders are already multi-gpu aware
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = train_dataloader
