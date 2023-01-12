@@ -5,7 +5,7 @@ cd ..
 
 horovodrun --gloo -np $NP python run_bert_pretraining.py \
 --data_path ./data/toy_wiki/train_text_sentence --valid_data_path ./data/toy_wiki/valid_text_sentence \
---tokenizer ./vocabs/bert-base-uncased/ --model_cfg ./bert_configs/bert_base_uncased-4L_sparse.json \
+--tokenizer ./vocabs/bert-base-uncased/ --model_cfg ./bert_configs/bert_base_uncased-4L_preln_sparse_rope.json \
 --model_cls modeling_bert:BertForPreTraining \
 --model_path ./tests/runs/test_bert_pretrain \
 --batch_size 16 --gradient_accumulation_steps 2 \
