@@ -507,8 +507,18 @@ class BertSelfAttention(nn.Module):
             if self.position_embedding_type == 'relative_attention_bias':
                 position_bias = self.get_relative_attention_bias(position_bias, bs, seq_len, seq_len)
 
+            query_dtype = query_layer.dtype
+            if query_dtype != torch.half:
+                # deepspeed sparse_self_attention supports only fp16 inputs
+                # manually cast to half in case if running in fp32 or O1 modes
+                query_layer, key_layer, value_layer = query_layer.half(), key_layer.half(), value_layer.half()
+                # attention_mask = attention_mask.half()
+                if position_bias is not None:
+                    position_bias = position_bias.half()
             context_layer = self.sparse_self_attention(query_layer, key_layer, value_layer, rpe=position_bias,
                                                        key_padding_mask=attention_mask)
+            if query_dtype == torch.float:
+                context_layer = context_layer.float()
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -734,10 +744,25 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.pre_layer_norm = getattr(config, 'pre_layer_norm', False)
+        # last_layer_ln is used with pre_layer_norm:
+        # pre_layer_norm: https://arxiv.org/abs/2002.04745
+        #   x = x + mha(ln(x))
+        #   x = x + ffn(mha)
+        #   if last_layer:
+        #       x = ln(x)
+        # post_layer_norm (standart bert):
+        #  x = ln(x + mha(x))
+        #  x = ln(x + ffn(x))
+        self.last_layer_norm = getattr(config, 'last_layer_norm', self.pre_layer_norm)
+        if not self.pre_layer_norm and self.last_layer_norm:
+            raise RuntimeError('last_layer_norm could be used only with pre_layer_norm=True')
         self.layer = nn.ModuleList(
                 [BertLayer(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_hidden_layers)]
             )
         self.gradient_checkpointing = False
+        if self.pre_layer_norm and self.last_layer_norm:
+            self.last_layer_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -812,6 +837,9 @@ class BertEncoder(nn.Module):
                     position_bias = layer_outputs[1]
                 else:
                     position_bias = layer_outputs[2]
+
+        if self.pre_layer_norm and self.last_layer_norm:
+            hidden_states = self.last_layer_ln(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -1344,6 +1372,8 @@ class BertForPreTraining(BertPreTrainedModel):
         prediction_scores, seq_relationship_score = self.cls(sequence_output, pooled_output)
 
         total_loss = None
+        masked_lm_loss = None
+        next_sentence_loss = None
         if labels is not None and next_sentence_label is not None:
             loss_fct = CrossEntropyLoss()
             masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))

@@ -1,8 +1,13 @@
 import importlib
+import logging
 import os
 import platform
 import subprocess
+import time
 import functools
+import json
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 import horovod.torch as hvd
 import torch
@@ -71,7 +76,7 @@ def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
     return args_dict
 
 
-def get_distributed_rank():
+def get_distributed_rank() -> int:
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank()
     if hvd.is_initialized():
@@ -86,3 +91,44 @@ def rank_0(fn):
             return fn(*args, **kwargs)
         return None
     return rank_0_wrapper
+
+
+def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                add_file_logging=True):
+    """creates experiment directory, saves configuration and git diff, setups logging
+
+    Args:
+        args: arguments parsed by argparser, model_path is a required field in args
+        logger: python logger object
+        logger_fmt (str): string with logging format
+        add_file_logging (bool): whether to write logs into files or not
+    """
+
+    # create model path and save configuration
+    rank = get_distributed_rank()
+    if rank == 0 and args.model_path is not None:
+        model_path = Path(args.model_path)
+        if not model_path.exists():
+            Path(model_path).mkdir(parents=True)
+        args_dict = collect_run_configuration(args)
+        # todo: if model path exists and there is config file, write new config file aside
+        json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
+        open(model_path / 'git.diff', 'w').write(get_git_diff())
+
+    # configure logging to a file
+    if args.model_path is not None and logger is not None and add_file_logging:
+        # todo: make it independent from horovod
+        if hvd.is_initialized():
+            # sync workers to make sure that model_path is already created by worker 0
+            hvd.barrier()
+        # RotatingFileHandler will keep logs only of a limited size to not overflow available disk space.
+        # Each gpu worker has its own logfile.
+        # todo: make logging customizable? reconsider file size limit?
+        fh = RotatingFileHandler(Path(args.model_path) / f"{time.strftime('%Y.%m.%d_%H:%M:%S')}_rank_{rank}.log",
+                                 mode='w', maxBytes=100*1024*1024, backupCount=2)
+        fh.setLevel(logger.level)
+        fh.setFormatter(logging.Formatter(logger_fmt))
+        logger.addHandler(fh)
+
+    if rank == 0 and args.model_path is None and logger is not None:
+        logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')

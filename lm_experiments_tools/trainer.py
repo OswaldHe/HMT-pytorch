@@ -1,12 +1,12 @@
-from collections import defaultdict
-from copy import deepcopy
-from dataclasses import dataclass, field
 import importlib
 import inspect
 import itertools
 import logging
 import time
-from typing import Dict, Tuple, Union, Optional
+from collections import defaultdict
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -18,9 +18,6 @@ import horovod.torch as hvd
 
 from lm_experiments_tools.utils import rank_0
 
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -85,12 +82,15 @@ class TrainerArgs:
     min_loss_scale: Optional[float] = field(
         default=None,
         metadata={'help': 'apex min_loss_scale. (default: None)'})
+    max_loss_scale: Optional[float] = field(
+        default=2**24,
+        metadata={'help': 'apex max_loss_scale, default value is taken from apex.amp. (default: 2**24)'})
     clip_grad_norm: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. 0 or None is no clip (default: None)'})
     clip_grad_value: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. 0 or None is no clip (default: None)'})
     early_stopping_patience: Optional[int] = field(
         default=None,
         metadata={'help': 'stop training if `early_stopping_patience` subsequent evalutations did not improve value of '
@@ -150,26 +150,36 @@ class Trainer:
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
+        Trainer logs all metrics returned by batch_metrics_fn and metrics_fn.
+
         Args:
             args: TrainerArgs passed from CLI
-            model: torch model to train, model is compatible with HF interfaces
+            model: torch model to train, model should be compatible with HF interface:
+                # batch = batch_transform_fn(batch)
+                output = model(**batch)
+                loss = output['loss']
             optimizer: torch optimizer
             train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
             valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader,
                 distributed-aware, optional.
             batch_transform_fn (Optional): function to be applied to the output from DataLoader, should be used to
-                create inputs compatible (if not already) with HF model, e.g.:
-                    {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
-            batch_metrics_fn (Optional): function to be applied to model outputs to compute batch-lvl metrics, metrics
-                are averaged across batches: avg_i(metric(batch_i, labels_i)),
-                not metric([batch_1; batch_2; ...], labels). Could be used for computing loss, metrics on large
-                datasets, pre-training, where exact metrics values are not so important or computing exact metrics
-                is resource-exhaustive.
-            keep_for_metrics_fn (Optional): f(batch, outputs) to keep predictions, labels or other data that would be
-                used to compute metrics on full validation set and every log_interval on train set
-            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn
+                create inputs compatible (if not already) with training model, e.g.:
+                    f(batch) -> {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
+            batch_metrics_fn (Optional): function f(batch, model_output) to compute batch-lvl metrics.
+                Metrics are averaged across batches: avg_i(metric(batch_i, labels_i)),
+                not metric([batch_1; batch_2; ...], labels). batch_metrics_fn could be used for computing loss, metrics
+                on large datasets, pre-training, where exact metrics values are not so important or computing exact
+                metrics is resource-exhaustive.
+                Should return dict: {'metric_name': metric_value, ...}
+            keep_for_metrics_fn (Optional): f(batch, model_output) to keep predictions, labels or other data that would
+                be used to compute metrics on full validation set and every log_interval on train set.
+                Should return dict {'key_1': tensor/np.array/scalar/list, 'key_2': ...}.
+                The result of keep_for_metrics_fn will be aggregated into tensor/list and passed to metrics_fn.
+                Check `collect_metrics` function for further details.
+            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn.
+                Should return dict: {'metric_name': metric_value, ...}
         """
-        # we assume that train/valid dataloader are already multi-gpu aware
+        # we assume that train/valid/test dataloaders are already multi-gpu aware
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = train_dataloader
@@ -265,6 +275,7 @@ class Trainer:
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
                                                              enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
                                                              min_loss_scale=self.args.min_loss_scale,
+                                                             max_loss_scale=self.args.max_loss_scale,
                                                              verbosity=int(hvd.rank() == 0))
 
         self.n_iter = 0
@@ -566,8 +577,9 @@ class Trainer:
                                                    self.n_iter * self.global_batch_size)
                     # log gradients global norm
                     gnorm = np.mean(global_grad_norms) if len(global_grad_norms) > 0 else 0
-                    self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
-                    self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
+                    if self.tb:
+                        self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
+                        self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
 
             # validation
             if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
@@ -587,7 +599,7 @@ class Trainer:
                 if hvd.rank() == 0 and self.tb:
                     self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
                     self.tb.add_scalar('patience/samples', self.early_stopping_counter,
-                                        self.n_iter * self.global_batch_size)
+                                       self.n_iter * self.global_batch_size)
                 if self.lr_drop_scheduler:
                     self.lr_drop_scheduler.step(valid_metric)
 
@@ -656,7 +668,8 @@ class Trainer:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
             self._log_info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
-        if 'amp' in checkpoint and self.args.fp16:
+        if 'amp' in checkpoint and self.args.fp16 and not reset_optimizer:
+            self._log_info('Loading apex.amp state_dict from the checkpoint.')
             self.amp.load_state_dict(checkpoint['amp'])
         if not reset_iteration:
             self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
