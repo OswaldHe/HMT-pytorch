@@ -343,8 +343,12 @@ if __name__ == '__main__':
             metrics['recall'] = recall_score(y, p)
         return metrics
 
+    ## booydar
+    batch_metrics_fn = lambda _, y: {key: y[key] for key in y.keys() if (('loss' in key) or ('!log' in key))}
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
+                      ##
+                      batch_metrics_fn=batch_metrics_fn,
                       generate_kwargs=generate_kwargs if args.use_generate_on_valid else {})
 
     if not args.validate_only:
