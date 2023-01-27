@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-
 class RMTEncoderDecoderForConditionalGeneration(torch.nn.Module):
     def __init__(self, base_model, **rmt_kwargs):
         super().__init__()
@@ -176,7 +175,6 @@ class RMTEncoderDecoderForConditionalGeneration(torch.nn.Module):
         if pad_size > 0:
             tensor = F.pad(tensor, (0, pad_size))
         return tensor
-
     def get_attention_mask(self, tensor):
         mask = torch.ones_like(tensor)
         mask[tensor == self.pad_token_id] = 0
