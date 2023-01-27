@@ -93,28 +93,27 @@ class RMTEncoderForSequenceClassification(torch.nn.Module):
         if self.rmt_config['sum_loss']:
             out['loss'] = torch.stack(losses).sum(dim=0)
 
-        mem_token_ids = self.mem_token_ids
-        memory_tokens = self.model.embeddings(mem_token_ids)
-
         return out
 
-    def pad_and_segment(self, input_ids):
+    def pad_and_segment(self, input_ids):       
         segmented_batch = []
         for seq in input_ids:
             seq = seq[(seq != self.pad_token_id) & (seq != self.cls_token.item()) & (seq != self.sep_token.item())]
             seq = seq[:self.segment_size * self.rmt_config['max_n_segments']]
 
-            n_seg = math.ceil(len(seq) / self.segment_size)
-            input_segments = torch.chunk(seq, n_seg)
+            # split seq into segments, align by right border
+            split_inds = (list(range(len(seq), 0, -self.segment_size)) + [0])[::-1]
+            input_segments = [seq[start:end] for (start, end) in zip(split_inds, split_inds[1:])]
             input_segments = [self.pad_add_special_tokens(t, self.rmt_config['input_size']) for t in input_segments]
+
+            # add empty segment markers if needed
+            n_empty_segments = self.rmt_config['max_n_segments'] - len(input_segments)
+            input_segments = [None] * n_empty_segments + input_segments
 
             segmented_batch.append(input_segments)
 
-        # batch of segments -> segmented batch
-        # + align segments to right border
-        # so that the last segment is always non-empty
-        segmented_batch = [[s[::-1][i] if len(s) > i else None for s in segmented_batch]
-                           for i in range(self.rmt_config['max_n_segments'])][::-1]
+        segmented_batch = [[sample[seg_num] for sample in segmented_batch] \
+                            for seg_num in range(self.rmt_config['max_n_segments'])]
         return segmented_batch
 
     def pad_add_special_tokens(self, tensor, segment_size):
