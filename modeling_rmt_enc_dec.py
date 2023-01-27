@@ -1,15 +1,13 @@
 import math
 import torch
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union
 from transformers import PreTrainedModel, AutoModel
 
 
-class RMTEncoderDecoderForConditionalGeneration():
+class RMTEncoderDecoderForConditionalGeneration(torch.nn.Module):
     def __init__(self, base_model, **rmt_kwargs):
         self.model = base_model
         self.set_params(**rmt_kwargs)
-
 
     def set_params(self, num_mem_tokens, tokenizer, **rmt_config):
         self.rmt_config = rmt_config
@@ -18,20 +16,19 @@ class RMTEncoderDecoderForConditionalGeneration():
         
         self.segment_size = rmt_config['input_size'] - num_mem_tokens - tokenizer.num_special_tokens_to_add()
 
-
     def set_memory(self, memory=None):
         if memory is None:
             mem_token_ids = self.mem_token_ids.to(device=self.device)
             memory = self.embeddings(mem_token_ids)
         return memory
-    
-    
+
     def extract_special_tokens(self, tokenizer):
         self.pad_token_id = tokenizer.pad_token_id
-        self.eos_token = torch.tensor([tokenizer.eos_token_id])
-        self.bos_token = torch.tensor([tokenizer.bos_token_id]) if 'bos_token' in tokenizer.special_tokens_map else None
-    
-    
+        self.bos_token = None
+        self.register_buffer('eos_token',  torch.tensor([tokenizer.eos_token_id]))
+        if 'bos_token' in tokenizer.special_tokens_map:
+            self.register_buffer('bos_token',  torch.tensor([tokenizer.bos_token_id]))
+
     def extend_word_embeddings(self, num_mem_tokens):
         vocab_size = self.model.encoder.embed_tokens.weight.shape[0]
         extended_vocab_size = vocab_size + num_mem_tokens
@@ -43,8 +40,7 @@ class RMTEncoderDecoderForConditionalGeneration():
         mem_start_ind = 1 if self.bos_token is not None else 0
         self.memory_position = range(mem_start_ind, mem_start_ind + num_mem_tokens)
 
-
-    def __call__(self, input_ids, **kwargs):
+    def forward(self, input_ids, **kwargs):
         memory = self.set_memory()
         memory = memory.repeat(input_ids.shape[0], 1, 1)
         segmented = self.pad_and_segment(input_ids)
@@ -72,7 +68,7 @@ class RMTEncoderDecoderForConditionalGeneration():
             seg_kwargs['attention_mask'] = attention_mask
             seg_kwargs['token_type_ids'] = token_type_ids
 
-            out = self.model.forward(**seg_kwargs)
+            out = self.model(**seg_kwargs)
             memory[non_empty_mask] = out.encoder_hidden_states[-1][:, self.memory_position]
 
             losses.append(out['loss'])
@@ -93,7 +89,6 @@ class RMTEncoderDecoderForConditionalGeneration():
         memory_tokens = self.embeddings(mem_token_ids)
 
         return out
-
 
     def generate(self, input_ids, **kwargs):        
         memory = self.set_memory()
@@ -132,7 +127,7 @@ class RMTEncoderDecoderForConditionalGeneration():
         
         return out
 
-    def pad_and_segment(self, input_ids, **kwargs):       
+    def pad_and_segment(self, input_ids):       
         segmented_batch = []
         for seq in input_ids:
             seq = seq[(seq != self.pad_token_id) & (seq != self.eos_token.item())]
@@ -140,20 +135,21 @@ class RMTEncoderDecoderForConditionalGeneration():
                 seq = seq[seq != self.bos_token_id]
             seq = seq[:self.segment_size * self.rmt_config['max_n_segments']]
 
-            n_seg = math.ceil(len(seq) / self.segment_size)
-            input_segments = torch.chunk(seq, n_seg)
+            # split seq into segments, align by right border
+            split_inds = (list(range(len(seq), 0, -self.segment_size)) + [0])[::-1]
+            input_segments = [seq[start:end] for (start, end) in zip(split_inds, split_inds[1:])]
             input_segments = [self.pad_add_special_tokens(t, self.rmt_config['input_size']) for t in input_segments]
 
+            # add empty segment markers if needed
+            n_empty_segments = self.rmt_config['max_n_segments'] - len(input_segments)
+            input_segments = [None] * n_empty_segments + input_segments
+
             segmented_batch.append(input_segments)
-    
-        # batch of segments -> segmented batch 
-        # + align segments to right border
-        # so that the last segment is always non-empty
-        segmented_batch = [[s[::-1][i] if len(s) > i else None for s in segmented_batch] \
-                            for i in range(self.rmt_config['max_n_segments'])][::-1]
+
+        segmented_batch = [[sample[seg_num] for sample in segmented_batch] \
+                            for seg_num in range(self.rmt_config['max_n_segments'])]
         return segmented_batch
-    
-    
+
     def pad_add_special_tokens(self, tensor, segment_size):
         input_elements = []
         if self.bos_token is not None:
@@ -171,24 +167,10 @@ class RMTEncoderDecoderForConditionalGeneration():
             tensor = F.pad(tensor, (0, pad_size))                  
         return tensor
     
-    
     def get_attention_mask(self, tensor):
         mask = torch.ones_like(tensor)
         mask[tensor == self.pad_token_id] = 0
         return mask
-        
     
     def get_token_type_ids(self, tensor):
         return torch.zeros_like(tensor)
-
-
-    def to(self, device):
-        self.model = self.model.to(device)
-        
-    
-    def cuda(self):
-        self.model.cuda()
-
-
-    def __getattr__(self, attribute):
-        return getattr(self.model, attribute)
