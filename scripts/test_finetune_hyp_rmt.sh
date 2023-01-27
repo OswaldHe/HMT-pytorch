@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
-# CUDA_VISIBLE_DEVICES=1,2 NP=2 ./test_bert_sparse_pretrain_train_valid.sh
 set -e
 cd ..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
 
-MODEL_TYPE=encoder-decoder
-MODEL_NAME=t5-base
-MODEL_CLS=modeling_rmt_enc_dec:RMTEncoderDecoderForConditionalGeneration
-BACKBONE_CLS=transformers:T5ForConditionalGeneration
-TASK_NAME=contract_nli
-METRIC=exact_match
+MODEL_NAME=bert-base-cased
+MODEL_TYPE=encoder
+MODEL_CLS=modeling_rmt:RMTEncoderForSequenceClassification
+BACKBONE_CLS=transformers:BertForSequenceClassification
+TASK_NAME=hyperpartisan_news_detection
 
-ITERS=3000
-TBS=32
-BS=16
+ITERS=30
+TBS=128
+BS=4
 
-TGT_LEN=512
+TGT_LEN=1024
 INPUT_SEQ_LEN=1024
 
-MAX_N_SEGMENTSS=(1 1)
-MEMORY_SIZES=(0 10)
+MAX_N_SEGMENTSS=(1 2 3)
+MEMORY_SIZES=(10 10 10)
 
-for N in 2 3
+for N in 10
 do
 
 for (( j=0; j<${#MEMORY_SIZES[@]}; j++ ))
@@ -34,6 +32,7 @@ MAX_N_SEGMENTS=${MAX_N_SEGMENTSS[j]}
 for SEGMENT_ORDERING in regular
 do
 
+METRIC=f1
 SCHEDULER=linear
 
 for LR in 1e-05
@@ -42,20 +41,22 @@ do
 
 echo RUNNING: TASK_NAME SRC_LEN MODEL_NAME N_SEG MEMORY_SIZE INPUT_SEQ_LEN LR N
 echo RUNNING: $TASK_NAME $SRC_LEN $MODEL_NAME $MAX_N_SEGMENTS $MEMORY_SIZE $INPUT_SEQ_LEN $LR $N
-horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt.py \
-        --task_name $TASK_NAME \
-        --model_path ../runs/debug/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-{$MAX_N_SEGMENTS}seg_mem${MEMORY_SIZE}_bs${TBS}_iters${ITERS}_${SEGMENT_ORDERING}/run_$N \
+horovodrun --gloo -np $NP python run_finetuning_hyp_rmt.py \
+        --data_path /home/kuratov/data/hyperpartisan_news_detection/train.jsonl \
+        --valid_data_path /home/kuratov/data/hyperpartisan_news_detection/dev.jsonl \
+        --test_data_path /home/kuratov/data/hyperpartisan_news_detection/test.jsonl \
+        --model_path ../runs/test/${TASK_NAME}/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-{$MAX_N_SEGMENTS}seg_mem${MEMORY_SIZE}_bs${TBS}_iters${ITERS}_${SEGMENT_ORDERING}/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
         --model_cls $MODEL_CLS \
         --backbone_cls $BACKBONE_CLS \
-        --use_generate_on_valid \
         --input_seq_len $INPUT_SEQ_LEN \
         --input_size 512 \
         --target_seq_len $TGT_LEN \
         --num_mem_tokens $MEMORY_SIZE \
         --max_n_segments $MAX_N_SEGMENTS \
         --segment_ordering $SEGMENT_ORDERING \
+        --backbone_trainable \
         --bptt_depth -1 \
         --batch_size $BS --gradient_accumulation_steps $(($TBS/($BS*$NP))) \
         --iters $ITERS \
@@ -66,12 +67,11 @@ horovodrun --gloo -np $NP python run_finetuning_scrolls_rmt.py \
         --optimize_metric $METRIC --optimize_mode max \
         --show_valid_examples 5 \
         --early_stopping_patience 15 \
-        --optimize_metric $METRIC --optimize_mode max \
-        --seed $(($N+42)) \
-        --clip_grad_value 5.0
+        --seed $(($N+42))
 done
 done
 done
 done
 echo "run_bert_pretraining.py done"
 echo "done"
+
