@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import os
 import shutil
 from pathlib import Path
@@ -85,9 +86,14 @@ parser.add_argument('--sum_loss', action='store_true', default=False,
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
 parser.add_argument('--segment_ordering', type=str, help='segment order', default='regular',
                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
-
+parser.add_argument('--memory_forward_implementation', type=str, help='path to memory forward funсtion script', default=None)
+parser.add_argument('--memory_layers', type=str, help='memory-augmented layer inds or "all" for all layers', default=None)
+parser.add_argument('--share_memory_layers', action='store_true', help='share weights of memory layers', default=False)
+parser.add_argument('--reconstruction_loss_coef', type=float, default=None,
+                    help='reconstuction loss ratio in total loss')
 # parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
 #                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
+
 
 # tokenizer
 # todo: add wordpiece tokenizers support?
@@ -278,6 +284,14 @@ if __name__ == '__main__':
 
     # Aydar # Pass memory settings to pretrained model
     if args.num_mem_tokens is not None:
+        # if args.memory_forward_implementation is not None:
+        #     implementation_path = os.path.dirname(args.memory_forward_implementation)
+        #     print(f'Loooking for memory_forward in {implementation_path}')
+        #     sys.path.append(implementation_path)
+        #     from memory_forward import memory_forward
+        # else:
+        #     memory_forward = None
+
         rmt_config = {
             'num_mem_tokens': args.num_mem_tokens, 
             'max_n_segments': args.max_n_segments,
@@ -286,6 +300,10 @@ if __name__ == '__main__':
             'bptt_depth': args.bptt_depth, 
             'sum_loss': args.sum_loss,
             'tokenizer': tokenizer,
+            # 'memory_forward_func': memory_forward,
+            'memory_layers': args.memory_layers,
+            'share_memory_layers': args.share_memory_layers,
+            'reconstruction_loss_coef': args.reconstruction_loss_coef,
         }
         rmt_cls = get_cls_by_name(args.model_cls)
         if hvd.rank() == 0:
