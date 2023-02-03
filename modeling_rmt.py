@@ -101,7 +101,7 @@ class RMTEncoderForSequenceClassification(RMTBaseModel):
         # todo: replace copy-pasted args with @functools.wraps(self.model.forward) decorator
         # need to change Trainer's usage of inspect.getfullargspec to inspect.signature to support @wraps
         kwargs = {'attention_mask': attention_mask, 'token_type_ids': token_type_ids,
-                  'position_ids': position_ids, 'head_mask': head_mask, 'inputs_embeds': inputs_embeds,
+                  'position_ids': position_ids, 'inputs_embeds': inputs_embeds,
                   'labels': labels, 'output_attentions': output_attentions,
                   'output_hidden_states': output_hidden_states, 'return_dict': return_dict,
                   }
@@ -168,17 +168,17 @@ class RMTEncoderForSequenceClassification(RMTBaseModel):
 
 
 import types
-# from rmt_utils.encoder.memory_layers import memory_layers_forward
 import rmt_utils
 class RMTEncoderMemoryLayers(RMTEncoderForSequenceClassification):
     def set_params(self, num_mem_tokens, tokenizer, **rmt_config):
         super().set_params(num_mem_tokens, tokenizer, **rmt_config)
         self.add_memory_layers()
-        # memory_layers_forward = rmt_utils.encoder.memory_layers.memory_layers_forward
-        from rmt_utils.encoder.memory_layers import memory_layers_forward
-        self.override_encoder_forward(memory_layers_forward)
+        self.override_encoder_forward(rmt_config.get('memory_forward_func'))
 
     def override_encoder_forward(self, memory_forward_func):
+        if memory_forward_func is None:
+            from rmt_utils.encoder.memory_layers import memory_layers_forward
+            memory_forward_func = memory_layers_forward
         encoder_forward = lambda *args, **kwargs: memory_forward_func(*args, **kwargs, rmt_parent=self)
         self.model.base_model.encoder.forward = types.MethodType(encoder_forward, self.model.base_model.encoder)
 
@@ -310,14 +310,16 @@ class RMTEncoderDecoderForConditionalGeneration(RMTBaseModel):
 
 
 import types
-from rmt_utils.encoder_decoder.memory_layers import memory_layers_forward
 class RMTEncoderDecoderMemoryLayers(RMTEncoderDecoderForConditionalGeneration):
     def set_params(self, num_mem_tokens, tokenizer, **rmt_config):
         super().set_params(num_mem_tokens, tokenizer, **rmt_config)
         self.add_memory_layers()
-        self.override_encoder_forward(memory_layers_forward)
+        self.override_encoder_forward(rmt_config.get('memory_forward_func'))
 
     def override_encoder_forward(self, memory_forward_func):
+        if memory_forward_func is None:
+            from rmt_utils.encoder_decoder.memory_layers import memory_layers_forward
+            memory_forward_func = memory_layers_forward
         encoder_forward = lambda *args, **kwargs: memory_forward_func(*args, **kwargs, rmt_parent=self)
         self.model.base_model.encoder.forward = types.MethodType(encoder_forward, self.model.base_model.encoder)
 
@@ -365,9 +367,6 @@ class RMTEncoderDecoderMemoryLoss(RMTEncoderDecoderMemoryLayers):
             param_name = re.sub('\.', '_', f'rec_cls_{n}')
             self.register_parameter(param_name, p)
 
-        # self.reconstruction_cls = torch.nn.Linear((self.num_mem_tokens + 1) * self.config.d_model, self.rmt_config['max_n_segments']).to(device=self.device)
-        # for n, p in self.reconstruction_cls.named_parameters():
-        #     self.register_parameter(f'reconstruction_cls_{n}', p)
     
     def segment_reconstruction_forward(self, reconstruction_labels, encoder_out):
 
