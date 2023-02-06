@@ -206,6 +206,112 @@ class RMTEncoderMemoryLayers(RMTEncoderForSequenceClassification):
                         self.register_parameter(param_name, p)
 
 
+import numpy as np
+class RMTEncoderMLMMemLoss(RMTEncoderMemoryLayers):
+    def set_params(self, num_mem_tokens, tokenizer, **rmt_config):
+        super().set_params(num_mem_tokens, tokenizer, **rmt_config)
+        self.add_reconstruction_layers()
+
+    def add_reconstruction_layers(self):
+        self.rec_attn = copy.deepcopy(self.model.base_model.encoder.layer[-1])
+        self.rec_cls = torch.nn.Linear(self.model.config.hidden_size, self.model.config.vocab_size)
+
+        for n, p in self.rec_attn.named_parameters():
+            param_name = re.sub('\.', '_', f'rec_attn_{n}')
+            self.register_buffer(param_name, p)
+        
+        for n, p in self.rec_cls.named_parameters():
+            param_name = re.sub('\.', '_', f'rec_cls_{n}')
+            self.register_parameter(param_name, p)
+            
+    def segment_reconstruction_forward(self, memory_outputs, previous_input_ids):
+        mlm_prob = self.rmt_config['mlm_prob'] if 'mlm_prob' in self.rmt_config else 0.15
+        
+        input_embeddings = self.model.embeddings(previous_input_ids)
+        input_embeddings[:, self.memory_position] = memory_outputs
+
+        token_inds = list(range(self.num_mem_tokens + 2, input_embeddings.shape[1] - 1))
+        mask_inds = np.random.choice(token_inds, round(len(token_inds) * mlm_prob))
+        attention_mask = torch.ones(input_embeddings.shape[1]).to(device=input_embeddings.device)
+        attention_mask[mask_inds] = 0
+
+        rec_attn_out = self.rec_attn(input_embeddings, attention_mask=attention_mask)
+        rec_logits = self.rec_cls(rec_attn_out[0])
+
+        loss_fct = CrossEntropyLoss(ignore_index=-100)
+        # print('rec_logits.shape', rec_logits.shape)
+        # print('previous_input_ids.shape', previous_input_ids.shape)
+        reconstruction_loss = loss_fct(rec_logits.view(-1, rec_logits.size(-1)), previous_input_ids.view(-1))
+        
+        return reconstruction_loss
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
+                inputs_embeds=None, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+        # todo: replace copy-pasted args with @functools.wraps(self.model.forward) decorator
+        # need to change Trainer's usage of inspect.getfullargspec to inspect.signature to support @wraps
+        kwargs = {'attention_mask': attention_mask, 'token_type_ids': token_type_ids,
+                  'position_ids': position_ids, 'inputs_embeds': inputs_embeds,
+                  'labels': labels, 'output_attentions': output_attentions,
+                  'output_hidden_states': output_hidden_states, 'return_dict': return_dict,
+                  }
+
+        memory = self.set_memory()
+        memory = memory.repeat(input_ids.shape[0], 1, 1)
+        segmented = self.pad_and_segment(input_ids)
+
+        losses = []
+        reconstruction_loss = 0
+        for seg_num, segment_input_ids in enumerate(segmented):
+            if (self.rmt_config['bptt_depth'] > -1) and (len(segmented) - seg_num > self.rmt_config['bptt_depth']): 
+                memory = memory.detach()
+
+            seg_kwargs = dict(**kwargs)
+            seg_kwargs['output_hidden_states'] = True
+
+            non_empty_mask = [s is not None for s in segment_input_ids]
+            if sum(non_empty_mask) == 0:
+                continue
+            input_ids = torch.stack([s for s in segment_input_ids if s is not None])
+            attention_mask = self.get_attention_mask(input_ids)
+            token_type_ids = self.get_token_type_ids(input_ids)
+            seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
+
+            inputs_embeds = self.model.embeddings(input_ids)
+            inputs_embeds[:, self.memory_position] = memory[non_empty_mask]
+
+            seg_kwargs['input_ids'] = None
+            seg_kwargs['inputs_embeds'] = inputs_embeds
+            seg_kwargs['attention_mask'] = attention_mask
+            seg_kwargs['token_type_ids'] = token_type_ids
+
+            out = self.model(**seg_kwargs)
+            memory[non_empty_mask] = out.hidden_states[-1][:, self.memory_position]
+
+            losses.append(out['loss'])
+            # print('memory.shape', memory.shape)
+            segment_reconstruction_loss = self.segment_reconstruction_forward(memory[non_empty_mask], input_ids)
+            out[f'rec_loss_{seg_num}'] = segment_reconstruction_loss
+            reconstruction_loss += segment_reconstruction_loss
+            out['reconstruction_loss'] = reconstruction_loss
+
+        # drop unnecessary hiddens to save memory
+        if not kwargs.get('output_hidden_states'):
+            for key in out.keys():
+                if 'hidden_state' in key:
+                    out[key] = None
+
+        for i, l in enumerate(losses):
+            out[f'loss_{i}'] = l.mean()
+
+        if self.rmt_config['sum_loss']:
+            out['loss'] = torch.stack(losses).sum(dim=0)
+
+        rec_coef = self.rmt_config['reconstruction_loss_coef']
+        out['loss'] = out['reconstruction_loss'] * rec_coef + out['loss'] * (1 - rec_coef)
+
+        return out
+
+
 class RMTEncoderDecoderForConditionalGeneration(RMTBaseModel):
     def forward(self, input_ids, attention_mask=None,
                 head_mask=None,
@@ -382,7 +488,16 @@ class RMTEncoderDecoderMemoryLoss(RMTEncoderDecoderMemoryLayers):
 
         return reconstruction_loss
     
-    def forward(self, input_ids, **kwargs):
+    def forward(self, input_ids, attention_mask=None,
+                head_mask=None,
+                inputs_embeds=None, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+        # todo: replace copy-pasted args with @functools.wraps(self.model.forward) decorator
+        # need to change Trainer's usage of inspect.getfullargspec to inspect.signature to support @wraps
+        kwargs = {'attention_mask': attention_mask, 
+                  'head_mask': head_mask, 'inputs_embeds': inputs_embeds,
+                  'labels': labels, 'output_attentions': output_attentions,
+                  'output_hidden_states': output_hidden_states, 'return_dict': return_dict,
+                  }
         memory = self.set_memory()
         memory = memory.repeat(input_ids.shape[0], 1, 1)
         segmented = self.pad_and_segment(input_ids)
@@ -461,7 +576,16 @@ class RMTEncoderDecoderHorizontalMemory(RMTEncoderDecoderMemoryLayers):
         
         return memory
 
-    def forward(self, input_ids, **kwargs):
+    def forward(self, input_ids, attention_mask=None,
+                head_mask=None,
+                inputs_embeds=None, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+        # todo: replace copy-pasted args with @functools.wraps(self.model.forward) decorator
+        # need to change Trainer's usage of inspect.getfullargspec to inspect.signature to support @wraps
+        kwargs = {'attention_mask': attention_mask, 
+                  'head_mask': head_mask, 'inputs_embeds': inputs_embeds,
+                  'labels': labels, 'output_attentions': output_attentions,
+                  'output_hidden_states': output_hidden_states, 'return_dict': return_dict,
+                  }
         memory = self.set_memory()
         memory = memory.repeat(input_ids.shape[0], 1, 1)
         segmented = self.pad_and_segment(input_ids)
