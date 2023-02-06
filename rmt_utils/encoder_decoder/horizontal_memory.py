@@ -131,24 +131,17 @@ def horizontal_memory_forward(
             if use_cache:
                 raise NotImplementedError
         else:
-            # rmt_parent.memory_storage['attention_mask'] = attention_mask
-            # rmt_parent.memory_storage['encoder_attention_mask'] = encoder_attention_mask
-            # rmt_parent.memory_storage['extended_attention_mask'] = extended_attention_mask
-            # rmt_parent.memory_storage['layer_attention_mask'] = layer_attention_mask
             if i in rmt_parent.memory_storage:
                 layer_memory = rmt_parent.memory_storage[i]
                 non_empty_mask = rmt_parent.memory_storage['non_empty_mask']
-                if not all(non_empty_mask):
-                # if layer_memory.shape[0] > hidden_states.shape[0]:
-                    layer_memory = layer_memory[non_empty_mask]
                 if layer_memory.shape[0] == 1:
-                    layer_memory = layer_memory.repeat(hidden_states.shape[0], 1, 1)
-                    
-                hidden_states = torch.cat([layer_memory, hidden_states], dim=1)
+                    layer_memory = layer_memory.repeat(len(non_empty_mask), 1, 1)
+                
+                hidden_states = torch.cat([layer_memory[non_empty_mask], hidden_states], dim=1)
                 layer_attention_mask = extended_attention_mask
             else:
+                layer_memory = None
                 layer_attention_mask = extended_attention_mask[:, :, :, rmt_parent.num_mem_tokens:]
-            # rmt_parent.memory_storage['layer_attention_mask'] = layer_attention_mask
                 
             layer_outputs = layer_module(
                 hidden_states,
@@ -197,7 +190,11 @@ def horizontal_memory_forward(
             
             hidden_states[:, rmt_parent.memory_position] = updated_memory
         
-        rmt_parent.memory_storage[i] = hidden_states[:, rmt_parent.memory_position].detach()
+        if layer_memory is not None:
+            layer_memory[non_empty_mask] = hidden_states[:, rmt_parent.memory_position].detach()
+        else:
+            layer_memory = hidden_states[:, rmt_parent.memory_position].detach()
+        rmt_parent.memory_storage[i] = layer_memory
 
         # We share the position biases between the layers - the first layer store them
         # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
@@ -379,24 +376,17 @@ def horizontal_memory_forward_1by1(
             if use_cache:
                 raise NotImplementedError
         else:
-            # rmt_parent.memory_storage['attention_mask'] = attention_mask
-            # rmt_parent.memory_storage['encoder_attention_mask'] = encoder_attention_mask
-            # rmt_parent.memory_storage['extended_attention_mask'] = extended_attention_mask
-            # rmt_parent.memory_storage['layer_attention_mask'] = layer_attention_mask
             if i in rmt_parent.memory_storage:
                 layer_memory = rmt_parent.memory_storage[i]
                 non_empty_mask = rmt_parent.memory_storage['non_empty_mask']
-                if not all(non_empty_mask):
-                # if layer_memory.shape[0] > hidden_states.shape[0]:
-                    layer_memory = layer_memory[non_empty_mask]
                 if layer_memory.shape[0] == 1:
-                    layer_memory = layer_memory.repeat(hidden_states.shape[0], 1, 1)
-                    
-                hidden_states = torch.cat([layer_memory, hidden_states], dim=1)
+                    layer_memory = layer_memory.repeat(len(non_empty_mask), 1, 1)
+                
+                hidden_states = torch.cat([layer_memory[non_empty_mask], hidden_states], dim=1)
                 layer_attention_mask = extended_attention_mask
             else:
+                layer_memory = None
                 layer_attention_mask = extended_attention_mask[:, :, :, rmt_parent.num_mem_tokens:]
-            # rmt_parent.memory_storage['layer_attention_mask'] = layer_attention_mask
                 
             layer_outputs = layer_module(
                 hidden_states,
@@ -445,7 +435,11 @@ def horizontal_memory_forward_1by1(
             
             hidden_states[:, rmt_parent.memory_position] = updated_memory
         
-        rmt_parent.memory_storage[i] = hidden_states[:, rmt_parent.memory_position].detach()
+        if layer_memory is not None:
+            layer_memory[non_empty_mask] = hidden_states[:, rmt_parent.memory_position].detach()
+        else:
+            layer_memory = hidden_states[:, rmt_parent.memory_position].detach()
+        rmt_parent.memory_storage[i] = layer_memory
 
         # We share the position biases between the layers - the first layer store them
         # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
