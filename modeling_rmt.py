@@ -151,7 +151,7 @@ class RMTEncoderForSequenceClassification(RMTBaseModel):
         if self.rmt_config['sum_loss']:
             out['loss'] = torch.stack(losses).sum(dim=0)
 
-        return out  
+        return out
     
     def pad_add_special_tokens(self, tensor, segment_size):
         input_elements = []
@@ -232,7 +232,7 @@ class RMTEncoderDecoderForConditionalGeneration(RMTBaseModel):
             non_empty_mask = [s is not None for s in segment_input_ids]
             if sum(non_empty_mask) == 0:
                 continue
-            input_ids = torch.stack(segment_input_ids)[non_empty_mask]
+            input_ids = torch.stack([s for s in segment_input_ids if s is not None])
             attention_mask = self.get_attention_mask(input_ids)
             seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
 
@@ -382,7 +382,7 @@ class RMTEncoderDecoderMemoryLoss(RMTEncoderDecoderMemoryLayers):
 
         return reconstruction_loss
     
-    def __call__(self, input_ids, **kwargs):
+    def forward(self, input_ids, **kwargs):
         memory = self.set_memory()
         memory = memory.repeat(input_ids.shape[0], 1, 1)
         segmented = self.pad_and_segment(input_ids)
@@ -399,7 +399,7 @@ class RMTEncoderDecoderMemoryLoss(RMTEncoderDecoderMemoryLayers):
             non_empty_mask = [s is not None for s in segment_input_ids]
             if sum(non_empty_mask) == 0:
                 continue
-            input_ids = torch.stack(segment_input_ids)[non_empty_mask]
+            input_ids = torch.stack([s for s in segment_input_ids if s is not None])
             attention_mask = self.get_attention_mask(input_ids)
             seg_kwargs['labels'] = seg_kwargs['labels'][non_empty_mask]
 
@@ -461,7 +461,7 @@ class RMTEncoderDecoderHorizontalMemory(RMTEncoderDecoderMemoryLayers):
         
         return memory
 
-    def __call__(self, input_ids, **kwargs):
+    def forward(self, input_ids, **kwargs):
         memory = self.set_memory()
         memory = memory.repeat(input_ids.shape[0], 1, 1)
         segmented = self.pad_and_segment(input_ids)
