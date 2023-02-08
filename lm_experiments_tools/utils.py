@@ -1,17 +1,20 @@
+import functools
 import importlib
+import inspect
+import json
 import logging
 import os
 import platform
 import subprocess
 import time
-import functools
-import json
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import List
 
 import horovod.torch as hvd
 import torch
 import transformers
+
 import lm_experiments_tools.optimizers
 
 
@@ -46,6 +49,22 @@ def get_git_diff() -> str:
     return diff
 
 
+def get_fn_param_names(fn) -> List[str]:
+    """get function parameters names except *args, **kwargs
+
+    Args:
+        fn: function or method
+
+    Returns:
+        List[str]: list of function parameters names
+    """
+    params = []
+    for p in inspect.signature(fn).parameters.values():
+        if p.kind not in [inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD]:
+           params += [p.name]
+    return params
+
+
 def get_optimizer(name: str):
     if ':' in name:
         return get_cls_by_name(name)
@@ -61,7 +80,6 @@ def get_optimizer(name: str):
     except (ImportError, AttributeError):
         pass
     return None
-
 
 def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
     args_dict = dict(vars(args))
