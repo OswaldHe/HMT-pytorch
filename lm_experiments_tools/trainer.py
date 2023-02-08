@@ -16,7 +16,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 import horovod.torch as hvd
 
-from lm_experiments_tools.utils import rank_0
+from lm_experiments_tools.utils import rank_0, get_fn_param_names
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,7 @@ class Trainer:
                  batch_metrics_fn=lambda _, y: {'loss': y['loss']},
                  keep_for_metrics_fn=None,
                  metrics_fn=None,
+                 forward_kwargs={},
                  generate_kwargs={},
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
@@ -156,7 +157,7 @@ class Trainer:
             args: TrainerArgs passed from CLI
             model: torch model to train, model should be compatible with HF interface:
                 # batch = batch_transform_fn(batch)
-                output = model(**batch)
+                output = model(**batch, **forward_kwargs)
                 loss = output['loss']
             optimizer: torch optimizer
             train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
@@ -178,6 +179,11 @@ class Trainer:
                 Check `collect_metrics` function for further details.
             metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn.
                 Should return dict: {'metric_name': metric_value, ...}
+            forward_kwargs (Optional): keyworded arguments that should be passed to model.__call___ along with **batch.
+                `batch` should be used to pass Tensors and **kwargs should be used to pass some flags or other
+                arguments independent from batch size.
+            generate_kwargs (Optional): keyworded arguments that should be passed to model.geberate along with
+                `input_ids`.
         """
         # we assume that train/valid/test dataloaders are already multi-gpu aware
         self.model = model
@@ -189,14 +195,15 @@ class Trainer:
         self.batch_metrics_fn = batch_metrics_fn
         self.keep_for_metrics_fn = keep_for_metrics_fn
         self.metrics_fn = metrics_fn
-        self.generate_kwargs = generate_kwargs
+        self.forward_kwargs = deepcopy(forward_kwargs)
+        self.generate_kwargs = deepcopy(generate_kwargs)
 
         self.args = args
 
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
-        self.model_forward_args = set(inspect.getfullargspec(self.model.forward).args)
+        self.model_forward_args = set(get_fn_param_names(self.model.forward))
 
         if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
             raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
@@ -323,7 +330,8 @@ class Trainer:
             for j in range(0, batch_size, self.args.batch_size):
                 subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
                 # filter items from batch that are not used by model forward
-                outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args})
+                outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args},
+                                     **self.forward_kwargs)
                 loss = outputs['loss']
 
                 if not is_train_mode and self.args.use_generate_on_valid:
