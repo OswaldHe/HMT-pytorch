@@ -61,7 +61,7 @@ def get_fn_param_names(fn) -> List[str]:
     params = []
     for p in inspect.signature(fn).parameters.values():
         if p.kind not in [inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD]:
-           params += [p.name]
+            params += [p.name]
     return params
 
 
@@ -80,6 +80,7 @@ def get_optimizer(name: str):
     except (ImportError, AttributeError):
         pass
     return None
+
 
 def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
     args_dict = dict(vars(args))
