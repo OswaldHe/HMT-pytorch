@@ -91,6 +91,9 @@ class RMTBaseModel(torch.nn.Module):
     def prepare_kwargs(self, segment_input_ids, kwargs):
         seg_kwargs = dict(**kwargs)
         non_empty_mask = [s is not None for s in segment_input_ids]
+        if sum(non_empty_mask) == 0:
+            return None, non_empty_mask
+            
         input_ids = torch.stack([s for s in segment_input_ids if s is not None])
         inputs_embeds = self.model.embeddings(input_ids)
 
