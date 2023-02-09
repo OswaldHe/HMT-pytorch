@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from base import RMTBaseModel
+from .base import RMTBaseModel
 
 class RMTEncoderForSequenceClassification(RMTBaseModel):
     def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
