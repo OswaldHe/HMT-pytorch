@@ -1,3 +1,3 @@
 from .base import RMTBaseModel
-from .sequence_classification import RMTEncoderForSequenceClassification, RMTEncoderMemoryLayers, RMTEncoderMLMMemLoss
+from .sequence_classification import RMTEncoderForSequenceClassification, RMTEncoderMemoryLayers, RMTEncoderMLMMemLoss, RMTEncoderHorizontalMemory
 from .conditional_generation import RMTEncoderDecoderForConditionalGeneration, RMTEncoderDecoderMemoryLayers, RMTEncoderDecoderHorizontalMemory
