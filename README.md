@@ -2,7 +2,7 @@
 This repo is based on 🤗 Transfomers implementation of the T5 model and BERT.
 T5 data processing pipeline is used from the original [T5 repository](https://github.com/google-research/text-to-text-transfer-transformer) for pre-training (span corruption, prefix-lm) and fine-tuning. BERT data processing pipeline is used from [Megatron-LM](https://github.com/NVIDIA/Megatron-LM).
 
-Multi-gpu and multi-node training with Horovod is supported. APEX is used for FP16 and mixed-precision training. Sparse Attention from [DeepSpeed](https://www.deepspeed.ai/tutorials/sparse-attention/) is used.
+Multi-gpu and multi-node training with Horovod is supported. APEX/torch.cuda.amp is used for FP16 and mixed-precision training. Sparse Attention from [DeepSpeed](https://www.deepspeed.ai/tutorials/sparse-attention/) is used.
 
 BERT model supports such additional features as pre-attention layer norm, sparse attention, relative position and rotary embeddings.
 
@@ -10,20 +10,14 @@ T5 and BERT pre-training is implemented in `run_(model_type)_pretraining.py` scr
 
 Training tools, such as Trainer, are in `lm_experiments_tools` package.
 
-## Install all requirements
-Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
-```bash
-grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
-```
-Currenty, T5 text-to-text installation might install tf2.8.0+, downgrade TF related packages with:
-```bash
-pip install tensorflow==2.6.0 tensorflow-estimator==2.6.0 tensorflow-text==2.6.0 tensorflow-io-gcs-filesystem==0.21.0 keras==2.6.0
-```
-> todo: reorder reqs in requirements.txt.
+## Installation
+There are two main parts in the repository:
+- `lm_experiments_tools` module
+- training scripts (like bert/t5 pretraining) that use `lm_experiments_tools`
 
-### Install lm_experiments_tools
-`lm_experiments_tools` include Trainer with multi-gpu/node with Horovod and APEX FP16 for models compatible with 
-HF interface. Most of the scripts in the repo use Trainer from `lm_experiments_tools`.
+### Install only lm_experiments_tools
+`lm_experiments_tools` include Trainer with multi-gpu/node with Horovod and APEX torch.cuda.amp FP16 for models
+compatible with HF interface. Most of the scripts in the repo use Trainer from `lm_experiments_tools`.
 
 > note: install torch and horovod according to your setup before `lm_experiments_tools` installation.
 
@@ -34,6 +28,17 @@ This command will install `lm_experiments_tools` with only required packages for
 
 `lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
 based on metrics, custom metrics and data transformations support.
+
+### Install requirements for all experiments
+Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
+```bash
+grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
+```
+Currently, T5 text-to-text installation might install tf2.8.0+, downgrade TF related packages with:
+```bash
+pip install tensorflow==2.6.0 tensorflow-estimator==2.6.0 tensorflow-text==2.6.0 tensorflow-io-gcs-filesystem==0.21.0 keras==2.6.0
+```
+> todo: reorder reqs in requirements.txt.
 
 ###  Install Horovod
 Depending on your setup just `pip install horovod==0.24.2` might work.
@@ -46,7 +51,6 @@ check installation with
 ```bash
 horovodrun --check-build
 ```
-
 For further details check Horovod documentation: https://horovod.readthedocs.io/en/stable/install_include.html
 
 ### Install APEX
@@ -80,7 +84,7 @@ and check installation with
 ds_report
 ```
 #### Triron 1.1.1
-Triton 1.1.1 brings x2 speed-up to sparse operations on A100, but DeepSpeed (0.6.5) currenly supports only triton 1.0.0.
+Triton 1.1.1 brings x2 speed-up to sparse operations on A100, but DeepSpeed (0.6.5) currently supports only triton 1.0.0.
 DeepSpeed fork with triton 1.1.1 support could be used in the cases where such speed-up is needed:
 ```bash
 pip install triton==1.1.1
@@ -93,6 +97,62 @@ and run sparse ops tests with
 cd tests/unit
 pytest -v test_sparse_attention.py
 ```
+
+## BERT pretraining
+Data preprocessing [readme](megatron/README.md).
+
+Python script: `run_bert_pretraining.py`
+
+## FP16 for pretraining
+The Trainer argument `--fp16` will enable torch.cuda.amp FP16 mixed precision. Adding `--apex_opt_lvl O1` or `--apex_opt_lvl O2` will enable mixed precision with APEX FP16. Check APEX docs for the details https://nvidia.github.io/apex/amp.html#opt-levels.
+
+## Adafactor optimizer
+[Adafactor](https://arxiv.org/abs/1804.04235) was used to train such models as T5, BigBird, PaLM and others. Adafactor lowers required memory by keeping moving average of per-parameter second moments factorized.
+
+Adafactor parameters:
+- `scale_parameter` - lr is scaled by root mean square of parameter: lr * RMS(p)
+- `relative_step` - lr = 1/sqrt(step)
+- `warmup_init` - linear warm up from 1e-06 to 0.01 at 10k steps, works only in combination with `relative_step`
+
+Adafactor can be used with constant lr / lr schedulers. In this case, `relative_step` and `warmup_init` should be set to False. `scale_parameter` is does not depend on learning rate schedules and can be used with external learning rates.
+
+example for pretraining scripts:
+```bash
+--optimizer Adafactor --lr 1e-03 --scale_parameter \
+--lr_scheduler constant_with_warmup --num_warmup_steps 10000
+```
+
+e.g. for DP config
+```json
+"optimizer": "Adafactor",
+"optimizer_parameters": {
+        "lr": 1e-03,
+        "weight_decay": 0.0,
+        "scale_parameter": true,
+        "relative_step": false,
+        "warmup_init": false
+}
+```
+
+## Sparse Attention
+BERT model training supports sparse attentions from DeepSpeed.
+
+DeepSpeed Sparse attention docpage -- https://www.deepspeed.ai/tutorials/sparse-attention.
+
+### Configure Sparse Attention
+SparseAttention parameters are passed to the model with HF model configuration file:
+```json
+"sparse_config_cls": "deepspeed.ops.sparse_attention:BigBirdSparsityConfig",
+"sparse_attention": {
+  "num_heads": 12,
+  "block": 16,
+  "different_layout_per_head": true,
+  "num_sliding_window_blocks": 1,
+  "num_global_blocks": 1,
+  "num_random_blocks": 1
+}
+```
+You can also check `bert_base_uncased-4L_sparse.json` config example in `bert_configs` folder.
 
 ## T5 Pre-training
 ### T5-small baseline
@@ -212,57 +272,3 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; python evaluate_model.py single \
         --train-batch-size 16 \
         --lr 5e-05
 ```
-
-## BERT pretraining
-Data preprocessing [readme](megatron/README.md)
-
-## FP16 for pretraining
-add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default) as arguments to `run_t5_pretraining.py`
-
-## Adafactor optimizer
-[Adafactor](https://arxiv.org/abs/1804.04235) was used to train such models as T5, BigBird, PaLM and others. Adafactor lowers required memory by keeping moving average of per-parameter second moments factorized.
-
-Adafactor parameters:
-- `scale_parameter` - lr is scaled by root mean square of parameter: lr * RMS(p)
-- `relative_step` - lr = 1/sqrt(step)
-- `warmup_init` - linear warm up from 1e-06 to 0.01 at 10k steps, works only in combination with `relative_step`
-
-Adafactor can be used with constant lr / lr schedulers. In this case, `relative_step` and `warmup_init` should be set to False. `scale_parameter` is does not depend on learning rate schedules and can be used with external learning rates.
-
-example for pretraining scripts:
-```bash
---optimizer Adafactor --lr 1e-03 --scale_parameter \
---lr_scheduler constant_with_warmup --num_warmup_steps 10000
-```
-
-e.g. for DP config
-```json
-"optimizer": "Adafactor",
-"optimizer_parameters": {
-        "lr": 1e-03,
-        "weight_decay": 0.0,
-        "scale_parameter": true,
-        "relative_step": false,
-        "warmup_init": false
-}
-```
-
-## Sparse Attention
-BERT model training supports sparse attentions from DeepSpeed. 
-
-DeepSpeed Sparse attention docpage -- https://www.deepspeed.ai/tutorials/sparse-attention.
-
-### Configure Sparse Attention
-SparseAttention parameters are passed to the model with HF model configuration file:
-```json
-"sparse_config_cls": "deepspeed.ops.sparse_attention:BigBirdSparsityConfig",
-"sparse_attention": {
-  "num_heads": 12,
-  "block": 16,
-  "different_layout_per_head": true,
-  "num_sliding_window_blocks": 1,
-  "num_global_blocks": 1,
-  "num_random_blocks": 1
-}
-```
-You can also check `bert_base_uncased-4L_sparse.json` config example in `bert_configs` folder.
