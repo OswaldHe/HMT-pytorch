@@ -387,33 +387,30 @@ class Trainer:
                         self.amp_grad_scaler.scale(loss).backward()
                         if is_last_batch:
                             self.optimizer.synchronize()
+                            self.amp_grad_scaler.unscale_(self.optimizer)
                     else:
                         loss.backward()
 
             if is_train_mode:
                 # log gradients norm, clip gradients and perform opt.step(), lr_scheduler.step()
                 self.global_grad_norms += [self._get_gradients_global_norm()]
-                if self.use_apex_amp:
-                    if self.clip_grad:
-                        # grads already in sync
-                        self._clip_gradients()
-                    with self.optimizer.skip_synchronize():
-                        self.optimizer.step()
-                elif self.use_torch_amp:
-                    if self.clip_grad:
-                        self.amp_grad_scaler.unscale_(self.optimizer)
-                        self._clip_gradients()
-                    with self.optimizer.skip_synchronize():
+
+                if not self.args.fp16:
+                    # with torch/apex amp optimizer is already synced
+                    self.optimizer.synchronize()
+
+                if self.clip_grad:
+                    self._clip_gradients()
+
+                with self.optimizer.skip_synchronize():
+                    if self.use_torch_amp:
                         self.amp_grad_scaler.step(self.optimizer)
-                    self.amp_grad_scaler.update()
-                else:
-                    if self.clip_grad:
-                        self.optimizer.synchronize()
-                        self._clip_gradients()
-                        with self.optimizer.skip_synchronize():
-                            self.optimizer.step()
                     else:
                         self.optimizer.step()
+
+                if self.use_torch_amp:
+                    self.amp_grad_scaler.update()
+
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
         return batch_metrics, batch_metrics_data
