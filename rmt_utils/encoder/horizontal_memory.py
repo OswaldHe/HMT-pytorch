@@ -142,7 +142,7 @@ def horizontal_memory_forward(
 from collections.abc import Sequence
 from transformers.modeling_outputs import BaseModelOutput
 
-def deberta_memory_layers_forward(
+def deberta_horizontal_memory_forward(
         self,
         hidden_states,
         attention_mask,
