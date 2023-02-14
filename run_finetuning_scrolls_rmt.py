@@ -70,6 +70,7 @@ parser.add_argument('--from_pretrained', type=str, help='model name in HF Model 
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
+parser.add_argument('--model_cpt', type=str, default=None, help='pretrained model checkpoint path')
 parser.add_argument('--backbone_cls', type=str, default=None,
                     help='backbone class name to use for RMT')
 parser.add_argument('--model_type', type=str, default='encoder-decoder',
@@ -309,6 +310,22 @@ if __name__ == '__main__':
         rmt_cls = get_cls_by_name(args.model_cls)
         if hvd.rank() == 0:
             logger.info(f'Wrapping in: {rmt_cls}')
+        
+        ## load cpt
+        if args.model_cpt:
+            model_cpt = os.path.join(args.model_cpt, "model_best.pth")
+            cpt = torch.load(model_cpt, map_location='cpu')
+            # model.load_state_dict(cpt['model_state_dict'])
+            drop_keys = { "cls_token", "sep_token", "mem_token_ids", "embeddings.weight"}
+            fixed_state_dict = {}
+            for key, value in cpt['model_state_dict'].items():
+                if 'model' in key:
+                    key = key.split('model.')[1]
+                if key not in drop_keys:
+                    fixed_state_dict[key] = value
+            if hvd.rank() == 0:
+                logger.info(f'Loaded state dict from: {args.model_cpt}')
+        
         model = rmt_cls(model, **rmt_config)
     
     # define optimizer
