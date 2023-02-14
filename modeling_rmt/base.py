@@ -65,14 +65,15 @@ class RMTBaseModel(torch.nn.Module):
             align = self.rmt_config.get('segment_alignment')
             if align in {'right', None}:
                 split_inds = (list(range(len(seq), 0, -self.segment_size)) + [0])[::-1]
-                input_segments = [seq[start:end] for (start, end) in zip(split_inds, split_inds[1:])]
             elif align == 'left':
                 split_inds = list(range(0, len(seq), self.segment_size)) + [len(seq)]
-                input_segments = [seq[start:end] for (start, end) in zip(split_inds, split_inds[1:])]
-            else:
+            elif align == 'center':
                 n_seg = math.ceil(len(seq) / self.segment_size)
-                input_segments = torch.chunk(seq, n_seg)
+                split_inds = list(range(0, len(seq), math.ceil(len(seq) / n_seg))) + [len(seq)]
+            else:
+                raise NotImplementedError
 
+            input_segments = [seq[start:end] for (start, end) in zip(split_inds, split_inds[1:])]
             input_segments = [self.pad_add_special_tokens(t, self.rmt_config['input_size']) for t in input_segments]
 
             # add empty segment markers if needed
