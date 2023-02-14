@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -499,8 +500,8 @@ class Trainer:
 
     def collect_metrics(self, split: str) -> dict:
         """
-        collects all metrics from batch_metrics and computes metrics available from metrics_data
-        once metrics are collected we drop everything that was collected
+        Collects batch-lvl metrics from batch_metrics_fn and computes metrics with metrics_fn on data collected from
+        keep_for_metrics_fn. Once the metrics are collected we drop everything that was previously collected.
 
         Args:
             split (str): data split name train/valid for which metrics should be collected
@@ -508,21 +509,34 @@ class Trainer:
         Returns:
             dict: dictionary with collected metrics
         """
-
         # batch-lvl metrics
         metrics = {}
-        for k in self.batch_metrics[split]:
-            metrics[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
+        # collect metrics names from all processes: it is possible that different workers might have different
+        # set of metrics (e.g., some metric could be not available for some batches).
+        metrics_keys = set(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split].keys())))
+        if metrics_keys != self.batch_metrics[split].keys():
+            missing_metrics_keys = metrics_keys - self.batch_metrics[split].keys()
+            logger.warning(f'some of the batch-lvl metrics on rank_{hvd.rank()} are missing, but were found on another '
+                           f'ranks: {missing_metrics_keys}')
+        metrics_keys = sorted(metrics_keys)
+        for k in metrics_keys:
+            metrics[k] = list(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
             metrics[k] = np.mean(metrics[k])
         # compute metrics from metrics data
         if self.keep_for_metrics_fn and self.metrics_fn:
             metrics_data = {}
-            for k in self.metrics_data[split]:
-                metrics_data[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
+            data_keys = set(chain.from_iterable(hvd.allgather_object(self.metrics_data[split].keys())))
+            if data_keys != self.metrics_data[split].keys():
+                missing_data_keys = data_keys - self.metrics_data[split].keys()
+                logger.warning(f'some of the data collected from keep_for_metrics_fn on rank_{hvd.rank()} is missing, '
+                               f'but was found on another ranks: {missing_data_keys}')
+            data_keys = sorted(data_keys)
+            for k in data_keys:
+                metrics_data[k] = list(chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
                 m_shape = getattr(metrics_data[k][0], 'shape', None)
                 if m_shape is None:
                     # data is not a tensor, collect it into python list
-                    metrics_data[k] = list(itertools.chain.from_iterable(metrics_data[k]))
+                    metrics_data[k] = list(chain.from_iterable(metrics_data[k]))
                 elif len(m_shape) == 0:
                     # if scalars
                     metrics_data[k] = torch.stack(metrics_data[k])
@@ -531,7 +545,7 @@ class Trainer:
                     metrics_data[k] = torch.cat(metrics_data[k])
                 else:
                     # can't concat tensors with diff last shapes, so collecting them into python list
-                    metrics_data[k] = list(itertools.chain.from_iterable([t.tolist() for t in metrics_data[k]]))
+                    metrics_data[k] = list(chain.from_iterable([t.tolist() for t in metrics_data[k]]))
             m = self.metrics_fn(metrics_data)
             if len(metrics.keys() & m.keys()) != 0:
                 self._log_warning(f'metrics ({m.keys()}) and batch-lvl metrics ({metrics.keys()}) have common names. '
@@ -580,7 +594,7 @@ class Trainer:
                 # batch-lvl averaged metrics:
                 train_metrics = self.collect_metrics(split='train')
                 train_loss = train_metrics['loss']
-                global_grad_norms = list(itertools.chain.from_iterable(hvd.allgather_object(self.global_grad_norms)))
+                global_grad_norms = list(chain.from_iterable(hvd.allgather_object(self.global_grad_norms)))
                 self.global_grad_norms = []
                 if hvd.rank() == 0:
                     # todo: move logging, move to self.log()
