@@ -6,7 +6,7 @@ from tensorboard.backend.event_processing import event_accumulator
 import pandas as pd
 from tqdm.notebook import tqdm
 
-TGT_COLS = ['task_name', 'from_pretrained', 'model_cfg', 'model_cls', 'model_type', 'lr', 'batch_size', 'HVD_SIZE', 'lr_scheduler', 'input_seq_len', 'max_n_segments', 'num_mem_tokens','segment_ordering','padding_side', 'model_path', 'sum_loss', 'inter_layer_memory', 'memory_layers', 'share_memory_layers','reconstruction_loss_coef', 'num_steps']
+TGT_COLS = ['task_name', 'from_pretrained', 'model_cfg', 'model_cls', 'model_type', 'lr', 'batch_size', 'HVD_SIZE', 'lr_scheduler', 'input_seq_len', 'max_n_segments', 'input_size', 'num_mem_tokens','segment_ordering','padding_side', 'model_path', 'sum_loss', 'inter_layer_memory', 'memory_layers', 'share_memory_layers','reconstruction_loss_coef', 'num_steps']
 
 SILENT = True
 def parse_tensorboard(path, scalars, silent=SILENT):
@@ -119,7 +119,18 @@ metric_names = ['f1']
 target_cols = TGT_COLS + ['best_valid_f1']
 out_path = 'results/qasper.csv'
 
+# parse_to_csv(path, out_path, target_cols, metric_names)
+
+
+# Babi-long
+
+path = Path('/home/bulatov/bulatov/RMT_light/runs/')
+metric_names = ['exact_match']
+target_cols = TGT_COLS + ['best_valid_exact_match']
+out_path = 'results/babilong.csv'
+
 parse_to_csv(path, out_path, target_cols, metric_names)
+
 
 # path = Path('/home/bulatov/bulatov/runs_hyp_good_cnli_ok_080822/finetune/debug/contract_nli')
 # metric_names = ['exact_match']
