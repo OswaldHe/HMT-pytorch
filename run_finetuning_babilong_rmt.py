@@ -210,8 +210,8 @@ if __name__ == '__main__':
             if args.input_prefix:
                 inputs = [args.input_prefix + inp for inp in inputs]
 
-            total_input_size = args.max_n_segments * input_seg_size
-            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=total_input_size)
+            max_length = min(args.max_n_segments * input_seg_size, args.input_seq_len)
+            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=max_length)
             questions = tokenizer.batch_encode_plus(list(questions), return_tensors='pt', **encode_plus_kwargs)['input_ids']
 
             with tokenizer.as_target_tokenizer():
@@ -245,8 +245,8 @@ if __name__ == '__main__':
             if args.input_prefix:
                 inputs = [args.input_prefix + inp for inp in inputs]
 
-            total_input_size = args.max_n_segments * input_seg_size
-            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=total_input_size)
+            max_length = min(args.max_n_segments * input_seg_size, args.input_seq_len)
+            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=max_length)
             questions = tokenizer.batch_encode_plus(list(questions), return_tensors='pt', **encode_plus_kwargs)['input_ids']
             
             q_len = questions.shape[1] - 1
