@@ -210,8 +210,8 @@ if __name__ == '__main__':
             if args.input_prefix:
                 inputs = [args.input_prefix + inp for inp in inputs]
 
-            total_input_size = args.max_n_segments * input_seg_size
-            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=total_input_size)
+            max_length = min(args.max_n_segments * input_seg_size, args.input_seq_len)
+            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=max_length)
             questions = tokenizer.batch_encode_plus(list(questions), return_tensors='pt', **encode_plus_kwargs)['input_ids']
 
             with tokenizer.as_target_tokenizer():
@@ -245,12 +245,12 @@ if __name__ == '__main__':
             if args.input_prefix:
                 inputs = [args.input_prefix + inp for inp in inputs]
 
-            total_input_size = args.max_n_segments * input_seg_size
-            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=total_input_size)
+            max_length = min(args.max_n_segments * input_seg_size, args.input_seq_len)
+            features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs, max_length=max_length)
             questions = tokenizer.batch_encode_plus(list(questions), return_tensors='pt', **encode_plus_kwargs)['input_ids']
             
             q_len = questions.shape[1] - 1
-            features['input_ids'] = torch.cat([features['input_ids'][:, :total_input_size - q_len], questions[:, 1:]], dim=1)
+            features['input_ids'] = torch.cat([features['input_ids'][:, :max_length - q_len], questions[:, 1:]], dim=1)
             
             labels = np.array([labels_map[t] for t in labels])
             features['labels'] = torch.from_numpy(labels)
