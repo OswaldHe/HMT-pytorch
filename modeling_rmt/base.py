@@ -44,13 +44,7 @@ class RMTBaseModel(torch.nn.Module):
         special_tokens = tokenizer.special_tokens_map
         mem_start_ind = int('cls_token' in special_tokens or 'bos_token' in special_tokens)
         self.memory_position = range(mem_start_ind, mem_start_ind + num_mem_tokens)
-        
-        if hasattr(self.model.base_model, 'embeddings'): # enc-only
-            self.model.embeddings = self.model.base_model.embeddings.word_embeddings
-        elif hasattr(self.model.encoder, 'embed_tokens'): # enc-dec
-            self.model.embeddings = self.model.encoder.embed_tokens
-        else:
-            raise NotImplementedError
+        self.model.embeddings = self.model.get_input_embeddings()
 
     def forward(self, **kwargs):
        raise NotImplementedError
