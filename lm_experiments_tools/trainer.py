@@ -344,13 +344,15 @@ class Trainer:
                 if is_train_mode:
                     if self.args.fp16:
                         with self.amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                            scaled_loss.backward()
+                            retain_graph = hasattr(self.args, 'retain_graph') and self.args.retain_graph
+                            scaled_loss.backward(retain_graph=retain_graph)
                             # last sub-batch, call synchronize within amp.scale_loss scope
                             # mb move to just above with optimizer.skip_synchronize()
                             if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
                                 self.optimizer.synchronize()
                     else:
-                        loss.backward()
+                        retain_graph = hasattr(self.args, 'retain_graph') and self.args.retain_graph
+                        loss.backward(retain_graph=retain_graph)
 
             if is_train_mode:
                 if self.args.fp16:
