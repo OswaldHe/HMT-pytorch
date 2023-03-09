@@ -325,22 +325,11 @@ if __name__ == '__main__':
         if hvd.rank() == 0:
             logger.info(f'Wrapping in: {rmt_cls}')
         
-        ## load cpt
+        model = rmt_cls(model, **rmt_config)
         if args.model_cpt:
             model_cpt = os.path.join(args.model_cpt, "model_best.pth")
             cpt = torch.load(model_cpt, map_location='cpu')
-            # model.load_state_dict(cpt['model_state_dict'])
-            drop_keys = { "cls_token", "sep_token", "mem_token_ids", "embeddings.weight"}
-            fixed_state_dict = {}
-            for key, value in cpt['model_state_dict'].items():
-                if 'model' in key:
-                    key = key.split('model.')[1]
-                if key not in drop_keys:
-                    fixed_state_dict[key] = value
-            if hvd.rank() == 0:
-                logger.info(f'Loaded state dict from: {args.model_cpt}')
-        
-        model = rmt_cls(model, **rmt_config)
+            model.load_state_dict(cpt['model_state_dict'])
     
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)
