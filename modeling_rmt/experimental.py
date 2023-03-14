@@ -1,3 +1,4 @@
+import torch
 from modeling_rmt.sequence_classification import *
 
 class RMTEncoderMemFromSep(RMTEncoderForSequenceClassification):
@@ -19,6 +20,7 @@ class RMTEncoderMemFromSep(RMTEncoderForSequenceClassification):
     def reinit_memory_embeddings(self):
         sep_embedding = self.model.embeddings.weight[self.sep_token][0]
         memory_weights = torch.stack([sep_embedding] * self.num_mem_tokens)
-        noise = torch.rand_like(memory_weights) * 1e-03
+        noise_scale = self.model.embeddings.weight.std() / 10
+        noise = torch.randn_like(memory_weights) * noise_scale
         self.model.embeddings.weight.data[self.memory_position] = memory_weights + noise
         
