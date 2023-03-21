@@ -220,7 +220,9 @@ def main():
         return metrics
 
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
-                      batch_transform_fn, batch_metrics_fn, keep_for_metrics_fn, metrics_fn)
+                      batch_transform_fn, batch_metrics_fn, keep_for_metrics_fn, metrics_fn,
+                      forward_kwargs={'output_hidden_states': False, 'output_attentions': False},
+                      )
 
     if not args.validate_only:
         # train loop

@@ -1,17 +1,20 @@
+import functools
 import importlib
+import inspect
+import json
 import logging
 import os
 import platform
 import subprocess
 import time
-import functools
-import json
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import List
 
 import horovod.torch as hvd
 import torch
 import transformers
+
 import lm_experiments_tools.optimizers
 
 
@@ -44,6 +47,22 @@ def get_git_diff() -> str:
         # no git installed or we are not in repository
         diff = ''
     return diff
+
+
+def get_fn_param_names(fn) -> List[str]:
+    """get function parameters names except *args, **kwargs
+
+    Args:
+        fn: function or method
+
+    Returns:
+        List[str]: list of function parameters names
+    """
+    params = []
+    for p in inspect.signature(fn).parameters.values():
+        if p.kind not in [inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD]:
+            params += [p.name]
+    return params
 
 
 def get_optimizer(name: str):
