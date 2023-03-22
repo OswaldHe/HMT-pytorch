@@ -94,6 +94,7 @@ parser.add_argument('--reconstruction_loss_coef', type=float, default=None,
                     help='reconstuction loss ratio in total loss')
 # parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
 #                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
+parser.add_argument('--num_valid_samples', type=int, default=None, help="number of samples for validation")
 
 
 # tokenizer
@@ -118,18 +119,21 @@ places = ['bathroom', 'hallway', 'garden', 'office', 'bedroom', 'kitchen']
 choices_dict = {'names': names, 'actions': actions, 'places': places}
 
 class MemoryDataset(Dataset):
-    def __init__(self, choices_dict=choices_dict, num_facts=1, split='train', dataset='quality'):
+    def __init__(self, choices_dict=choices_dict, num_facts=1, split='train', dataset='quality', num_samples=None):
         self.choices_dict = choices_dict
         self.dataset = load_dataset('tau/scrolls', dataset)[split]
         self.num_facts = num_facts
+        self.num_samples = num_samples
 
     def __getitem__(self, ind):
+        if self.num_samples:
+            ind = np.random.randint(len(self.dataset))
         sample = self.dataset[ind]
         sample['fact'], sample['question'], sample['answer'] = self.generate_qa() 
         return sample
     
     def __len__(self):
-        return len(self.dataset)
+        return len(self.dataset) if self.num_samples is None else self.num_samples
 
     def generate_qa(self):
         names, actions, places = self.choices_dict['names'], self.choices_dict['actions'], self.choices_dict['places']
@@ -183,7 +187,7 @@ if __name__ == '__main__':
         logger.info(f'preparing dataset for babilong')
     
     train_dataset = MemoryDataset(choices_dict, num_facts=1, split='train', dataset='quality')
-    valid_dataset = MemoryDataset(choices_dict, num_facts=1, split='validation', dataset='quality')
+    valid_dataset = MemoryDataset(choices_dict, num_facts=1, split='validation', dataset='quality', num_samples=args.num_valid_samples)
     
     answers = train_dataset.choices_dict['places']
     labels_map = dict(zip(answers, range(len(answers))))
@@ -439,8 +443,8 @@ if __name__ == '__main__':
         # run validation, do not write to tensorboard
         if hvd.rank() == 0:
             logger.info('Running validation on train set:')
-        trainer.validate(train_dataloader, split='train', write_tb=False)
+        trainer.validate(train_dataloader, split='train', write_tb=True)
         if valid_dataloader is not None:
             if hvd.rank() == 0:
                 logger.info('Running validation on valid data:')
-            trainer.validate(valid_dataloader, write_tb=False)
+            trainer.validate(valid_dataloader, write_tb=True)
