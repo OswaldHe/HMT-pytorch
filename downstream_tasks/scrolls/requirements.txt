@@ -1,0 +1,8 @@
+datasets==1.17.0
+pandas
+
+# METRICS:
+# ROUGE
+nltk
+absl-py
+rouge_score

@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 from pathlib import Path
@@ -17,9 +16,9 @@ from trainer import Trainer, TrainerArgs
 
 load_dotenv()
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+logging.basicConfig(format=logger_fmt, level=logging.INFO)
+logger = logging.getLogger()
 
 # if CUDA_VISIBLE_DEVICES is not set make all gpus visible
 if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
@@ -35,8 +34,7 @@ import transformers  # noqa: E402
 from transformers import T5Config, T5Tokenizer  # noqa: E402
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
-from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-from lm_experiments_tools.utils import get_git_diff  # noqa: E402
+from lm_experiments_tools.utils import prepare_run, get_cls_by_name, get_optimizer  # noqa: E402
 import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
@@ -81,7 +79,8 @@ parser.add_argument('--relative_step', action='store_true', default=False,
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
-if __name__ == '__main__':
+
+def main():
     # run with horovod:
     # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
     args = parser.parse_args()
@@ -89,6 +88,9 @@ if __name__ == '__main__':
     # todo: maybe take path to run_t5_pretraining.py?
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
     os.chdir(args.working_dir)
+
+    prepare_run(args, logger, logger_fmt)
+
     if hvd.rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
@@ -99,16 +101,6 @@ if __name__ == '__main__':
     if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
             mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
         kwargs['multiprocessing_context'] = 'forkserver'
-
-    # create model_path and save configuration
-    if hvd.rank() == 0:
-        model_path = Path(args.model_path)
-        if not model_path.exists():
-            Path(model_path).mkdir(parents=True)
-        args_dict = collect_run_configuration(args)
-        # todo: if model path exists and there is config file, write new config file aside
-        json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
-        open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     # get train dataset shards
     data_path = Path(args.data_path).expanduser().absolute()
@@ -198,3 +190,10 @@ if __name__ == '__main__':
 
     # train loop
     trainer.train()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        logger.exception(e)

@@ -1,12 +1,12 @@
-from collections import defaultdict
-from copy import deepcopy
-from dataclasses import dataclass, field
 import importlib
-import inspect
 import itertools
 import logging
 import time
-from typing import Dict, Tuple, Union, Optional
+from collections import defaultdict
+from copy import deepcopy
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -16,11 +16,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
 import horovod.torch as hvd
 
-from lm_experiments_tools.utils import rank_0
+from lm_experiments_tools.utils import rank_0, get_fn_param_names
 
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -76,21 +73,26 @@ class TrainerArgs:
         metadata={'help': 'number of batches to accumulate gradients for each worker, it multiplies total batch size.'})
     fp16: bool = field(
         default=False,
-        metadata={'help': 'use apex.amp for fp16 training (default: False)'})
+        metadata={'help': 'use fp16 mixed precision training (default: False). '
+                  'apex.amp is used instead of torch.cuda.amp if apex_opt_level is set.'})
     fp16_allreduce: bool = field(
         default=False, metadata={'help': 'use hvd fp16 compression during allreduce (default: False)'})
-    apex_opt_lvl: str = field(
-        default='O1',
-        metadata={'help': 'apex opt level, O1, O2. (default: O1)'})
+    apex_opt_lvl: Optional[str] = field(
+        default=None,
+        metadata={'help': 'apex opt level: O0 (FP32 training), O1 (mixed precision), '
+                  'O2 ("Almost FP16" Mixed Precision), O3 (FP16 training). Details are in Apex docs. (default: None)'})
     min_loss_scale: Optional[float] = field(
         default=None,
-        metadata={'help': 'apex min_loss_scale. (default: None)'})
+        metadata={'help': 'apex amp min_loss_scale. (default: None)'})
+    max_loss_scale: Optional[float] = field(
+        default=2**24,
+        metadata={'help': 'apex amp max_loss_scale, default value is taken from apex.amp. (default: 2**24)'})
     clip_grad_norm: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. 0 or None is no clip (default: None)'})
     clip_grad_value: Optional[float] = field(
         default=None,
-        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)'})
+        metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. 0 or None is no clip (default: None)'})
     early_stopping_patience: Optional[int] = field(
         default=None,
         metadata={'help': 'stop training if `early_stopping_patience` subsequent evalutations did not improve value of '
@@ -146,30 +148,46 @@ class Trainer:
                  batch_metrics_fn=lambda _, y: {'loss': y['loss']},
                  keep_for_metrics_fn=None,
                  metrics_fn=None,
+                 forward_kwargs={},
                  generate_kwargs={},
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
+        Trainer logs all metrics returned by batch_metrics_fn and metrics_fn.
+
         Args:
             args: TrainerArgs passed from CLI
-            model: torch model to train, model is compatible with HF interfaces
+            model: torch model to train, model should be compatible with HF interface:
+                # batch = batch_transform_fn(batch)
+                output = model(**batch, **forward_kwargs)
+                loss = output['loss']
             optimizer: torch optimizer
             train_dataloader (torch.utils.data.DataLoader): train set torch dataloader, distributed-aware.
             valid_dataloader (Optional(torch.utils.data.DataLoader)]): validation set torch dataloader,
                 distributed-aware, optional.
             batch_transform_fn (Optional): function to be applied to the output from DataLoader, should be used to
-                create inputs compatible (if not already) with HF model, e.g.:
-                    {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
-            batch_metrics_fn (Optional): function to be applied to model outputs to compute batch-lvl metrics, metrics
-                are averaged across batches: avg_i(metric(batch_i, labels_i)),
-                not metric([batch_1; batch_2; ...], labels). Could be used for computing loss, metrics on large
-                datasets, pre-training, where exact metrics values are not so important or computing exact metrics
-                is resource-exhaustive.
-            keep_for_metrics_fn (Optional): f(batch, outputs) to keep predictions, labels or other data that would be
-                used to compute metrics on full validation set and every log_interval on train set
-            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn
+                create inputs compatible (if not already) with training model, e.g.:
+                    f(batch) -> {'input_ids': ..., 'attention_mask': ..., 'labels': ..., ...}.
+            batch_metrics_fn (Optional): function f(batch, model_output) to compute batch-lvl metrics.
+                Metrics are averaged across batches: avg_i(metric(batch_i, labels_i)),
+                not metric([batch_1; batch_2; ...], labels). batch_metrics_fn could be used for computing loss, metrics
+                on large datasets, pre-training, where exact metrics values are not so important or computing exact
+                metrics is resource-exhaustive.
+                Should return dict: {'metric_name': metric_value, ...}
+            keep_for_metrics_fn (Optional): f(batch, model_output) to keep predictions, labels or other data that would
+                be used to compute metrics on full validation set and every log_interval on train set.
+                Should return dict {'key_1': tensor/np.array/scalar/list, 'key_2': ...}.
+                The result of keep_for_metrics_fn will be aggregated into tensor/list and passed to metrics_fn.
+                Check `collect_metrics` function for further details.
+            metrics_fn (Optional): f(metrics_data) to compute metrics based on values stored by keep_for_metrics_fn.
+                Should return dict: {'metric_name': metric_value, ...}
+            forward_kwargs (Optional): keyworded arguments that should be passed to model.__call___ along with **batch.
+                `batch` should be used to pass Tensors and **kwargs should be used to pass some flags or other
+                arguments independent from batch size.
+            generate_kwargs (Optional): keyworded arguments that should be passed to model.geberate along with
+                `input_ids`.
         """
-        # we assume that train/valid dataloader are already multi-gpu aware
+        # we assume that train/valid/test dataloaders are already multi-gpu aware
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = train_dataloader
@@ -179,14 +197,15 @@ class Trainer:
         self.batch_metrics_fn = batch_metrics_fn
         self.keep_for_metrics_fn = keep_for_metrics_fn
         self.metrics_fn = metrics_fn
-        self.generate_kwargs = generate_kwargs
+        self.forward_kwargs = deepcopy(forward_kwargs)
+        self.generate_kwargs = deepcopy(generate_kwargs)
 
         self.args = args
 
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * hvd.size()
 
-        self.model_forward_args = set(inspect.getfullargspec(self.model.forward).args)
+        self.model_forward_args = set(get_fn_param_names(self.model.forward))
 
         if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
             raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
@@ -256,8 +275,15 @@ class Trainer:
         else:
             self.lr_drop_scheduler = None
 
-        # Apex
-        if args.fp16:
+        # mixed precision
+        self.use_apex_amp = args.fp16 and args.apex_opt_lvl is not None
+        self.use_torch_amp = args.fp16 and args.apex_opt_lvl is None
+        if self.use_torch_amp:
+            # torch.cuda.amp
+            self.amp_grad_scaler = torch.cuda.amp.GradScaler()
+            self._log_info('running FP16 mixed precision with torch.cuda.amp')
+        elif self.use_apex_amp:
+            # Apex
             try:
                 self.amp = importlib.import_module('apex.amp')
             except ImportError:
@@ -265,7 +291,9 @@ class Trainer:
             self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
                                                              enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
                                                              min_loss_scale=self.args.min_loss_scale,
+                                                             max_loss_scale=self.args.max_loss_scale,
                                                              verbosity=int(hvd.rank() == 0))
+            self._log_info(f'running FP16 mixed precision with apex.amp opt_level: {self.args.apex_opt_lvl}')
 
         self.n_iter = 0
         self.n_epoch = 0
@@ -311,26 +339,30 @@ class Trainer:
         with torch.set_grad_enabled(is_train_mode):
             for j in range(0, batch_size, self.args.batch_size):
                 subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
-                # filter items from batch that are not used by model forward
-                outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args})
-                loss = outputs['loss']
+                # todo: torch 1.10+ supports dtype argument (fp16, bf16) and torch.cuda.amp.autocast -> torch.autocast
+                with torch.cuda.amp.autocast(enabled=self.use_torch_amp):
+                    # filter items from batch that are not used by model forward
+                    outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args},
+                                         **self.forward_kwargs)
+                    loss = outputs['loss']
+                    # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+                    loss = loss / self.args.gradient_accumulation_steps
 
-                if not is_train_mode and self.args.use_generate_on_valid:
-                    generate_kwargs = deepcopy(self.generate_kwargs)
-                    if 'max_length' not in generate_kwargs and 'labels' in subbatch:
-                        # if max_length is not set and labels are in subbatch, generate to the length of labels+1
-                        # +1 as special tokens could be generated by the model
-                        generate_kwargs['max_length'] = subbatch['labels'].shape[-1] + 1
-                    if 'attention_mask' in subbatch:
-                        generate_kwargs['attention_mask'] = subbatch['attention_mask']
-                    if 'global_attention_mask' in subbatch:
-                        generate_kwargs['global_attention_mask'] = subbatch['global_attention_mask']
-                    generation_outputs = self.model.generate(subbatch['input_ids'], **generate_kwargs)
-                    outputs['generation_outputs'] = generation_outputs
+                    if not is_train_mode and self.args.use_generate_on_valid:
+                        generate_kwargs = deepcopy(self.generate_kwargs)
+                        if 'max_length' not in generate_kwargs and 'labels' in subbatch:
+                            # if max_length is not set and labels are in subbatch, generate to the length of labels+1
+                            # +1 as special tokens could be generated by the model
+                            generate_kwargs['max_length'] = subbatch['labels'].shape[-1] + 1
+                        if 'attention_mask' in subbatch:
+                            generate_kwargs['attention_mask'] = subbatch['attention_mask']
+                        if 'global_attention_mask' in subbatch:
+                            generate_kwargs['global_attention_mask'] = subbatch['global_attention_mask']
+                        generation_outputs = self.model.generate(subbatch['input_ids'], **generate_kwargs)
+                        outputs['generation_outputs'] = generation_outputs
 
                 metrics = self.batch_metrics_fn(subbatch, outputs)
-                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                loss = loss / self.args.gradient_accumulation_steps
+
                 for k in metrics:
                     metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
                     if isinstance(metrics[k], torch.Tensor):
@@ -342,33 +374,45 @@ class Trainer:
                         batch_metrics_data[k] += [v.detach().cpu() if isinstance(v, torch.Tensor) else v]
 
                 if is_train_mode:
-                    if self.args.fp16:
-                        with self.amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    # backward
+                    is_last_batch = (j == (batch_size // self.args.batch_size - 1) * self.args.batch_size)
+                    if self.use_apex_amp:
+                        # delay unscale allows not to run self.optimizer.synchronize() for every subbatch
+                        # which leads to performance improvements when many grad_acc_steps are performed
+                        # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                        with self.amp.scale_loss(loss, self.optimizer, delay_unscale=not is_last_batch) as scaled_loss:
                             retain_graph = hasattr(self.args, 'retain_graph') and self.args.retain_graph
                             scaled_loss.backward(retain_graph=retain_graph)
-                            # last sub-batch, call synchronize within amp.scale_loss scope
-                            # mb move to just above with optimizer.skip_synchronize()
-                            if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
+                            if is_last_batch:
                                 self.optimizer.synchronize()
+                    elif self.use_torch_amp:
+                        self.amp_grad_scaler.scale(loss).backward()
+                        if is_last_batch:
+                            self.optimizer.synchronize()
+                            self.amp_grad_scaler.unscale_(self.optimizer)
                     else:
                         retain_graph = hasattr(self.args, 'retain_graph') and self.args.retain_graph
                         loss.backward(retain_graph=retain_graph)
 
             if is_train_mode:
-                if self.args.fp16:
-                    if self.clip_grad:
-                        # grads already in sync
-                        self._clip_gradients()
-                    with self.optimizer.skip_synchronize():
-                        self.optimizer.step()
-                else:
-                    if self.clip_grad:
-                        self.optimizer.synchronize()
-                        self._clip_gradients()
-                        with self.optimizer.skip_synchronize():
-                            self.optimizer.step()
+                # log gradients norm, clip gradients and perform opt.step(), lr_scheduler.step()
+                self.global_grad_norms += [self._get_gradients_global_norm()]
+
+                if not self.args.fp16:
+                    # with torch/apex amp optimizer is already synced
+                    self.optimizer.synchronize()
+
+                if self.clip_grad:
+                    self._clip_gradients()
+
+                with self.optimizer.skip_synchronize():
+                    if self.use_torch_amp:
+                        self.amp_grad_scaler.step(self.optimizer)
                     else:
                         self.optimizer.step()
+
+                if self.use_torch_amp:
+                    self.amp_grad_scaler.update()
 
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
@@ -376,11 +420,20 @@ class Trainer:
 
     def _clip_gradients(self):
         # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
-        params = self.amp.master_params(self.optimizer) if self.args.fp16 else self.model.parameters()
+        params = self.amp.master_params(self.optimizer) if self.use_apex_amp else self.model.parameters()
         if self.args.clip_grad_value:
             torch.nn.utils.clip_grad_value_(params, self.args.clip_grad_value)
         elif self.args.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(params, self.args.clip_grad_norm)
+
+    def _get_gradients_global_norm(self):
+        # get gradients global norm (in the same way as in torch.nn.utils.clip_grad_norm_)
+        params = self.amp.master_params(self.optimizer) if self.use_apex_amp else self.model.parameters()
+        params = [p for p in params if p.grad is not None]
+        if len(params) == 0:
+            return 0.0
+        total_norm = torch.linalg.norm(torch.stack([torch.linalg.norm(p.grad.detach()) for p in params])).item()
+        return total_norm
 
     def _train_batch_generator(self):
         while self.n_iter <= self.args.iters:
@@ -426,19 +479,16 @@ class Trainer:
 
     def _reset_batch_metrics(self, split=None):
         if split is None:
-            self.batch_metrics = {}
-            self.batch_metrics['train'] = defaultdict(lambda: [])
-            self.batch_metrics['valid'] = defaultdict(lambda: [])
+            # e.g., self.batch_metrics['train']['metric_name'] is a list of metric values
+            self.batch_metrics = defaultdict(lambda: defaultdict(list))
         else:
-            self.batch_metrics[split] = defaultdict(lambda: [])
+            self.batch_metrics[split] = defaultdict(list)
 
     def _reset_metrics_data(self, split=None):
         if split is None:
-            self.metrics_data = {}
-            self.metrics_data['train'] = defaultdict(lambda: [])
-            self.metrics_data['valid'] = defaultdict(lambda: [])
+            self.metrics_data = defaultdict(lambda: defaultdict(list))
         else:
-            self.metrics_data[split] = defaultdict(lambda: [])
+            self.metrics_data[split] = defaultdict(list)
 
     @staticmethod
     @rank_0
@@ -452,8 +502,8 @@ class Trainer:
 
     def collect_metrics(self, split: str) -> dict:
         """
-        collects all metrics from batch_metrics and computes metrics available from metrics_data
-        once metrics are collected we drop everything that was collected
+        Collects batch-lvl metrics from batch_metrics_fn and computes metrics with metrics_fn on data collected from
+        keep_for_metrics_fn. Once the metrics are collected we drop everything that was previously collected.
 
         Args:
             split (str): data split name train/valid for which metrics should be collected
@@ -461,21 +511,34 @@ class Trainer:
         Returns:
             dict: dictionary with collected metrics
         """
-
         # batch-lvl metrics
         metrics = {}
-        for k in self.batch_metrics[split]:
-            metrics[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
+        # collect metrics names from all processes: it is possible that different workers might have different
+        # set of metrics (e.g., some metric could be not available for some batches).
+        metrics_keys = set(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split].keys())))
+        if metrics_keys != self.batch_metrics[split].keys():
+            missing_metrics_keys = metrics_keys - self.batch_metrics[split].keys()
+            logger.warning(f'some of the batch-lvl metrics on rank_{hvd.rank()} are missing, but were found on another '
+                           f'ranks: {missing_metrics_keys}')
+        metrics_keys = sorted(metrics_keys)
+        for k in metrics_keys:
+            metrics[k] = list(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
             metrics[k] = np.mean(metrics[k])
         # compute metrics from metrics data
         if self.keep_for_metrics_fn and self.metrics_fn:
             metrics_data = {}
-            for k in self.metrics_data[split]:
-                metrics_data[k] = list(itertools.chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
+            data_keys = set(chain.from_iterable(hvd.allgather_object(self.metrics_data[split].keys())))
+            if data_keys != self.metrics_data[split].keys():
+                missing_data_keys = data_keys - self.metrics_data[split].keys()
+                logger.warning(f'some of the data collected from keep_for_metrics_fn on rank_{hvd.rank()} is missing, '
+                               f'but was found on another ranks: {missing_data_keys}')
+            data_keys = sorted(data_keys)
+            for k in data_keys:
+                metrics_data[k] = list(chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
                 m_shape = getattr(metrics_data[k][0], 'shape', None)
                 if m_shape is None:
                     # data is not a tensor, collect it into python list
-                    metrics_data[k] = list(itertools.chain.from_iterable(metrics_data[k]))
+                    metrics_data[k] = list(chain.from_iterable(metrics_data[k]))
                 elif len(m_shape) == 0:
                     # if scalars
                     metrics_data[k] = torch.stack(metrics_data[k])
@@ -484,7 +547,7 @@ class Trainer:
                     metrics_data[k] = torch.cat(metrics_data[k])
                 else:
                     # can't concat tensors with diff last shapes, so collecting them into python list
-                    metrics_data[k] = list(itertools.chain.from_iterable([t.tolist() for t in metrics_data[k]]))
+                    metrics_data[k] = list(chain.from_iterable([t.tolist() for t in metrics_data[k]]))
             m = self.metrics_fn(metrics_data)
             if len(metrics.keys() & m.keys()) != 0:
                 self._log_warning(f'metrics ({m.keys()}) and batch-lvl metrics ({metrics.keys()}) have common names. '
@@ -514,6 +577,7 @@ class Trainer:
 
         self._reset_batch_metrics('train')
         self._reset_metrics_data('train')
+        self.global_grad_norms = []
         best_valid_metric = np.inf if self.args.optimize_mode == 'min' else -np.inf
         valid_metric = best_valid_metric
         valid_loss = np.inf
@@ -532,7 +596,8 @@ class Trainer:
                 # batch-lvl averaged metrics:
                 train_metrics = self.collect_metrics(split='train')
                 train_loss = train_metrics['loss']
-
+                global_grad_norms = list(chain.from_iterable(hvd.allgather_object(self.global_grad_norms)))
+                self.global_grad_norms = []
                 if hvd.rank() == 0:
                     # todo: move logging, move to self.log()
                     for k in train_metrics:
@@ -555,6 +620,11 @@ class Trainer:
                                 self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
                                 self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
+                    # log gradients global norm
+                    gnorm = np.mean(global_grad_norms) if len(global_grad_norms) > 0 else 0
+                    if self.tb:
+                        self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
+                        self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
 
             # validation
             if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
@@ -571,6 +641,10 @@ class Trainer:
                 else:
                     self.early_stopping_counter += 1
                     self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
+                if hvd.rank() == 0 and self.tb:
+                    self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
+                    self.tb.add_scalar('patience/samples', self.early_stopping_counter,
+                                       self.n_iter * self.global_batch_size)
                 if self.lr_drop_scheduler:
                     self.lr_drop_scheduler.step(valid_metric)
 
@@ -594,8 +668,8 @@ class Trainer:
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         self._log_info(f'start validation at step {self.n_iter}')
-        self._reset_batch_metrics('valid')
-        self._reset_metrics_data('valid')
+        self._reset_batch_metrics(split)
+        self._reset_metrics_data(split)
 
         n_valid_batches = None
         try:
@@ -607,13 +681,13 @@ class Trainer:
         pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
         for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
-            self._add_batch_metrics(batch_metrics, split='valid')
+            self._add_batch_metrics(batch_metrics, split=split)
             if self.keep_for_metrics_fn and self.metrics_fn:
-                self._add_metrics_data(batch_metrics_data, split='valid')
+                self._add_metrics_data(batch_metrics_data, split=split)
             pbar.update()
         pbar.close()
 
-        metrics = self.collect_metrics(split='valid')
+        metrics = self.collect_metrics(split=split)
         if hvd.rank() == 0:
             # todo: separate logging from validation/training
             for k in metrics:
@@ -639,8 +713,12 @@ class Trainer:
             # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
             self._log_info('Loading lr_scheduler state_dict from the checkpoint.')
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
-        if 'amp' in checkpoint and self.args.fp16:
+        if 'amp' in checkpoint and self.use_apex_amp and not reset_optimizer:
+            self._log_info('Loading apex.amp state_dict from the checkpoint.')
             self.amp.load_state_dict(checkpoint['amp'])
+        if 'torch_amp' in checkpoint and self.use_torch_amp and not reset_optimizer:
+            self._log_info('Loading torch.cuda.amp.GradScaler state_dict from the checkpoint.')
+            self.amp_grad_scaler.load_state_dict(checkpoint['torch_amp'])
         if not reset_iteration:
             self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
             self.n_epoch = checkpoint.get('epoch', 0)
@@ -658,19 +736,20 @@ class Trainer:
     def save(self, save_path, suffix='', metrics=None) -> None:
         if save_path is not None:
             if suffix == '':
-                save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
+                save_path = f'{save_path}/model_{self.n_iter}.pth'
             else:
-                save_path = f'{self.args.model_path}/model_{suffix}.pth'
+                save_path = f'{save_path}/model_{suffix}.pth'
             to_save = {
-                       "model_state_dict": self.model.state_dict(),
-                       "optimizer_state_dict": self.optimizer.state_dict(),
-                       "iteration": self.n_iter,
-                       "epoch": self.n_epoch,
-                       }
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "iteration": self.n_iter,
+                "epoch": self.n_epoch}
             if metrics:
                 to_save['metrics'] = metrics
-            if self.args.fp16:
+            if self.use_apex_amp:
                 to_save['amp'] = self.amp.state_dict()
+            if self.use_torch_amp:
+                to_save['torch_amp'] = self.amp_grad_scaler.state_dict()
             if self.lr_scheduler:
                 to_save['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
             torch.save(to_save, save_path)
