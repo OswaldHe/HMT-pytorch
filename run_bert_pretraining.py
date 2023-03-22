@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 from pathlib import Path
@@ -18,9 +17,9 @@ from lm_experiments_tools import Trainer, TrainerArgs
 
 load_dotenv()
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+logging.basicConfig(format=logger_fmt, level=logging.INFO)
+logger = logging.getLogger()
 
 # if CUDA_VISIBLE_DEVICES is not set make all gpus visible
 if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
@@ -35,8 +34,7 @@ hvd.init()
 import transformers  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
-from lm_experiments_tools.utils import collect_run_configuration, get_cls_by_name, get_optimizer  # noqa: E402
-from lm_experiments_tools.utils import get_git_diff  # noqa: E402
+from lm_experiments_tools.utils import prepare_run, get_cls_by_name, get_optimizer  # noqa: E402
 import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
@@ -88,27 +86,18 @@ parser.add_argument('--relative_step', action='store_true', default=False,
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
-if __name__ == '__main__':
+
+def main():
     args = parser.parse_args()
     # set current working dir
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
     os.chdir(args.working_dir)
+
+    prepare_run(args, logger, logger_fmt)
+
     if hvd.rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
-
-    if hvd.rank() == 0 and args.model_path is None:
-        logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')
-
-    # create model path and save configuration
-    if hvd.rank() == 0 and args.model_path is not None:
-        model_path = Path(args.model_path)
-        if not model_path.exists():
-            Path(model_path).mkdir(parents=True)
-        args_dict = collect_run_configuration(args)
-        # todo: if model path exists and there is config file, write new config file aside
-        json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
-        open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     tokenizer = _HFAutoTokenizer(args.tokenizer)
     # get train dataset
@@ -231,10 +220,19 @@ if __name__ == '__main__':
         return metrics
 
     trainer = Trainer(args, model, optimizer, train_dataloader, valid_dataloader, train_sampler,
-                      batch_transform_fn, batch_metrics_fn, keep_for_metrics_fn, metrics_fn)
+                      batch_transform_fn, batch_metrics_fn, keep_for_metrics_fn, metrics_fn,
+                      forward_kwargs={'output_hidden_states': False, 'output_attentions': False},
+                      )
 
     if not args.validate_only:
         # train loop
         trainer.train()
     else:
         trainer.validate(valid_dataloader)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        logger.exception(e)
