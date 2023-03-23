@@ -3,6 +3,11 @@ import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 
 from .base import RMTBaseModel
+import torch
+import torch.nn.functional as F
+from torch.nn import CrossEntropyLoss
+
+# from .base import RMTBaseModel
 class RMTDecoderForCausalLM(RMTBaseModel):
     def extend_word_embeddings(self, num_mem_tokens, tokenizer):
             
@@ -12,7 +17,8 @@ class RMTDecoderForCausalLM(RMTBaseModel):
         self.register_buffer('mem_token_ids', torch.arange(vocab_size, vocab_size + num_mem_tokens))
         self.model.resize_token_embeddings(extended_vocab_size)
 
-        # self.memory_position = list(range(num_mem_tokens)) + list(range(num_mem_tokens))
+        self.read_memory_position = range(num_mem_tokens)
+        self.write_memory_position = range(-num_mem_tokens, 0)
         self.model.embeddings = self.model.get_input_embeddings()
 
     def set_memory(self, input_shape):
@@ -28,18 +34,25 @@ class RMTDecoderForCausalLM(RMTBaseModel):
                   'output_hidden_states': output_hidden_states, 'return_dict': return_dict,
                   }
 
-        if not hasattr(self, 'memory') or self.memory is None:
-            self.memory = self.set_memory(input_ids.shape)
+        if not hasattr(self, 'memory_states') or self.memory_states is None:
+            init_memory = self.set_memory(input_ids.shape)
+            self.memory_states = [(None, init_memory)]
+        
+        memory = self.memory_states[-1][1].detach()
+        memory.requires_grad = True
 
         segment_input_ids = self.pad_and_segment(input_ids)[0]
 
         seg_kwargs, non_empty_mask = self.prepare_kwargs(segment_input_ids, kwargs)
-        seg_kwargs['inputs_embeds'][:, :self.num_mem_tokens] = self.memory
-        # seg_kwargs['inputs_embeds'][:, -self.num_mem_tokens:] = self.memory
+        seg_kwargs['inputs_embeds'][:, self.read_memory_position] = memory
+        # seg_kwargs['inputs_embeds'][:, self.write_memory_position] = self.memory
+        
         labels = seg_kwargs.pop('labels')
         out = self.model(**seg_kwargs)
-
-        self.memory = out.hidden_states[-1][:, -self.num_mem_tokens:].detach()
+        
+        new_memory = out.hidden_states[-1][:, self.write_memory_position]
+        self.memory_states.append((memory, new_memory))
+        self.trim_memory_states()
 
         ### Calculate loss excluding memory 
         lm_logits = out.logits[:, self.num_mem_tokens:-self.num_mem_tokens]
@@ -52,7 +65,6 @@ class RMTDecoderForCausalLM(RMTBaseModel):
 
         return out
 
-
     def pad_add_special_tokens(self, tensor, segment_size):
         input_elements = []
         input_elements += [self.mem_token_ids, tensor, self.mem_token_ids]
@@ -64,9 +76,29 @@ class RMTDecoderForCausalLM(RMTBaseModel):
         return tensor
 
     def train(self, *args, **kwargs):
-        self.memory = None
+        self.memory_states = None
         super().train(*args, **kwargs)
 
     def eval(self, *args, **kwargs):
-        self.memory = None
+        self.memory_states = None
         super().eval(*args, **kwargs)
+
+    def trim_memory_states(self):
+        k2 = self.rmt_config.get('k2')
+        if not k2 or k2 == -1:
+            return 
+        while len(self.memory_states) > k2:
+            del self.memory_states[0]
+
+    def truncated_backward(self, k1, k2):
+        memory_states = self.memory_states
+        if k1 != -1:
+            raise NotImplementedError
+        
+        for i in range(k2 - 1 if k2 != -1 else len(memory_states)):
+            curr_grad = memory_states[-i-1][0].grad
+            memory_states[-i-2][1].backward(curr_grad, retain_graph=False)
+
+            # if we get all the way back to the "init_memory", stop
+            if memory_states[-i-2][0] is None:
+                break

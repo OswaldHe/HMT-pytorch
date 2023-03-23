@@ -18,7 +18,8 @@ from datasets import Dataset, load_dataset
 from huggingface_hub import hf_hub_download
 from sklearn.metrics import f1_score, accuracy_score
 
-from lm_experiments_tools import Trainer, TrainerArgs
+from lm_experiments_tools import TrainerArgs
+from lm_experiments_tools.trainer_tbptt import Trainer
 
 from transformers import default_data_collator
 from lm_experiments_tools.lm_datasets import get_lm_datasets
@@ -98,6 +99,10 @@ parser.add_argument('--reconstruction_loss_coef', type=float, default=None,
 # parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
 #                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
 parser.add_argument('--retain_graph', action='store_true', help='Retain computation graph during backward pass', default=False)
+parser.add_argument('--use_truncated_backward', action='store_true', default=False,
+                    help='whether to use RMT truncated bptt method in backward')
+parser.add_argument('--k1', type=int, default=-1, help='(not implemented) If not -1, gradient update is done each k1 segments')
+parser.add_argument('--k2', type=int, default=-1, help='number of last segments used by backward')
 
 
 # tokenizer
@@ -156,8 +161,8 @@ if __name__ == '__main__':
     # batch sample i is a continuation of sample i of the previous batch
     class alignedDataLoader(DataLoader):
         def __iter__(self):
-            all_inds = np.arange(len(self.dataset) // self.batch_size * batch_size)
-            all_inds = all_inds.reshape(batch_size, -1)
+            all_inds = np.arange(len(self.dataset) // self.batch_size * self.batch_size)
+            all_inds = all_inds.reshape(self.batch_size, -1)
             for batch_ind in range(all_inds.shape[1]):
                 batch = [self.dataset[int(ind)] for ind in all_inds[:, batch_ind]]
                 yield self.collate_fn(batch)
@@ -169,14 +174,14 @@ if __name__ == '__main__':
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
     global_batch_size = per_worker_batch_size * hvd.size()
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
-    train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler,
+    train_dataloader = alignedDataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler,
                                   collate_fn=default_data_collator, **kwargs)
     # get validation dataset
     valid_dataloader = None
     if hvd.rank() == 0:
         logger.info(f'preparing validation data from babilong')
     valid_sampler = DistributedSampler(valid_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler,
+    valid_dataloader = alignedDataLoader(valid_dataset, batch_size=per_worker_batch_size, sampler=valid_sampler,
                                   collate_fn=default_data_collator, drop_last=True, **kwargs)
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
@@ -187,8 +192,6 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
         model_cfg = AutoConfig.from_pretrained(args.model_cfg)
-        if args.model_type == 'encoder':
-            model_cfg.num_labels = num_labels
         model = model_cls(config=model_cfg)
     else:
         if hvd.rank() == 0:
@@ -301,7 +304,7 @@ if __name__ == '__main__':
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
-                      generate_kwargs=generate_kwargs if args.use_generate_on_valid else {})
+                      generate_kwargs={})
 
     if not args.validate_only:
         # train loop
