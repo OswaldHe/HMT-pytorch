@@ -208,7 +208,8 @@ if __name__ == '__main__':
 
         def collate_fn(batch):
             # cut too long strings because they may slow down tokenization
-            inputs = [b['fact'] + b['input'][:args.input_seq_len * 10] for b in batch]
+            # inputs = [b['fact'] + b['input'][:args.input_seq_len * 10] for b in batch]
+            inputs = [b['fact'] + ' '.join([b['input']]) * int(np.ceil(args.input_seq_len * 10 / len(b['input']))) for b in batch]
             questions = [b['question'] for b in batch]
             labels = [b['answer'][:args.target_seq_len * 10] for b in batch]
             if args.input_prefix:
@@ -243,7 +244,8 @@ if __name__ == '__main__':
         def collate_fn(batch, input_seg_size=input_seg_size):
             # cut too long strings because they may slow down tokenization
             # inputs = ['[memorize] ' + b['fact'] + ' [/memorize] ' + b['input'][:args.input_seq_len * 10] for b in batch]
-            inputs = [b['fact'] + b['input'][:args.input_seq_len * 10] for b in batch]
+            # inputs = [b['fact'] + b['input'][:args.input_seq_len * 10] for b in batch]
+            inputs = [b['fact'] + ' '.join([b['input']]) * int(np.ceil(args.input_seq_len * 10 / len(b['input']))) for b in batch]
             questions = [b['question'] for b in batch]
             labels = [b['answer'][:args.target_seq_len * 10] for b in batch]
             if args.input_prefix:
