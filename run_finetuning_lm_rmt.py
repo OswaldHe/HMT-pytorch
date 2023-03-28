@@ -103,6 +103,9 @@ parser.add_argument('--use_truncated_backward', action='store_true', default=Fal
                     help='whether to use RMT truncated bptt method in backward')
 parser.add_argument('--k1', type=int, default=-1, help='(not implemented) If not -1, gradient update is done each k1 segments')
 parser.add_argument('--k2', type=int, default=-1, help='number of last segments used by backward')
+parser.add_argument('--freeze_model_weights', action='store_true', default=False,
+                    help='Stop training all model weights except memory layers')
+parser.add_argument('--backbone_cpt', type=str, default=None, help='backbone model checkpoint path')
 
 
 # tokenizer
@@ -223,22 +226,30 @@ if __name__ == '__main__':
         if hvd.rank() == 0:
             logger.info(f'Wrapping in: {rmt_cls}')
         
-        ## load cpt
+        ## load cpt of backbone model
+        if args.backbone_cpt:
+            backbone_cpt = os.path.join(args.backbone_cpt, "model_best.pth")
+            cpt = torch.load(backbone_cpt, map_location='cpu')
+            model.load_state_dict(cpt['model_state_dict'])
+            if hvd.rank() == 0:
+                logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
+        
+        model = rmt_cls(model, **rmt_config)
+
+        ## load cpt of rmt
         if args.model_cpt:
             model_cpt = os.path.join(args.model_cpt, "model_best.pth")
             cpt = torch.load(model_cpt, map_location='cpu')
-            # model.load_state_dict(cpt['model_state_dict'])
-            drop_keys = { "cls_token", "sep_token", "mem_token_ids", "embeddings.weight"}
-            fixed_state_dict = {}
-            for key, value in cpt['model_state_dict'].items():
-                if 'model' in key:
-                    key = key.split('model.')[1]
-                if key not in drop_keys:
-                    fixed_state_dict[key] = value
+            model.load_state_dict(cpt['model_state_dict'])
             if hvd.rank() == 0:
-                logger.info(f'Loaded state dict from: {args.model_cpt}')
-        
-        model = rmt_cls(model, **rmt_config)
+                logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
+
+        if args.freeze_model_weights:
+            for n, p in model.named_parameters():
+                if 'memory' not in n and 'wte' not in n:
+                    p.requires_grad = False
+            if hvd.rank() == 0:
+                logger.info(f'Frozen moodel weights except embeddings')
     
     # define optimizer
     optimizer_cls = get_optimizer(args.optimizer)

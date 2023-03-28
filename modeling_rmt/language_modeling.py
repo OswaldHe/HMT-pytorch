@@ -1,13 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
-
 from .base import RMTBaseModel
-import torch
-import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 
-# from .base import RMTBaseModel
 class RMTDecoderForCausalLM(RMTBaseModel):
     def extend_word_embeddings(self, num_mem_tokens, tokenizer):
             
@@ -97,8 +92,70 @@ class RMTDecoderForCausalLM(RMTBaseModel):
         
         for i in range(k2 - 1 if k2 != -1 else len(memory_states)):
             curr_grad = memory_states[-i-1][0].grad
-            memory_states[-i-2][1].backward(curr_grad, retain_graph=False)
+            memory_states[-i-2][1].backward(curr_grad, retain_graph=k2>2)
 
             # if we get all the way back to the "init_memory", stop
             if memory_states[-i-2][0] is None:
                 break
+
+
+import types
+import copy
+import re
+class RMTDecoderMemoryLayers(RMTDecoderForCausalLM):
+    def set_params(self, num_mem_tokens, tokenizer, **rmt_config):
+        super().set_params(num_mem_tokens, tokenizer, **rmt_config)
+        self.add_memory_layers()
+        self.override_encoder_forward(rmt_config.get('memory_forward_func'))
+
+    def override_encoder_forward(self, memory_forward_func):
+        if self.rmt_config.get('memory_layers') is None:
+            return
+        if memory_forward_func is None:
+            from rmt_utils.decoder.memory_layers import memory_layers_forward
+            memory_forward_func = memory_layers_forward
+        new_forward = lambda *args, **kwargs: memory_forward_func(*args, **kwargs, rmt_parent=self)
+        self.model.base_model.forward = types.MethodType(new_forward, self.model.base_model)
+
+    def add_memory_layers(self):
+        memory_layers, share_memory_layers = self.rmt_config.get('memory_layers'), self.rmt_config.get('share_memory_layers')
+        if memory_layers is None:
+            self.memory_layers = None
+        else:
+            if memory_layers == 'all':
+                memory_layers = range(len(self.model.base_model.h))
+            else:
+                raise NotImplementedError
+                
+            if share_memory_layers:
+                memory_layer = copy.deepcopy(self.model.base_model.h[0])
+                self.memory_layers = [memory_layer for _ in range(len(memory_layers))]
+                for n, p in memory_layer.named_parameters():
+                    param_name = re.sub('\.', '_', f'memory_{n}')
+                    self.register_buffer(param_name, p)
+            else:
+                self.memory_layers = [copy.deepcopy(self.model.base_model.h[int(l)]) for l in memory_layers]
+                for ln, layer in enumerate(self.memory_layers):
+                    for n, p in layer.named_parameters():
+                        param_name = re.sub('\.', '_', f'{ln}_memory_{n}')
+                        self.register_buffer(param_name, p)
+
+
+class RMTDecoderScaleMem(RMTDecoderMemoryLayers):
+   def extend_word_embeddings(self, num_mem_tokens, tokenizer):
+        vocab_size = self.model.config.vocab_size
+        extended_vocab_size = vocab_size + num_mem_tokens
+        self.num_mem_tokens = num_mem_tokens
+        self.register_buffer('mem_token_ids', torch.arange(vocab_size, vocab_size + num_mem_tokens))
+        self.model.resize_token_embeddings(extended_vocab_size)
+
+        # fix scale and tie weights
+        embeddings = self.model.get_input_embeddings()
+        embeddings.weight.data[-num_mem_tokens:] = embeddings.weight.data[-num_mem_tokens:].normal_(mean=0.0, std=embeddings.weight.data.std()) \
+                                                    / 10 + embeddings.weight.data[tokenizer.eos_token_id]
+        self.model.set_input_embeddings(embeddings)
+        self.model.tie_weights()
+
+        self.read_memory_position = range(num_mem_tokens)
+        self.write_memory_position = range(-num_mem_tokens, 0)
+        self.model.embeddings = self.model.get_input_embeddings()
