@@ -41,7 +41,7 @@ class RMTEncoderForSequenceClassification(RMTBaseModel):
 
         pad_size = segment_size - tensor.shape[0]
         if pad_size > 0:
-            tensor = F.pad(tensor, (0, pad_size))
+            tensor = F.pad(tensor, (0, pad_size), value=self.pad_token_id)
         return tensor
         
 
