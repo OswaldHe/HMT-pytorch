@@ -5,7 +5,6 @@ from .base import RMTBaseModel
 
 class RMTDecoderForCausalLM(RMTBaseModel):
     def extend_word_embeddings(self, num_mem_tokens, tokenizer):
-            
         vocab_size = self.model.config.vocab_size
         extended_vocab_size = vocab_size + num_mem_tokens
         self.num_mem_tokens = num_mem_tokens
@@ -67,7 +66,7 @@ class RMTDecoderForCausalLM(RMTBaseModel):
 
         pad_size = segment_size - tensor.shape[0]
         if pad_size > 0:
-            tensor = F.pad(tensor, (0, pad_size))
+            tensor = F.pad(tensor, (0, pad_size), value=self.pad_token_id)
         return tensor
 
     def train(self, *args, **kwargs):
@@ -97,7 +96,6 @@ class RMTDecoderForCausalLM(RMTBaseModel):
             # if we get all the way back to the "init_memory", stop
             if memory_states[-i-2][0] is None:
                 break
-
 
 import types
 import copy
@@ -152,7 +150,27 @@ class RMTDecoderScaleMem(RMTDecoderMemoryLayers):
         # fix scale and tie weights
         embeddings = self.model.get_input_embeddings()
         embeddings.weight.data[-num_mem_tokens:] = embeddings.weight.data[-num_mem_tokens:].normal_(mean=0.0, std=embeddings.weight.data.std()) \
-                                                    / 10 + embeddings.weight.data[tokenizer.eos_token_id]
+                                                    / 100 + embeddings.weight.data[tokenizer.eos_token_id]
+        self.model.set_input_embeddings(embeddings)
+        self.model.tie_weights()
+
+        self.read_memory_position = range(num_mem_tokens)
+        self.write_memory_position = range(-num_mem_tokens, 0)
+        self.model.embeddings = self.model.get_input_embeddings()
+
+
+class RMTDecoderMemFromDot(RMTDecoderMemoryLayers):
+   def extend_word_embeddings(self, num_mem_tokens, tokenizer):
+        vocab_size = self.model.config.vocab_size
+        extended_vocab_size = vocab_size + num_mem_tokens
+        self.num_mem_tokens = num_mem_tokens
+        self.register_buffer('mem_token_ids', torch.arange(vocab_size, vocab_size + num_mem_tokens))
+        self.model.resize_token_embeddings(extended_vocab_size)
+
+        # fix scale and tie weights
+        embeddings = self.model.get_input_embeddings()
+        embeddings.weight.data[-num_mem_tokens:] = embeddings.weight.data[-num_mem_tokens:].normal_(mean=0.0, std=embeddings.weight.data.std()) \
+                                                    / 100 + embeddings.weight.data[tokenizer.encode('.')[0]]
         self.model.set_input_embeddings(embeddings)
         self.model.tie_weights()
 
