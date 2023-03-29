@@ -77,7 +77,7 @@ class RMTEncoderDecoderForConditionalGeneration(RMTBaseModel):
 
         pad_size = segment_size - tensor.shape[0]
         if pad_size > 0:
-            tensor = F.pad(tensor, (0, pad_size))
+            tensor = F.pad(tensor, (0, pad_size), value=self.pad_token_id)
         return tensor
 
 
@@ -301,7 +301,7 @@ class RMTEncoderDecoderMemoryOutput(RMTEncoderDecoderMemoryLayers):
                 if param in seg_kwargs:
                     seg_kwargs.pop(param)
                     
-            out = self.model.encoder(**seg_kwargs)
+            encoder_out = self.model.encoder(**seg_kwargs)
             memory[non_empty_mask] = out.last_hidden_state[:, self.memory_position]
             memories.append(torch.clone(memory))
 
@@ -309,4 +309,8 @@ class RMTEncoderDecoderMemoryOutput(RMTEncoderDecoderMemoryLayers):
                 memories = torch.cat(memories, dim=1)
                 out = self.model.generate(**seg_kwargs, encoder_hidden_states=memories)
 
-        return out
+        hidden_states = torch.cat(memories, dim=1)
+        encoder_out.hidden_states = None
+        encoder_out.last_hidden_state = hidden_states
+        out = self.model.generate(encoder_outputs=encoder_out)
+        return out 
