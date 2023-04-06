@@ -15,7 +15,7 @@ BS=8 # batch size per gpu, * grad_acc_steps
 WD=1e-03
 
 METRIC=accuracy
-ITERS=6400
+ITERS=3200
 
 PATIENCE=15
 
@@ -23,20 +23,20 @@ DATA_PATH=/home/jovyan/data/ecthr_naacl2021/dataset
 
 # RMT
 INPUT_SIZE=512  # segment length
-MAX_N_SEGMENTS=4
+MAX_N_SEGMENTS=16
 MEMORY_SIZE=10
 
 for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
 do
 MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
-for SRC_LEN in 499 998 1996
+for SRC_LEN in 499 998 1996 3992 7984
 do
-for LR in 1e-04 5e-05 2e-05 1e-05
+for LR in 5e-05 2e-05 1e-05
 do
 for SCHEDULER in linear constant_with_warmup
 do
-for N in 1
+for N in 1 2 3
 do
 rmt_params=rmt_seglen_${INPUT_SIZE}_msz_${MEMORY_SIZE}_sum_loss
 MODEL_PATH=./runs/finetune/ecthr_bc_balanced/$MODEL_NAME/${rmt_params}_lr${LR}_${SCHEDULER}_adamw_wd${WD}_bs${TBS}_p${PATIENCE}_len${SRC_LEN}_it${ITERS}/run_$N
@@ -61,8 +61,8 @@ horovodrun --gloo -np $NP python -m downstream_tasks.ecthr_naacl2021.run_finetun
         --iters $ITERS \
         --batch_size $BS --gradient_accumulation_steps $(($TBS/($BS*$NP))) \
         --optimizer AdamW  --weight_decay $WD \
-        --lr $LR --lr_scheduler $SCHEDULER --num_warmup_steps 250 \
-        --log_interval 100 --valid_interval 100 --early_stopping_patience $PATIENCE \
+        --lr $LR --lr_scheduler $SCHEDULER --num_warmup_steps 150 \
+        --log_interval 50 --valid_interval 50 --early_stopping_patience $PATIENCE \
         --optimize_metric $METRIC --optimize_mode max --save_best \
         --seed $(($N+42))
 find $MODEL_PATH | grep .pth | xargs -l rm -rf

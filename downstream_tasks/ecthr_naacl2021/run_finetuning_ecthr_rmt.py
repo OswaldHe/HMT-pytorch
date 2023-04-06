@@ -199,6 +199,9 @@ def main():
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     train_dataloader = DataLoader(train_dataset, batch_size=per_worker_batch_size, sampler=train_sampler,
                                   collate_fn=collate_fn, **kwargs)
+    if hvd.rank() == 0:
+        logger.info(f'len(train_dataset) = {len(train_dataset)}')
+
     # get validation dataset
     if args.valid_data_path:
         if hvd.rank() == 0:
@@ -210,6 +213,8 @@ def main():
                                       collate_fn=collate_fn, **kwargs)
         if args.valid_interval is None:
             args.valid_interval = args.log_interval
+        if hvd.rank() == 0:
+            logger.info(f'len(valid_dataset) = {len(valid_dataset)}')
     else:
         valid_dataloader = None
         if hvd.rank() == 0:
@@ -223,6 +228,8 @@ def main():
         test_sampler = DistributedSampler(test_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=False)
         test_dataloader = DataLoader(test_dataset, batch_size=per_worker_batch_size, sampler=test_sampler,
                                      collate_fn=collate_fn, **kwargs)
+        if hvd.rank() == 0:
+            logger.info(f'len(test_dataset) = {len(test_dataset)}')
 
     # define model
     model_cls = get_cls_by_name(args.backbone_cls)
