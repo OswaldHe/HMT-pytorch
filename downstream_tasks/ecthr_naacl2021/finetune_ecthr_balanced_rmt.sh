@@ -11,7 +11,7 @@ MODEL_TYPE=encoder
 MODEL_CLSS=(Roberta)
 
 TBS=32 # total batch size
-BS=8 # batch size per gpu, * grad_acc_steps
+BS=8 # batch size per gpu, * grad_acc_steps, set to 4 for len 7984
 WD=1e-03
 
 METRIC=accuracy
