@@ -52,9 +52,8 @@ class RMTBaseModel(torch.nn.Module):
     def pad_and_segment(self, input_ids):
         segmented_batch = []
         for seq in input_ids:
-            drop_mask = torch.any(torch.stack([seq == t for t in self.special_token_ids]), dim=0)
-
-            seq = seq[(1 - drop_mask).bool()]
+            drop_mask = torch.any(torch.stack([seq == t for t in self.special_token_ids if t is not None]), dim=0)
+            seq = seq[~drop_mask]
             seq = seq[:self.segment_size * self.rmt_config['max_n_segments']]
 
             align = self.rmt_config.get('segment_alignment')
