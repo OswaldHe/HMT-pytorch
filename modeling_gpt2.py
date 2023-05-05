@@ -380,6 +380,65 @@ class GPT2MLP(nn.Module):
         return hidden_states
 
 
+# slightly modified implementation from
+# https://github.com/jxhe/unify-parameter-efficient-tuning/blob/3222ce2c0079566a28043e22380eb4ab6ad14389/petl/petl_factory.py#L396
+class Adapter_Layer(nn.Module):
+    def __init__(self, config=None):
+        super().__init__()
+        self.n_embd = config.n_embd
+        self.down_size = config.adapter_bottleneck_dim
+        self.adapter_dropout = config.adapter_dropout
+        self.adapter_scale = config.adapter_scale
+        self.adapter_layernorm_option = getattr(config, 'adapter_layernorm_option', 'in')
+        # self.non_linearity = args.non_linearity  # use ReLU by default
+
+        self.adapter_layer_norm_before = None
+        if self.adapter_layernorm_option == "in" or self.adapter_layernorm_option == "out":
+            self.adapter_layer_norm_before = nn.LayerNorm(self.n_embd)
+
+        if self.adapter_scale == "learnable_scalar":
+            self.scale = nn.Parameter(torch.ones(1))
+        else:
+            self.scale = float(self.adapter_scale)
+
+        self.down_proj = nn.Linear(self.n_embd, self.down_size)
+        self.non_linear_func = nn.ReLU()
+        self.up_proj = nn.Linear(self.down_size, self.n_embd)
+        if self.adapter_dropout > 0:
+            self.dropout = nn.Dropout(p=self.adapter_dropout)
+        else:
+            self.lora_dropout = lambda x: x
+
+        # init params with lora init
+        with torch.no_grad():
+            nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
+            nn.init.zeros_(self.up_proj.weight)
+            nn.init.zeros_(self.down_proj.bias)
+            nn.init.zeros_(self.up_proj.bias)
+
+    def forward(self, x, add_residual=True, residual=None):
+        residual = x if residual is None else residual
+        if self.adapter_layernorm_option == 'in':
+            x = self.adapter_layer_norm_before(x)
+
+        down = self.down_proj(x)
+        down = self.non_linear_func(down)
+        down = self.dropout(down)
+        up = self.up_proj(down)
+
+        up = up * self.scale
+
+        if self.adapter_layernorm_option == 'out':
+            up = self.adapter_layer_norm_before(up)
+
+        if add_residual:
+            output = up + residual
+        else:
+            output = up
+
+        return output
+
+
 class GPT2Block(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
@@ -395,6 +454,14 @@ class GPT2Block(nn.Module):
             self.ln_cross_attn = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         self.mlp = GPT2MLP(inner_dim, config)
+
+        if getattr(config, 'use_parallel_adapter', False):
+            self.parallel_adapter = Adapter_Layer(config)
+            self.parallel_adapter_mode = getattr(config, 'parallel_adapter_mode')
+
+            if self.parallel_adapter_mode not in ['ffn']:
+                raise RuntimeError(f'Parallel adapter for FFN block is supported only. '
+                                   f'parallel_adapter_mode: {self.parallel_adapter_mode}')
 
     def forward(
         self,
@@ -449,6 +516,9 @@ class GPT2Block(nn.Module):
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
+        # paraller adapter for FFN transformer block
+        if getattr('config', 'use_parallel_adapter', False) and self.parallel_adapter_mode == 'ffn':
+            hidden_states = hidden_states + self.paraller_adapter(residual, add_residual=False)
 
         if use_cache:
             outputs = (hidden_states,) + outputs
