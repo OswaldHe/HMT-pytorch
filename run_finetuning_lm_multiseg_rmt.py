@@ -68,6 +68,8 @@ parser.add_argument('--target_seq_len', type=int, default=16, help='target sequn
 parser.add_argument('--data_n_workers', type=int, default=2, help='number of dataloader workers (default: 2)')
 
 parser.add_argument('--input_prefix', type=str, default='', help='add task prefix to an input string (default: "")')
+parser.add_argument('--sliding_window', action='store_true', help='use slinding window attentinon mask, '
+                    'eval on last segment only', default=False)
 
 # model args
 parser.add_argument('--from_pretrained', type=str, help='model name in HF Model Hub (default: "")')
@@ -195,26 +197,54 @@ if __name__ == '__main__':
             }
         result["labels"] = result["input_ids"].copy()
         return result
-    
-    id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    def collate_fn(batch):
-        input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
-        labels = [torch.tensor(b['labels'][::-1]) for b in batch]
-        attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
-        input_ids = pad_sequence(input_ids, padding_value=id_pad_value).T.flip(1)
-        labels = pad_sequence(labels, padding_value=-100).T.flip(1)
-        attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
 
-        collated = {'input_ids': input_ids,
-                    'labels': labels, 
-                    'attention_mask': attention_mask}
-     
-        if input_ids.shape[1] != block_size:
-            labels_mask = torch.ones_like(input_ids, dtype=bool)
-            labels_mask[:, :-block_size] = False
-            collated['labels_mask'] = labels_mask
-        
-        return collated
+    id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    if args.sliding_window:
+        def collate_fn(batch):
+            input_ids = [torch.tensor(b['input_ids']) for b in batch]
+            input_lens = [el.shape[-1] for el in input_ids]
+
+            labels = [torch.tensor(b['labels']) for b in batch]
+            attention_mask = [torch.tensor(b['attention_mask']) for b in batch]
+            input_ids = pad_sequence(input_ids, padding_value=id_pad_value).T
+            labels = pad_sequence(labels, padding_value=-100).T
+            attention_mask = pad_sequence(attention_mask, padding_value=0).T
+
+            # make sliding window att mask
+            attention_mask = attention_mask[:, None, :].repeat(1, attention_mask.shape[1], 1)
+            attention_mask = (torch.tril(attention_mask, 0) * (1 - torch.tril(attention_mask, -block_size)))
+
+            collated = {'input_ids': input_ids,
+                        'labels': labels, 
+                        'attention_mask': attention_mask}
+
+            if input_ids.shape[1] != block_size:
+                # take only labels for last block (maybe use all labels during training?)
+                labels_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+                for i, lens in enumerate(input_lens):
+                    labels_mask[i, max(lens - block_size, 0): lens] = True
+                collated['labels_mask'] = labels_mask
+
+            return collated
+    else:
+        def collate_fn(batch):
+            input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
+            labels = [torch.tensor(b['labels'][::-1]) for b in batch]
+            attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
+            input_ids = pad_sequence(input_ids, padding_value=id_pad_value).T.flip(1)
+            labels = pad_sequence(labels, padding_value=-100).T.flip(1)
+            attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
+
+            collated = {'input_ids': input_ids,
+                        'labels': labels, 
+                        'attention_mask': attention_mask}
+
+            if input_ids.shape[1] != block_size:
+                labels_mask = torch.ones_like(input_ids, dtype=bool)
+                labels_mask[:, :-block_size] = False
+                collated['labels_mask'] = labels_mask
+
+            return collated
 
 
     train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size), 
