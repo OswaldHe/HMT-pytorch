@@ -39,6 +39,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.models.gpt_neox.configuration_gpt_neox import GPTNeoXConfig
 
+from adapters import Adapter_Layer
+
 
 logger = logging.get_logger(__name__)
 
@@ -407,6 +409,16 @@ class GPTNeoXLayer(nn.Module):
         self.attention = GPTNeoXAttention(config)
         self.mlp = GPTNeoXMLP(config)
 
+        if getattr(config, 'use_parallel_adapter', False):
+            # parallel adapter uses n_embd from config as hidden_size (compatible with gpt2 configs)
+            config.n_embd = getattr(config, 'n_embd', config.hidden_size)
+            self.parallel_adapter = Adapter_Layer(config)
+            self.parallel_adapter_mode = getattr(config, 'parallel_adapter_mode')
+
+            if self.parallel_adapter_mode not in ['ffn']:
+                raise RuntimeError(f'Parallel adapter for FFN block is supported only. '
+                                   f'parallel_adapter_mode: {self.parallel_adapter_mode}')
+
     def forward(
         self,
         hidden_states: Optional[torch.FloatTensor],
@@ -433,6 +445,7 @@ class GPTNeoXLayer(nn.Module):
         if self.use_parallel_residual:
             # pseudocode:
             # x = x + attn(ln1(x)) + mlp(ln2(x))
+            mlp_input = hidden_states
             mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
             mlp_output = self.post_mlp_dropout(mlp_output)
             hidden_states = mlp_output + attn_output + hidden_states
@@ -441,9 +454,14 @@ class GPTNeoXLayer(nn.Module):
             # x = x + attn(ln1(x))
             # x = x + mlp(ln2(x))
             attn_output = attn_output + hidden_states
+            mlp_input = attn_output
             mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
             mlp_output = self.post_mlp_dropout(mlp_output)
             hidden_states = mlp_output + attn_output
+
+        # paraller adapter for FFN transformer block
+        if getattr('config', 'use_parallel_adapter', False) and self.parallel_adapter_mode == 'ffn':
+            hidden_states = hidden_states + self.paraller_adapter(mlp_input, add_residual=False)
 
         if use_cache:
             outputs = (hidden_states,) + outputs  # hidden_states, present, (attn_weights)
