@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch GPTNeoX model."""
+""" Copy-pasted from Transformers 4.31.0 """
 
 from typing import Optional, Tuple, Union
 
