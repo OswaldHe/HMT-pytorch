@@ -7,8 +7,9 @@ CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
 
 MODEL_TYPE=decoder
-MODEL_CLS=modeling_rmt.language_modeling:RMTDecoderLMHeadMultiSeg
-BACKBONE_CLS=modeling_gpt2:GPT2LMHeadModel
+MEMORY_CELL=modeling_rmt.language_modeling:MemoryCell
+RECURRENT_WRAPPER=modeling_rmt.language_modeling:RecurrentWrapper
+BACKBONE_CLS=transformers:AutoModelForCausalLM
 TASK_NAME=wikitext-2-v1
 
 ITERS=10000
@@ -55,9 +56,10 @@ accelerate launch --num_processes $NP --config_file ./accelerate.yaml run_finetu
         --model_path ../runs/lm/${TASK_NAME}/$MODEL_NAME/${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-${MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${K2}_lora_freeze_from_cpt_$((SOURCE_N_SEGMENTS))-${MAX_N_SEGMENTS}_eval/run_$N \
         --from_pretrained $MODEL_NAME \
         --model_type $MODEL_TYPE \
-        --model_cls $MODEL_CLS \
+        --memory_cell_cls $MEMORY_CELL \
+        --recurrent_wrapper_cls $RECURRENT_WRAPPER \
+        --model_cls $BACKBONE_CLS \
         --model_cpt ../runs/lm/${TASK_NAME}/$MODEL_NAME/${SCHEDULER}_adamw_wd1e-03_$(((INPUT_SIZE-2*MEMORY_SIZE)*SOURCE_N_SEGMENTS))-${TGT_LEN}-${SOURCE_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs32_${SEGMENT_ORDERING}_bptt-${K2}_lora_freeze_from_cpt_$((SOURCE_N_SEGMENTS-1))-${SOURCE_N_SEGMENTS}/run_$N \
-        --backbone_cls $BACKBONE_CLS \
         --input_seq_len $INPUT_SEQ_LEN \
         --input_size $INPUT_SIZE \
         --target_seq_len $TGT_LEN \
