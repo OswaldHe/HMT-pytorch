@@ -129,7 +129,7 @@ class RecurrentWrapper(torch.nn.Module):
         max_n_segments = self.rmt_config.get('max_n_segments', False)
         if max_n_segments:
             if self.rmt_config.get('vary_n_segments', False):
-                max_n_segments = random.randint(0, max_n_segments)
+                max_n_segments = random.randint(1, max_n_segments+1)
             segments = segments[:max_n_segments]
 
         return segments
