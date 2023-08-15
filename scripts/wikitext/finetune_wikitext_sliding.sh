@@ -47,7 +47,7 @@ do
 
 echo RUNNING: TASK_NAME SRC_LEN MODEL_NAME MODEL_CLS N_SEG MEMORY_SIZE INPUT_SEQ_LEN LR N
 echo RUNNING: $TASK_NAME $SRC_LEN $MODEL_NAME $MODEL_CLS $MAX_N_SEGMENTS $MEMORY_SIZE $INPUT_SEQ_LEN $LR $N
-horovodrun --gloo -np $NP python run_finetuning_lm_multiseg_rmt_chunked.py \
+accelerate launch --num_processes $NP --config_file ./accelerate.yaml run_finetuning_lm_rmt.py \
         --task_name $TASK_NAME \
         --model_path ../runs/lm_long/${TASK_NAME}/$MODEL_NAME/${SCHEDULER}_adamw_wd1e-03_${INPUT_SEQ_LEN}-${TGT_LEN}-${MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_xl${XL_CACHE_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${K2}_slw/run_$N \
         --from_pretrained $MODEL_NAME \
