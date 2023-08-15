@@ -1,12 +1,12 @@
-import importlib
+import contextlib
 import itertools
 import json
-import logging
 import time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import chain
+from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -15,15 +15,16 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers.optimization import get_scheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
-import horovod.torch as hvd
 
 from lm_experiments_tools.utils import rank_0, get_fn_param_names
 
-logger = logging.getLogger(__name__)
+import accelerate
+from accelerate.logging import get_logger
+logger = get_logger('')
 
 
 @dataclass
-class TrainerArgs:
+class TrainerAccelerateArgs:
     model_path: Optional[str] = field(
         default=None,
         metadata={'help': 'path where to save model (default: None)'})
@@ -72,22 +73,6 @@ class TrainerArgs:
     gradient_accumulation_steps: int = field(
         default=1,
         metadata={'help': 'number of batches to accumulate gradients for each worker, it multiplies total batch size.'})
-    fp16: bool = field(
-        default=False,
-        metadata={'help': 'use fp16 mixed precision training (default: False). '
-                  'apex.amp is used instead of torch.cuda.amp if apex_opt_level is set.'})
-    fp16_allreduce: bool = field(
-        default=False, metadata={'help': 'use hvd fp16 compression during allreduce (default: False)'})
-    apex_opt_lvl: Optional[str] = field(
-        default=None,
-        metadata={'help': 'apex opt level: O0 (FP32 training), O1 (mixed precision), '
-                  'O2 ("Almost FP16" Mixed Precision), O3 (FP16 training). Details are in Apex docs. (default: None)'})
-    min_loss_scale: Optional[float] = field(
-        default=None,
-        metadata={'help': 'apex amp min_loss_scale. (default: None)'})
-    max_loss_scale: Optional[float] = field(
-        default=2**24,
-        metadata={'help': 'apex amp max_loss_scale, default value is taken from apex.amp. (default: 2**24)'})
     clip_grad_norm: Optional[float] = field(
         default=None,
         metadata={'help': 'torch.nn.utils.clip_grad_norm_ max_norm parameter. 0 or None is no clip (default: None)'})
@@ -143,8 +128,8 @@ class TrainerArgs:
         metadata={'help': 'metric should be minimized (min) or maximized (max) (default: min)'})
 
 
-class Trainer:
-    def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader, train_sampler=None,
+class TrainerAccelerate:
+    def __init__(self, args, accelerator, model, optimizer, train_dataloader, valid_dataloader, train_sampler=None,
                  batch_transform_fn=None,
                  batch_metrics_fn=lambda _, y: {'loss': y['loss']},
                  keep_for_metrics_fn=None,
@@ -189,6 +174,8 @@ class Trainer:
                 `input_ids`.
         """
         # we assume that train/valid/test dataloaders are already multi-gpu aware
+        self.accelerator = accelerator
+        logger.info(f'setting up trainer with accelerator state:\n{self.accelerator.state}')
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = train_dataloader
@@ -201,12 +188,14 @@ class Trainer:
         self.forward_kwargs = deepcopy(forward_kwargs)
         self.generate_kwargs = deepcopy(generate_kwargs)
 
+        self.device = self.accelerator.device
+
         self.args = args
 
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
-        self.global_batch_size = self.per_worker_batch_size * hvd.size()
+        self.global_batch_size = self.per_worker_batch_size * self.accelerator.num_processes
 
-        self.model_forward_args = set(get_fn_param_names(self.model.forward))
+        self.model_forward_args = set(get_fn_param_names(self.accelerator.unwrap_model(self.model).forward))
 
         if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
             raise RuntimeError(f'Only one from clip_grad_norm and clip_grad_value should be set, but found '
@@ -227,26 +216,11 @@ class Trainer:
 
         self.tb = None
         # write tensorboard logs only from rank 0 and if model_path is specified
-        if hvd.rank() == 0 and self.args.model_path is not None:
+        if self.accelerator.is_main_process and self.args.model_path is not None:
             self.tb = SummaryWriter(log_dir=self.args.model_path)
 
         # move model to gpu
-        self.model.cuda()
-
-        # Horovod: broadcast parameters & optimizer state.
-        hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
-        hvd.broadcast_optimizer_state(self.optimizer, root_rank=0)
-
-        # Horovod: (optional) compression algorithm.
-        compression = hvd.Compression.fp16 if self.args.fp16_allreduce else hvd.Compression.none
-        # Horovod: wrap optimizer with DistributedOptimizer.
-        self.optimizer = hvd.DistributedOptimizer(self.optimizer,
-                                                  named_parameters=self.model.named_parameters(),
-                                                  compression=compression,
-                                                  op=hvd.Average,
-                                                  gradient_predivide_factor=1.0,
-                                                  backward_passes_per_step=self.args.gradient_accumulation_steps,
-                                                  )
+        self.model.to(self.device)
 
         if args.lr_scheduler:
             if args.lr is None:
@@ -255,6 +229,8 @@ class Trainer:
                 args.num_training_steps = args.iters
             self.lr_scheduler = get_scheduler(args.lr_scheduler, self.optimizer,
                                               args.num_warmup_steps, args.num_training_steps)
+            # todo: do we need to prepare scheduler with accelerate?
+            self.accelerator.register_for_checkpointing(self.lr_scheduler)
         else:
             self.lr_scheduler = None
 
@@ -275,26 +251,6 @@ class Trainer:
                                                        verbose=True)
         else:
             self.lr_drop_scheduler = None
-
-        # mixed precision
-        self.use_apex_amp = args.fp16 and args.apex_opt_lvl is not None
-        self.use_torch_amp = args.fp16 and args.apex_opt_lvl is None
-        if self.use_torch_amp:
-            # torch.cuda.amp
-            self.amp_grad_scaler = torch.cuda.amp.GradScaler()
-            self._log_info('running FP16 mixed precision with torch.cuda.amp')
-        elif self.use_apex_amp:
-            # Apex
-            try:
-                self.amp = importlib.import_module('apex.amp')
-            except ImportError:
-                raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
-            self.model, self.optimizer = self.amp.initialize(self.model, self.optimizer,
-                                                             enabled=self.args.fp16, opt_level=self.args.apex_opt_lvl,
-                                                             min_loss_scale=self.args.min_loss_scale,
-                                                             max_loss_scale=self.args.max_loss_scale,
-                                                             verbosity=int(hvd.rank() == 0))
-            self._log_info(f'running FP16 mixed precision with apex.amp opt_level: {self.args.apex_opt_lvl}')
 
         self.n_iter = 0
         self.n_epoch = 0
@@ -333,7 +289,7 @@ class Trainer:
         for k in batch:
             # filter keys in batch to pass to model only supported arguments
             if k in self.model_forward_args:
-                batch[k] = batch[k].cuda()
+                batch[k] = batch[k].to(self.device)
                 batch_sizes += [batch[k].size(dim=0)]
         if not np.all(np.array(batch_sizes) == batch_sizes[0]):
             raise RuntimeError(f'not all elements in a batch have equal dim 0 size: {batch_sizes}')
@@ -343,15 +299,17 @@ class Trainer:
         batch_metrics_data = defaultdict(lambda: [])
         with torch.set_grad_enabled(is_train_mode):
             for j in range(0, batch_size, self.args.batch_size):
-                subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
-                # todo: torch 1.10+ supports dtype argument (fp16, bf16) and torch.cuda.amp.autocast -> torch.autocast
-                with torch.cuda.amp.autocast(enabled=self.use_torch_amp):
+                is_last_batch = (j == (batch_size // self.args.batch_size - 1) * self.args.batch_size)
+                grad_sync_context = contextlib.nullcontext if is_last_batch else self.accelerator.no_sync
+                with grad_sync_context(self.model):
+                    subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
                     # filter items from batch that are not used by model forward
                     outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args},
                                          **self.forward_kwargs)
                     loss = outputs['loss']
                     # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                    loss = loss / self.args.gradient_accumulation_steps
+                    # no need, accelerate does it internally (need to pass gradient_accumulation_steps to accelerator)
+                    # loss = loss / self.args.gradient_accumulation_steps
 
                     if not is_train_mode and self.args.use_generate_on_valid:
                         generate_kwargs = deepcopy(self.generate_kwargs)
@@ -363,75 +321,60 @@ class Trainer:
                             generate_kwargs['attention_mask'] = subbatch['attention_mask']
                         if 'global_attention_mask' in subbatch:
                             generate_kwargs['global_attention_mask'] = subbatch['global_attention_mask']
-                        generation_outputs = self.model.generate(subbatch['input_ids'], **generate_kwargs)
+                        generation_outputs = self.accelerator.unwrap_model(self.model).generate(subbatch['input_ids'], **generate_kwargs)
                         outputs['generation_outputs'] = generation_outputs
 
-                metrics = self.batch_metrics_fn(subbatch, outputs)
+                    metrics = self.batch_metrics_fn(subbatch, outputs)
 
-                for k in metrics:
-                    metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
-                    if isinstance(metrics[k], torch.Tensor):
-                        metrics[k] = metrics[k].detach().item()
-                    batch_metrics[k] += metrics[k]
+                    for k in metrics:
+                        metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
+                        if isinstance(metrics[k], torch.Tensor):
+                            metrics[k] = metrics[k].detach().item()
+                        batch_metrics[k] += metrics[k]
 
-                if self.keep_for_metrics_fn and self.metrics_fn:
-                    for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
-                        batch_metrics_data[k] += [v.detach().cpu() if isinstance(v, torch.Tensor) else v]
+                    if self.keep_for_metrics_fn and self.metrics_fn:
+                        for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
+                            batch_metrics_data[k] += [v.detach().cpu() if isinstance(v, torch.Tensor) else v]
 
-                if is_train_mode:
-                    # backward
-                    is_last_batch = (j == (batch_size // self.args.batch_size - 1) * self.args.batch_size)
-                    if self.use_apex_amp:
-                        # delay unscale allows not to run self.optimizer.synchronize() for every subbatch
-                        # which leads to performance improvements when many grad_acc_steps are performed
-                        # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                        with self.amp.scale_loss(loss, self.optimizer, delay_unscale=not is_last_batch) as scaled_loss:
-                            scaled_loss.backward()
-                            if is_last_batch:
-                                self.optimizer.synchronize()
-                    elif self.use_torch_amp:
-                        self.amp_grad_scaler.scale(loss).backward()
-                        if is_last_batch:
-                            self.optimizer.synchronize()
-                            self.amp_grad_scaler.unscale_(self.optimizer)
-                    else:
-                        loss.backward()
+                    if is_train_mode:
+                        # backward
+                        self.accelerator.backward(loss)
 
+            # all gradients are collected and synced
             if is_train_mode:
                 # log gradients norm, clip gradients and perform opt.step(), lr_scheduler.step()
-                self.global_grad_norms += [self._get_gradients_global_norm()]
-
-                if not self.args.fp16:
-                    # with torch/apex amp optimizer is already synced
-                    self.optimizer.synchronize()
-
                 if self.clip_grad:
-                    self._clip_gradients()
+                    global_grad_norm = self._clip_gradients()
+                else:
+                    global_grad_norm = self._get_gradients_global_norm()
+                # track clipped grad norms
+                self.global_grad_norms += [global_grad_norm]
 
-                with self.optimizer.skip_synchronize():
-                    if self.use_torch_amp:
-                        self.amp_grad_scaler.step(self.optimizer)
-                    else:
-                        self.optimizer.step()
-
-                if self.use_torch_amp:
-                    self.amp_grad_scaler.update()
+                self.optimizer.step()
 
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
         return batch_metrics, batch_metrics_data
 
     def _clip_gradients(self):
-        # as recommended in https://nvidia.github.io/apex/advanced.html#gradient-clipping
-        params = self.amp.master_params(self.optimizer) if self.use_apex_amp else self.model.parameters()
+        # accelerate recommends to use accelerator.clip_grad_norm_
+        # it unscales gradients internally and makes some checks for different distributed setups.
+        # However, in this case we loose access to unscaled gradients before clipping (to log them).
+        # Also, deepspeed implements clipping internally and does not return grad norm
+        # (todo: check deepspeed.utils.safe_get_full_grad(param))
+        params = self.model.parameters()
+        grad_norm = 0.0
         if self.args.clip_grad_value:
-            torch.nn.utils.clip_grad_value_(params, self.args.clip_grad_value)
+            self.accelerator.clip_grad_value_(params, self.args.clip_grad_value)
+            grad_norm = self._get_gradients_global_norm()
         elif self.args.clip_grad_norm:
-            torch.nn.utils.clip_grad_norm_(params, self.args.clip_grad_norm)
+            grad_norm = self.accelerator.clip_grad_norm_(params, self.args.clip_grad_norm)
+            grad_norm = grad_norm.item() if grad_norm is not None else 0.0
+        return grad_norm
 
     def _get_gradients_global_norm(self):
         # get gradients global norm (in the same way as in torch.nn.utils.clip_grad_norm_)
-        params = self.amp.master_params(self.optimizer) if self.use_apex_amp else self.model.parameters()
+        params = self.model.parameters()
         params = [p for p in params if p.grad is not None]
         if len(params) == 0:
             return 0.0
@@ -455,9 +398,10 @@ class Trainer:
         # currently, skipping is based on number of iterations, not samples seen on previous run:
         #   (n_gpus x bs x n_grad_acc x n_iters)
         # todo: save number of seen samples in checkpoint
-        self._log_info(f'Skipping {n} batches from the dataset from epoch {self.n_epoch}...')
+        logger.info(f'Skipping {n} batches from the dataset from epoch {self.n_epoch}...')
         # skipping...
-        for _ in tqdm(itertools.islice(train_batches, n), disable=(hvd.rank() != 0), desc='Skipping...', total=n):
+        for _ in tqdm(itertools.islice(train_batches, n), disable=(not self.accelerator.is_main_process),
+                      desc='Skipping...', total=n):
             ...
 
     def _add_batch_metrics(self, batch_metrics: Dict[str, Union[float, torch.Tensor]], split: str):
@@ -499,16 +443,6 @@ class Trainer:
         else:
             del self.metrics[split]
 
-    @staticmethod
-    @rank_0
-    def _log_info(msg, *args, **kwargs):
-        logger.info(msg, *args, **kwargs)
-
-    @staticmethod
-    @rank_0
-    def _log_warning(msg, *args, **kwargs):
-        logger.warning(msg, *args, **kwargs)
-
     def collect_metrics(self, split: str) -> dict:
         """
         Collects batch-lvl metrics from batch_metrics_fn and computes metrics with metrics_fn on data collected from
@@ -524,26 +458,27 @@ class Trainer:
         metrics = {}
         # collect metrics names from all processes: it is possible that different workers might have different
         # set of metrics (e.g., some metric could be not available for some batches).
-        metrics_keys = set(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split].keys())))
+        metrics_keys = set(accelerate.utils.gather_object(list(self.batch_metrics[split].keys())))
         if metrics_keys != self.batch_metrics[split].keys():
             missing_metrics_keys = metrics_keys - self.batch_metrics[split].keys()
-            logger.warning(f'some of the batch-lvl metrics on rank_{hvd.rank()} are missing, but were found on another '
-                           f'ranks: {missing_metrics_keys}')
+            logger.warning(f'some of the batch-lvl metrics on rank_{self.accelerator.process_index} are missing, '
+                           f'but were found on another ranks: {missing_metrics_keys}')
         metrics_keys = sorted(metrics_keys)
         for k in metrics_keys:
-            metrics[k] = list(chain.from_iterable(hvd.allgather_object(self.batch_metrics[split][k])))
+            metrics[k] = accelerate.utils.gather_object(self.batch_metrics[split][k])
             metrics[k] = np.mean(metrics[k])
         # compute metrics from metrics data
         if self.keep_for_metrics_fn and self.metrics_fn:
             metrics_data = {}
-            data_keys = set(chain.from_iterable(hvd.allgather_object(self.metrics_data[split].keys())))
+            data_keys = set(accelerate.utils.gather_object(list(self.metrics_data[split].keys())))
             if data_keys != self.metrics_data[split].keys():
                 missing_data_keys = data_keys - self.metrics_data[split].keys()
-                logger.warning(f'some of the data collected from keep_for_metrics_fn on rank_{hvd.rank()} is missing, '
+                logger.warning(f'some of the data collected from keep_for_metrics_fn on '
+                               f'rank_{self.accelerator.process_index} is missing, '
                                f'but was found on another ranks: {missing_data_keys}')
             data_keys = sorted(data_keys)
             for k in data_keys:
-                metrics_data[k] = list(chain.from_iterable(hvd.allgather_object(self.metrics_data[split][k])))
+                metrics_data[k] = accelerate.utils.gather_object(self.metrics_data[split][k])
                 m_shape = getattr(metrics_data[k][0], 'shape', None)
                 if m_shape is None:
                     # data is not a tensor, collect it into python list
@@ -559,8 +494,8 @@ class Trainer:
                     metrics_data[k] = list(chain.from_iterable([t.tolist() for t in metrics_data[k]]))
             m = self.metrics_fn(metrics_data)
             if len(metrics.keys() & m.keys()) != 0:
-                self._log_warning(f'metrics ({m.keys()}) and batch-lvl metrics ({metrics.keys()}) have common names. '
-                                  f'Batch-lvl metric value would be overwritten.')
+                logger.warning(f'metrics ({m.keys()}) and batch-lvl metrics ({metrics.keys()}) have common names. '
+                               f'Batch-lvl metric value would be overwritten.')
             metrics.update(m)
         self._reset_batch_metrics(split)
         self._reset_metrics_data(split)
@@ -568,7 +503,7 @@ class Trainer:
         return metrics
 
     def train(self) -> None:
-        pbar = tqdm(total=self.args.iters, desc='Train', disable=(hvd.rank() != 0))
+        pbar = tqdm(total=self.args.iters, desc='Train', disable=(not self.accelerator.is_main_process))
         pbar.update(self.n_iter)
 
         train_batches = self._train_batch_generator()
@@ -579,7 +514,7 @@ class Trainer:
             try:
                 train_size = len(self.train_dataloader)
             except TypeError as e:
-                self._log_info(f"Can't get train_dataloader length:\n{e}")
+                logger.info(f"Can't get train_dataloader length:\n{e}")
             # if we know train_size and number of epochs passed -> jump to this epoch and re-iterate over remainders
             skip_iter = self.n_iter % train_size if train_size else self.n_iter
             self.n_iter = (self.n_iter // train_size) * train_size if train_size else 0
@@ -606,12 +541,12 @@ class Trainer:
                 # batch-lvl averaged metrics:
                 train_metrics = self.collect_metrics(split='train')
                 train_loss = train_metrics['loss']
-                global_grad_norms = list(chain.from_iterable(hvd.allgather_object(self.global_grad_norms)))
+                global_grad_norms = accelerate.utils.gather_object(self.global_grad_norms)
                 self.global_grad_norms = []
-                if hvd.rank() == 0:
+                if self.accelerator.is_main_process:
                     # todo: move logging, move to self.log()
                     for k in train_metrics:
-                        self._log_info(f'step: {self.n_iter}/{self.args.iters} {k}: {train_metrics[k]:.4f}')
+                        logger.info(f'step: {self.n_iter}/{self.args.iters} {k}: {train_metrics[k]:.4f}')
                         if self.tb:
                             self.tb.add_scalar(f'{k}/iterations/train', train_metrics[k], self.n_iter)
                             self.tb.add_scalar(f'{k}/samples/train', train_metrics[k],
@@ -645,13 +580,13 @@ class Trainer:
                 if self.metric_improved_fn(best_valid_metric, valid_metric):
                     best_valid_metric = valid_metric
                     self.early_stopping_counter = 0
-                    self._log_info(f'The best {self.args.optimize_metric} metric was improved to: {best_valid_metric}')
+                    logger.info(f'The best {self.args.optimize_metric} metric was improved to: {best_valid_metric}')
                     if self.args.save_best:
                         self.save(self.args.model_path, suffix='best')
                 else:
                     self.early_stopping_counter += 1
-                    self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
-                if hvd.rank() == 0 and self.tb:
+                    logger.info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
+                if self.accelerator.is_main_process and self.tb:
                     self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
                     self.tb.add_scalar('patience/samples', self.early_stopping_counter,
                                        self.n_iter * self.global_batch_size)
@@ -670,17 +605,17 @@ class Trainer:
 
             if self.args.early_stopping_patience is not None and \
                     self.early_stopping_counter > self.args.early_stopping_patience:
-                self._log_info('Early stopping triggered: stopping training...')
+                logger.info('Early stopping triggered: stopping training...')
                 break
 
         # clean-up
         pbar.close()
-        if hvd.rank() == 0 and self.tb:
+        if self.accelerator.is_main_process and self.tb:
             self.tb.flush()
-        self._log_info('Done!')
+        logger.info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
-        self._log_info(f'start validation at step {self.n_iter}')
+        logger.info(f'start validation at step {self.n_iter}')
         self._reset_batch_metrics(split)
         self._reset_metrics_data(split)
 
@@ -691,7 +626,7 @@ class Trainer:
             # in case if dataset has no len() method (IterableDataset?)
             n_valid_batches = None
 
-        pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
+        pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(not self.accelerator.is_main_process))
         for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
             self._add_batch_metrics(batch_metrics, split=split)
@@ -701,10 +636,10 @@ class Trainer:
         pbar.close()
 
         metrics = self.collect_metrics(split=split)
-        if hvd.rank() == 0:
+        if self.accelerator.is_main_process:
             # todo: separate logging from validation/training
             for k in metrics:
-                self._log_info(f'Validation on {split} {k}: {metrics[k]:.4f}')
+                logger.info(f'Validation on {split} {k}: {metrics[k]:.4f}')
                 if self.tb and write_tb:
                     self.tb.add_scalar(f'{k}/iterations/{split}', metrics[k], self.n_iter)
                     self.tb.add_scalar(f'{k}/samples/{split}', metrics[k], self.n_iter * self.global_batch_size)
@@ -713,62 +648,79 @@ class Trainer:
 
         return metrics
 
-    def load(self, load_path, reset_optimizer=False, reset_lr=False, reset_iteration=False) -> None:
-        # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
-        checkpoint = torch.load(load_path, map_location='cpu')
-        missing_k, unexpected_k = self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        if len(missing_k) != 0:
-            self._log_info(f'{missing_k} were not loaded from checkpoint! These parameters were randomly initialized.')
-        if len(unexpected_k) != 0:
-            self._log_info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
+    def load(self, load_path: Union[str, Path], reset_optimizer=False, reset_lr=False, reset_iteration=False) -> None:
+        """Loads model, trainer state, and accelerate state.
 
-        if 'optimizer_state_dict' in checkpoint and not reset_optimizer:
-            self._log_info('Loading optimizer state_dict from the checkpoint.')
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'lr_scheduler_state_dict' in checkpoint and self.lr_scheduler and not reset_lr:
-            # if set reset_lr we do not load lr_scheduler and keep only the new one from __init__
-            self._log_info('Loading lr_scheduler state_dict from the checkpoint.')
-            self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
-        if 'amp' in checkpoint and self.use_apex_amp and not reset_optimizer:
-            self._log_info('Loading apex.amp state_dict from the checkpoint.')
-            self.amp.load_state_dict(checkpoint['amp'])
-        if 'torch_amp' in checkpoint and self.use_torch_amp and not reset_optimizer:
-            self._log_info('Loading torch.cuda.amp.GradScaler state_dict from the checkpoint.')
-            self.amp_grad_scaler.load_state_dict(checkpoint['torch_amp'])
+        Args:
+            load_path (Union[str, Path]): Path to the folder with model ckpt, trainer state and accelerate state.
+                OR path to the ckpt file.
+            reset_optimizer (bool, optional): _description_. Defaults to False.
+            reset_lr (bool, optional): _description_. Defaults to False.
+            reset_iteration (bool, optional): _description_. Defaults to False.
+        """
+        load_path = Path(load_path)
+        load_only_model_ckpt = (reset_optimizer and reset_lr) or load_path.is_file()
+
+        # load trainer state if there is one
+        trainer_state = {}
+        trainer_state_path = None
+        if load_path.is_dir():
+            trainer_state_path = load_path / 'trainer.pckl'
+        # check if trainer state is in the same folder as ckpt
+        elif load_path.is_file() and (load_path.parent / 'trainer.pckl').exists():
+            trainer_state_path = load_path.parent / 'trainer.pckl'
+        if trainer_state_path:
+            trainer_state = torch.load(trainer_state_path, map_location='cpu')
         if not reset_iteration:
-            self.n_iter = checkpoint.get('iteration', 0) + 1  # as saved iteration is already performed
-            self.n_epoch = checkpoint.get('epoch', 0)
+            self.n_iter = trainer_state.get('iteration', 0) + 1  # as saved iteration is already performed
+            self.n_epoch = trainer_state.get('epoch', 0)
 
-        self._log_info(f'Model was loaded from: {load_path}')
-        self._log_info(f'Start iteration = {self.n_iter}')
-        if self.lr_scheduler and reset_lr:
-            self._log_warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
-                              ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
-                              ' Current iteration number is ignored.')
-        if reset_optimizer:
-            self._log_info('Optimizer is not loaded from the checkpoint. New optimizer is created.')
+        if not load_only_model_ckpt:
+            logger.info('Loading model, trainer, and accelerate state')
+            self.accelerator.load_state(load_path / 'accelerate_state')
+            if reset_optimizer:
+                raise RuntimeError('Reset optimizer only is not supported. You may load only model weights with'
+                                   '--reset_optimizer --reset_lr')
+            if reset_lr:
+                raise RuntimeError('Reset lr & scheduler only is not supported. You may load only model weights with'
+                                   '--reset_optimizer --reset_lr')
+        else:
+            logger.info(f'Loading model from {load_path}')
+            checkpoint = torch.load(load_path, map_location='cpu')
+            missing_k, unexpected_k = self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint, strict=False)
+            if len(missing_k) != 0:
+                logger.info(f'{missing_k} were not loaded from checkpoint! These parameters were randomly initialized.')
+            if len(unexpected_k) != 0:
+                logger.info(f'{unexpected_k} were found in checkpoint, but model is not expecting them!')
+            del checkpoint
+        logger.info(f'Start iteration = {self.n_iter}')
 
-    @rank_0
     def save(self, save_path, suffix='') -> None:
         if save_path is not None:
             if suffix == '':
-                save_path = f'{save_path}/model_{self.n_iter}.pth'
+                save_path = f'{save_path}/model_{self.n_iter}'
             else:
-                save_path = f'{save_path}/model_{suffix}.pth'
-            to_save = {
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'iteration': self.n_iter,
-                'epoch': self.n_epoch,
-                'metrics': self.metrics}
-            if self.use_apex_amp:
-                to_save['amp'] = self.amp.state_dict()
-            if self.use_torch_amp:
-                to_save['torch_amp'] = self.amp_grad_scaler.state_dict()
-            if self.lr_scheduler:
-                to_save['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
-            torch.save(to_save, save_path)
-            self._log_info(f'Model was saved to {save_path}')
+                save_path = f'{save_path}/model_{suffix}'
+
+            self.accelerator.save_state(f'{save_path}/accelerate_state')
+            self.accelerator.save_model(self.model, f'{save_path}')
+            self.save_metrics(save_path)
+
+            if self.accelerator.is_main_process:
+                to_save = {
+                    # handled by accelerate
+                    # 'model_state_dict': self.accelerator.get_state_dict(self.model),
+                    # 'optimizer_state_dict': self.optimizer.state_dict(),
+                    'iteration': self.n_iter,
+                    'epoch': self.n_epoch,
+                    'metrics': self.metrics}
+                # handled by accelerate
+                # if self.use_torch_amp:
+                #     to_save['torch_amp'] = self.amp_grad_scaler.state_dict()
+                # if self.lr_scheduler:
+                #     to_save['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
+                torch.save(to_save, f'{save_path}/trainer.pckl')
+            logger.info(f'Model, trainer, and accelerate state were saved to {save_path}')
 
     @rank_0
     def save_metrics(self, save_path) -> None:
@@ -791,4 +743,4 @@ class Trainer:
             try:
                 json.dump(self.metrics, open(save_path, 'w'), indent=4)
             except TypeError as e:
-                self._log_warning(f'Unable to save metrics: {e}.\nmetrics: {self.metrics}')
+                logger.warning(f'Unable to save metrics: {e}.\nmetrics: {self.metrics}')
