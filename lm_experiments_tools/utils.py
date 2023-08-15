@@ -11,7 +11,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import List
 
-import horovod.torch as hvd
 import torch
 import transformers
 
@@ -87,19 +86,50 @@ def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
     args_dict['ENV'] = {}
     for env_var in env_vars:
         args_dict['ENV'][env_var] = os.environ.get(env_var, '')
-    args_dict['HVD_INIT'] = hvd.is_initialized()
-    if hvd.is_initialized():
-        args_dict['HVD_SIZE'] = hvd.size()
+    # hvd
+    try:
+        import horovod.torch as hvd
+        args_dict['HVD_INIT'] = hvd.is_initialized()
+        if hvd.is_initialized():
+            args_dict['HVD_SIZE'] = hvd.size()
+    except ImportError:
+        pass
+    # accelerate
+    # todo: collect full accelerate config
+    try:
+        import accelerate
+        args_dict['accelerate'] = {}
+        args_dict['accelerate']['initialized'] = accelerate.PartialState().initialized
+        if accelerate.PartialState().initialized:
+            args_dict['accelerate']['num_processes'] = accelerate.PartialState().num_processes
+            args_dict['accelerate']['backend'] = accelerate.PartialState().backend
+            args_dict['accelerate']['distributed_type'] = accelerate.PartialState().distributed_type
+    except ImportError:
+        pass
+
     args_dict['MACHINE'] = platform.node()
     args_dict['COMMIT'] = get_git_hash_commit()
     return args_dict
 
 
 def get_distributed_rank() -> int:
+    try:
+        import accelerate
+        if accelerate.PartialState().initialized:
+            return accelerate.PartialState().process_index
+    except ImportError:
+        pass
+
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank()
-    if hvd.is_initialized():
-        return hvd.rank()
+
+    try:
+        import horovod.torch as hvd
+        if hvd.is_initialized():
+            return hvd.rank()
+    except ImportError:
+        pass
+
     return 0
 
 
@@ -110,6 +140,25 @@ def rank_0(fn):
             return fn(*args, **kwargs)
         return None
     return rank_0_wrapper
+
+
+def wait_for_everyone():
+    try:
+        import accelerate
+        if accelerate.PartialState().initialized:
+            accelerate.PartialState().wait_for_everyone()
+    except ImportError:
+        pass
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    try:
+        import horovod.torch as hvd
+        if hvd.is_initialized():
+            hvd.barrier()
+    except ImportError:
+        pass
 
 
 def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -136,18 +185,19 @@ def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %
 
     # configure logging to a file
     if args.model_path is not None and logger is not None and add_file_logging:
-        # todo: make it independent from horovod
-        if hvd.is_initialized():
-            # sync workers to make sure that model_path is already created by worker 0
-            hvd.barrier()
+        # sync workers to make sure that model_path is already created by worker 0
+        wait_for_everyone()
         # RotatingFileHandler will keep logs only of a limited size to not overflow available disk space.
         # Each gpu worker has its own logfile.
         # todo: make logging customizable? reconsider file size limit?
         fh = RotatingFileHandler(Path(args.model_path) / f"{time.strftime('%Y.%m.%d_%H:%M:%S')}_rank_{rank}.log",
                                  mode='w', maxBytes=100*1024*1024, backupCount=2)
-        fh.setLevel(logger.level)
+        logger_with_fh = logger
+        if isinstance(logger, logging.LoggerAdapter):
+            logger_with_fh = logger.logger
+        fh.setLevel(logger_with_fh.level)
         fh.setFormatter(logging.Formatter(logger_fmt))
-        logger.addHandler(fh)
+        logger_with_fh.addHandler(fh)
 
     if rank == 0 and args.model_path is None and logger is not None:
         logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')
