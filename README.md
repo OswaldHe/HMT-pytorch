@@ -13,6 +13,22 @@ Recurrent Memory Transformer is implemented as follows:
 
 We implement our memory mechanism with no changes to Transformer model by adding special memory tokens to the input sequence. The model is trained to control both memory operations and sequence representations processing.
 
+## Installation
+```bash
+pip install -e .
+```
+This command will install `lm_experiments_tools` with only required packages for Trainer and tools.
+
+`lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
+based on metrics, custom metrics and data transformations support.
+
+### Install requirements for all experiments
+Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
+```bash
+pip install -r requirements.txt
+```
+
+
 ## Citation
 If you find our work useful, please cite the RMT papers:
 ```
