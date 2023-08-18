@@ -14,8 +14,7 @@ import transformers
 from torch.utils.data import DataLoader
 from huggingface_hub import hf_hub_download
 
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerateArgs
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerate as Trainer
+from lm_experiments_tools import Trainer, TrainerArgs
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -48,7 +47,7 @@ import lm_experiments_tools.optimizers as optimizers  # noqa: E402
 # torch.set_num_threads(4)
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 
-parser = HfArgumentParser(TrainerAccelerateArgs)
+parser = HfArgumentParser(TrainerArgs)
 parser.add_argument('--task_name', type=str, help='Scrolls task name: "gov_report", "summ_screen_fd", "qmsum", '
                                                   '"narrative_qa", "qasper", "quality", "contract_nli"')
 parser.add_argument('--validate_only', action='store_true', default=False,

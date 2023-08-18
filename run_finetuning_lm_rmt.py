@@ -11,8 +11,7 @@ import numpy as np
 import datasets
 from torch.utils.data import DataLoader
 
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerateArgs
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerate as Trainer
+from lm_experiments_tools import Trainer, TrainerArgs
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -45,7 +44,7 @@ from lm_experiments_tools.utils import get_cls_by_name, get_optimizer, prepare_r
 # all gpus set with CUDA_VISIBLE_DEVICES are visible to process, indexing from 0 to ...
 # torch.cuda.set_device(hvd.local_rank())
 
-parser = HfArgumentParser(TrainerAccelerateArgs)
+parser = HfArgumentParser(TrainerArgs)
 parser.add_argument('--task_name', type=str, help="Task name, wikitext, ...")
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
