@@ -12,7 +12,8 @@ class MemoryCell(torch.nn.Module):
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
-        memory_weights = torch.randn((num_mem_tokens, self.model.config.n_embd)) * embeddings.weight.data.std()
+        memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
+        memory_weights = torch.randn((num_mem_tokens, memory_dim)) * embeddings.weight.data.std()
         self.register_parameter('memory', torch.nn.Parameter(memory_weights, requires_grad=True))
 
         self.read_memory_position = range(num_mem_tokens)
