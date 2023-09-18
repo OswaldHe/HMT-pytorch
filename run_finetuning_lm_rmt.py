@@ -261,7 +261,7 @@ if __name__ == '__main__':
     with accelerator.main_process_first():
         train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
                                                         batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size), 
+        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, history_size), 
                                                              batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
