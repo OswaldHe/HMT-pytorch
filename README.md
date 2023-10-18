@@ -7,6 +7,8 @@ RMT is a memory-augmented segment-level recurrent Transformer. It achieves state
 
 >[paper](https://arxiv.org/abs/2207.06881) [code](https://github.com/booydar/LM-RMT) Recurrent Memory Transformer
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/booydar/t5-experiments/blob/framework_accel/notebooks/rmt_demo_lm.ipynb) Example: LM with RMT
+
 Recurrent Memory Transformer is implemented as follows:
 
 ![**RMT**](img/RMT_scheme.png?raw=True)
