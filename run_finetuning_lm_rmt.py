@@ -11,11 +11,13 @@ import numpy as np
 import datasets
 from torch.utils.data import DataLoader
 
-from lm_experiments_tools import Trainer, TrainerArgs
+from lm_experiments_tools.trainer_accelerate import TrainerAccelerateArgs as TrainerArgs
+from lm_experiments_tools.trainer_accelerate import TrainerAccelerate as Trainer
 
 from torch.nn.utils.rnn import pad_sequence
 
 import accelerate
+from peft import get_peft_model, LoraConfig, TaskType
 
 # load_dotenv()
 
