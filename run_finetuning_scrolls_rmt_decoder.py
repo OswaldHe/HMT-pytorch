@@ -14,7 +14,7 @@ import transformers
 from torch.utils.data import DataLoader
 from huggingface_hub import hf_hub_download
 
-from lm_experiments_tools import Trainer, TrainerArgs
+from lm_experiments_tools.trainer_accelerate import TrainerAccelerate as Trainer, TrainerAccelerateArgs as TrainerArgs
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -66,6 +66,8 @@ parser.add_argument('--input_prefix', type=str, default='', help='add task prefi
 parser.add_argument('--sliding_window', action='store_true', help='use slinding window attention mask, '
                     'eval on last segment only', default=False)
 
+# parser.add_argument('--use_generate_on_valid', action='store_true', help='use generate methon on validation', default=False)
+
 # model args
 parser.add_argument('--from_pretrained', type=str, help='model name in HF Model Hub (default: "")')
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
@@ -85,22 +87,6 @@ parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of 
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='Randomly choose segment number from 1 to max_n_segments')
 parser.add_argument('--segment_alignment', type=str, default=None, help="How to align segments when splitting input")
-# parser.add_argument('--sum_loss', action='store_true', default=False,
-#                     help='with this flag task loss from all segments is summed')
-# parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
-# parser.add_argument('--segment_ordering', type=str, help='segment order', default='regular',
-#                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
-# parser.add_argument('--memory_forward_func', type=str, help='path to memory forward funсtion script', default=None)
-# parser.add_argument('--memory_layers', type=str, help='memory-augmented layer inds or "all" for all layers', default=None)
-# parser.add_argument('--share_memory_layers', action='store_true', help='share weights of memory layers', default=False)
-# parser.add_argument('--reconstruction_loss_coef', type=float, default=None,
-#                     help='reconstuction loss ratio in total loss')
-# # parser.add_argument('--segment_ordering', type=str,help='????', default='regular',
-# #                     choices=['regular', 'reversed', 'bidirectional', 'repeat_first', 'last_memory_only'])
-# parser.add_argument('--retain_graph', action='store_true', help='Retain computation graph during backward pass', default=False)
-# parser.add_argument('--use_truncated_backward', action='store_true', default=False,
-#                     help='whether to use RMT truncated bptt method in backward')
-# parser.add_argument('--k1', type=int, default=-1, help='(not implemented) If not -1, gradient update is done each k1 segments')
 parser.add_argument('--k2', type=int, default=-1, help='number of last segments used by backward')
 parser.add_argument('--freeze_model_weights', action='store_true', default=False,
                     help='Stop training all model weights except memory layers')
@@ -201,72 +187,13 @@ if __name__ == '__main__':
 
     import os
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    if args.model_type == 'encoder-decoder':
-        raise NotImplementedError
-        # global_attention_first_token = False  # should be True for LED
-        # encode_plus_kwargs = {'truncation': True, 'padding': 'longest', 'pad_to_multiple_of': 1}
-        # # generate_kwargs = {'max_length': args.target_seq_len, 'min_length': args.target_seq_len}
-        # generate_kwargs = {}
-
-        # def collate_fn(batch):
-        #     # cut too long strings because they may slow down tokenization
-        #     inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-        #     if 'outputs' in batch[0]:
-        #         # if we have more than 1 label per example (only in valid) take only one of them
-        #         # to compute loss on valid
-        #         labels = [b['outputs'][0][:args.target_seq_len * 10] for b in batch]
-        #     else:
-        #         labels = [b['output'][:args.target_seq_len * 10] for b in batch]
-        #     if args.input_prefix:
-        #         inputs = [args.input_prefix + inp for inp in inputs]
-        #     features = tokenizer.batch_encode_plus(list(inputs), max_length=args.input_seq_len, return_tensors='pt',
-        #                                            **encode_plus_kwargs)
-        #     with tokenizer.as_target_tokenizer():
-        #         labels = tokenizer.batch_encode_plus(list(labels), max_length=args.target_seq_len, return_tensors='pt',
-        #                                              **encode_plus_kwargs).input_ids
-        #     labels[labels == tokenizer.pad_token_id] = -100
-        #     features['labels'] = labels
-        #     features['id'] = [b['id'] for b in batch]
-        #     if 'outputs' in batch[0]:
-        #         features['target_text'] = [b['outputs'] for b in batch]
-        #     else:
-        #         features['target_text'] = [b['output'] for b in batch]
-        #     if 'global_attention_mask' in features:
-        #         raise RuntimeError('What global attention mask for Longformer and LongformerEncoder-Decoder should be?')
-        #     return features
-
-    elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
-        raise NotImplementedError
-        # if args.use_generate_on_valid:
-        #     raise RuntimeError('use_generate_on_valid should be set to False for encoder-only models')
-
-        # encode_plus_kwargs = {'max_length': args.input_seq_len,
-        #                       'truncation': True,
-        #                       'padding': 'longest',
-        #                       'pad_to_multiple_of': 1}
-        # generate_kwargs = {}
-        # labels_map = {'Contradiction': 0, 'Entailment': 1, 'Not mentioned': 2}
-        # num_labels = len(labels_map)
-
-        # def collate_fn(batch):
-        #     # cut too long strings because they may slow down tokenization
-        #     inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-        #     labels = [b['output'][:args.target_seq_len * 10] for b in batch]
-        #     if args.input_prefix:
-        #         inputs = [args.input_prefix + inp for inp in inputs]
-        #     features = tokenizer.batch_encode_plus(list(inputs), return_tensors='pt', **encode_plus_kwargs)
-        #     labels = np.array([labels_map[t] for t in labels])
-        #     features['labels'] = torch.from_numpy(labels)
-        #     return features
-
-    elif args.model_type == 'decoder':
+    if args.model_type == 'decoder':
         from torch.nn.utils.rnn import pad_sequence
-
-        # tokenizer.pad_token = tokenizer.eos_token
-        # tokenizer.pad_token_id = tokenizer.eos_token
         tokenizer.add_special_tokens({'additional_special_tokens': ['[GEN]', '[PAD]']})
         gen_token = tokenizer.encode('[GEN]')[0]
         tokenizer.pad_token_id = tokenizer.encode('[PAD]')[0]
+        eos_token = tokenizer.eos_token_id
+        
         id_pad_value = tokenizer.pad_token_id
 
         block_size = args.input_size
@@ -275,66 +202,38 @@ if __name__ == '__main__':
 
         def collate_fn(batch):
             inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-            labels = [b['output'][:args.input_seq_len * 10] for b in batch]
+            if 'outputs' in batch[0]:
+                # if we have more than 1 label per example (only in valid) take only one of them
+                # to compute loss on valid
+                target_text = [b['outputs'][0][:args.input_seq_len * 10] for b in batch]
+            else:
+                target_text = [b['output'][:args.input_seq_len * 10] for b in batch]
 
             collated = {}
-            inputs = tokenizer.batch_encode_plus(list(inputs), padding=False)
-            labels = tokenizer.batch_encode_plus(list(labels), padding=False)
+            inputs = tokenizer.batch_encode_plus(list(inputs), max_length=args.input_seq_len, truncation=True, padding=False)
+            labels = tokenizer.batch_encode_plus(list(target_text), padding=False)
 
-            full_inputs = [torch.tensor(i[:args.input_seq_len - len(l) - 1] + [gen_token] + l) for i, l in zip(inputs['input_ids'], labels['input_ids'])]
+            full_inputs = [torch.tensor(i[:args.input_seq_len - len(l) - 2] + [gen_token] + l + [eos_token]) for i, l in zip(inputs['input_ids'], labels['input_ids'])]
+            labels_mask = [torch.zeros_like(i).bool() for i in full_inputs]
+            for i, l in enumerate(labels['input_ids']):
+                labels_mask[i][-len(l) - 2:] = True
+
             full_inputs = pad_sequence(full_inputs, padding_value=tokenizer.pad_token_id).T
+            labels_mask = pad_sequence(labels_mask, padding_value=False).T
 
-            gen_inputs = [torch.tensor(i[:args.input_seq_len - 1] + [gen_token]) for i in inputs['input_ids']]
+            gen_inputs = [torch.tensor(i[:args.input_seq_len - len(l) - 2] + [gen_token]) for i, l in zip(inputs['input_ids'], labels['input_ids'])]
             gen_inputs = pad_sequence(gen_inputs, padding_value=tokenizer.pad_token_id).T
             
-            labels_mask = torch.zeros_like(full_inputs).bool()
-            for i, l in enumerate(labels['input_ids']):
-                labels_mask[i, -len(l) -1:] = True
 
             collated['input_ids'] = collated['labels'] = full_inputs
             collated['input_ids_generate'] = gen_inputs
             collated['labels_mask'] = labels_mask
-            collated['attention_mask'] = (collated['input_ids'] != id_pad_value).bool()
+            collated['attention_mask'] = (full_inputs != id_pad_value).bool()
+            collated['attention_mask_generate'] = (gen_inputs != id_pad_value).bool()
 
             collated['id'] = [b['id'] for b in batch]
-            # if 'outputs' in batch[0]:
-            #     collated['target_text'] = [b['outputs'] for b in batch]
-            # else:
-            collated['target_text'] = [b['output'] for b in batch]
+            collated['target_text'] = target_text
             return collated
-        # def collate_train(batch):
-        #     inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-        #     labels = [b['output'][:args.input_seq_len * 10] for b in batch]
-
-        #     collated = {}
-        #     inputs = tokenizer.batch_encode_plus(list(inputs), padding=False)
-        #     labels = tokenizer.batch_encode_plus(list(labels), padding=False)
-
-        #     full_inputs = [torch.tensor(i[:args.input_seq_len - len(l) - 1] + [gen_token] + l) for i, l in zip(inputs['input_ids'], labels['input_ids'])]
-        #     full_inputs = pad_sequence(full_inputs, padding_value=tokenizer.pad_token_id).T
-            
-        #     labels_mask = torch.zeros_like(full_inputs).bool()
-        #     for i, l in enumerate(labels['input_ids']):
-        #         labels_mask[i, -len(l) -1:] = True
-
-        #     collated['input_ids'] = collated['labels'] = full_inputs
-        #     collated['labels_mask'] = labels_mask
-        #     collated['attention_mask'] = (collated['input_ids'] != id_pad_value).bool()
-        #     return collated
-
-        # def collate_valid(batch):
-        #     inputs = [b['input'][:args.input_seq_len * 10] for b in batch]
-
-        #     collated = {}
-        #     inputs = tokenizer.batch_encode_plus(list(inputs), padding=False)
-        #     full_inputs = [torch.tensor(i[:args.input_seq_len - 1] + [gen_token]) for i in inputs['input_ids']]
-        #     full_inputs = pad_sequence(full_inputs, padding_value=tokenizer.pad_token_id).T
-            
-        #     collated['input_ids'] = full_inputs
-        #     collated['attention_mask'] = (collated['input_ids'] != id_pad_value).bool()
-        #     collated['target_text'] = [b['output'] for b in batch]
-        #     return collated
-            
     else:
         raise NotImplementedError(f'Unknown model type {args.model_type}')
 
@@ -357,6 +256,7 @@ if __name__ == '__main__':
     if args.task_name in tasks_with_duplicates:
         valid_dataset = drop_duplicates_in_input(valid_dataset)
     valid_dataloader = DataLoader(valid_dataset, batch_size=per_worker_batch_size,
+                                  drop_last=True,
                                   collate_fn=collate_fn, **kwargs)
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
@@ -367,14 +267,12 @@ if __name__ == '__main__':
     logger.info(f'Using model class: {model_cls}')
     if not args.from_pretrained:
         model_cfg = AutoConfig.from_pretrained(args.model_cfg)
-        if args.model_type == 'encoder' and args.task_name == 'contract_nli':
-            model_cfg.num_labels = num_labels
         model = model_cls(config=model_cfg)
     else:
         logger.info(f'Loading pretrained model: {args.from_pretrained}')
         model = model_cls.from_pretrained(args.from_pretrained)
 
-    ## add [GEN] token
+    # add [GEN] token
     model.resize_token_embeddings(len(tokenizer))
     
     ## load cpt of backbone model
@@ -403,9 +301,13 @@ if __name__ == '__main__':
 
         ## load cpt of rmt
         if args.model_cpt:
-            model_cpt = os.path.join(args.model_cpt, "model_best.pth")
+            model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
             cpt = torch.load(model_cpt, map_location='cpu')
-            model.load_state_dict(cpt['model_state_dict'], strict=False)
+            vocab_size = model.memory_cell.model.gpt_neox.embed_in.weight.shape[0]
+            cpt_vocab_size = cpt['memory_cell.model.gpt_neox.embed_in.weight'].shape[0]
+            if vocab_size < cpt_vocab_size:
+                model.memory_cell.model.resize_token_embeddings(cpt_vocab_size)
+            model.load_state_dict(cpt, strict=False)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
     if args.freeze_model_weights:
@@ -447,19 +349,14 @@ if __name__ == '__main__':
         data = {}
         if 'generation_outputs' in output:
             data['labels'] = batch['target_text']
+            data['input_ids'] = batch['input_ids']
+            data['labels_mask'] = batch['labels_mask']
 
             data['generation_outputs'] = output['generation_outputs']
-            # if 'labels_mask' in batch:
-            #     data['generation_outputs'] = [data['generation_outputs'][i, mask] for i, mask in enumerate(batch['labels_mask'])]
-        # if args.model_type == 'encoder':
-            
-            ##### booydar
-            # data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
-        # data['labels'] = batch['labels']
+
         for key in batch.keys():
             if 'loss' in key: 
                 data[key] = batch[key]
-        # else:
 
         return data
 
@@ -484,34 +381,21 @@ if __name__ == '__main__':
             # replace -100 with pad token in labels
             y = data['labels']
             p = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=True)
-
             metrics['exact_match'] = np.mean([y_ == p_[:len(y_)] for p_, y_ in zip (p, y)])
-            # preds = tokenizer.batch_decode(data['generation_outputs'], skip_special_tokens=False)
-            # p = [p[:p.index(tokenizer.eos_token)] if tokenizer.eos_token in p else p for p in preds]
             if args.show_valid_examples > 0:
                 for i in range(min(args.show_valid_examples, len(y))):
-                    logger.info(f'y: {y[i]}')
-                    logger.info(f'p: {p[i]}')
-                    logger.info(f'p ids: {data["generation_outputs"][i]}')
-                    # logger.info('\n'.join([(y_, p_[:len(y_)], y_==p_[:len(y_)]) for p_, y_ in zip (p, y[:30])]))
+                    logger.info(f'y: {y[i][:250]}')
+                    logger.info(f'p: {p[i][:250]}')
+                    logger.info(f'p ids: {len(data["generation_outputs"][i]), data["generation_outputs"][i][:50]}')
 
                     logger.info('-' * 50)
-            # todo: do we need to better clean P to remove tokens after eos? not remove special tokens only
-        # elif args.model_type == 'encoder':
-        #     y, p = data['labels'], data['predictions']
+            
+            if not isinstance(y[0], list):
+                y = [[_y] for _y in y]
+            result = scrolls_metric.compute(predictions=p, references=y)
+            for metric_name in task_to_metric[args.task_name]:
+                metrics[metric_name] = result[metric_name]
 
-        # if y is not None and p is not None:
-            # if args.model_type == 'encoder-decoder':
-            # if not isinstance(y[0], list):
-                # y = [[_y] for _y in y]
-            # result = scrolls_metric.compute(predictions=p, references=y)
-            # for metric_name in task_to_metric[args.task_name]:
-            #     metrics[metric_name] = result[metric_name]
-
-            # metrics['exact_match'] = np.mean([y_ == p_[:len(y_)] for p_, y_ in zip (p, y)])
-            # elif args.model_type == 'encoder' and args.task_name == 'contract_nli':
-            #     metrics['exact_match'] = accuracy_score(y, p) * 100
-            #     metrics['f1_micro'] = f1_score(y, p, average='micro')
         return metrics
 
     # accelerate
@@ -520,11 +404,12 @@ if __name__ == '__main__':
 
     ### booydar
     batch_metrics_fn = lambda _, y: {key: y[key] for key in y.keys() if (('loss' in key) or ('!log' in key))}
+    generate_kwargs = {'pad_token_id': tokenizer.pad_token_id}
     trainer = Trainer(args, accelerator, model, optimizer, train_dataloader, valid_dataloader,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
-                      generate_kwargs={'pad_token_id': tokenizer.pad_token_id})
+                      generate_kwargs=generate_kwargs)
 
     if not args.validate_only:
         # train loop
