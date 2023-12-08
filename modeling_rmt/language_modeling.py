@@ -2,12 +2,13 @@ import math
 import torch
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
+from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
 
 class MemoryCell(torch.nn.Module):
     def __init__(self, base_model, num_mem_tokens):
         super().__init__()
         self.model = base_model
-        self.n_prepend = 64
+        self.n_prepend = 32
         self.prepend_list = None
         self.create_memory(num_mem_tokens)
 
@@ -17,7 +18,9 @@ class MemoryCell(torch.nn.Module):
         if num_mem_tokens > 0:
             memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.word_embed_proj_dim)
             memory_weights = torch.randn((num_mem_tokens, memory_dim)) * embeddings.weight.data.std()
+            signifier_weights = torch.randn((1, memory_dim)) * embeddings.weight.data.std()
             self.register_parameter('memory', torch.nn.Parameter(memory_weights, requires_grad=True))
+            self.register_parameter('signifier', torch.nn.Parameter(signifier_weights, requires_grad=False))
 
         self.read_memory_position = range(num_mem_tokens)
         self.write_memory_position = range(-num_mem_tokens, 0)
@@ -88,7 +91,8 @@ class MemoryCell(torch.nn.Module):
             out = CausalLMOutputWithCrossAttentions()
             memory_state = model_outputs.hidden_states[-1][:, -self.num_mem_tokens:]
             out['logits'] = model_outputs.logits[:, (self.num_mem_tokens+n_prepend):-self.num_mem_tokens]
-            
+            out['logits'] = out['logits'].cpu()
+
             if kwargs.get('output_hidden_states'):
                 out['hidden_states'] = [lh[:, (self.num_mem_tokens+n_prepend):-self.num_mem_tokens] for lh in model_outputs.hidden_states]
             if kwargs.get('output_attentions'):
@@ -112,16 +116,27 @@ class RecurrentWrapper(torch.nn.Module):
         super().__init__()
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
+        # self.cross_attn = CrossAttentionMemory(model, 10, 512, 1024)
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022):
         memory_state = None
         prepend_state = None
-        segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+        segmented = self.segment(segment_size=segment_size, input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
+        # memory_seq = None
         for seg_num, segment in enumerate(segmented):
+            # memory_state = self.cross_attn(memory_seq, segment['input_ids'])
+
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
             cell_outputs.append(cell_out)
+            # if memory_seq is None:
+            #     memory_seq = memory_state
+            # else:
+            #     memory_seq = torch.cat([memory_seq, memory_state], dim=1)
+            #     if memory_seq.shape[1] > 10:
+            #         memory_seq = memory_seq[:,-10:,:]
+
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
 
@@ -143,11 +158,11 @@ class RecurrentWrapper(torch.nn.Module):
 
         return out
 
-    def segment(self, **kwargs):
+    def segment(self, segment_size, **kwargs):
         segments = []
         for k, tensor in kwargs.items():
             if tensor is not None:
-                k_segments = self.split_tensor(tensor)
+                k_segments = self.split_tensor(tensor, segment_size)
                 for s, k_seg in enumerate(k_segments):
                     if s < len(segments):
                         segments[s][k] = k_seg
@@ -156,9 +171,9 @@ class RecurrentWrapper(torch.nn.Module):
 
         return segments
     
-    def split_tensor(self, tensor):
+    def split_tensor(self, tensor, segment_size):
         align = self.rmt_config.get('segment_alignment')
-        segment_size = self.rmt_config.get('segment_size')
+        # segment_size = self.rmt_config.get('segment_size')
         if align in {'left', None}:
             split_inds = list(range(0, tensor.shape[1], segment_size)) + [tensor.shape[1]]
             segments = [tensor[:, start:end] for (start, end) in zip(split_inds, split_inds[1:])]
@@ -191,12 +206,7 @@ class RecurrentWrapper(torch.nn.Module):
 
                 flat_labels = flat_labels[shift_mask.view(-1)]
                 flat_logits = flat_logits[shift_mask.view(-1)]
-
-            flat_logits = flat_logits.cuda()  
-            flat_labels = flat_labels.cuda()  
             out['loss'] = loss_fct(flat_logits, flat_labels)
-            flat_logits = flat_logits.cpu()  
-            flat_labels = flat_labels.cpu() 
         else:
             out['loss'] = 0
 
