@@ -139,14 +139,16 @@ except IndexError:
 """### Train the model"""
 
 from torch.optim import AdamW
-optim = AdamW(params=model.parameters(), lr=1e-04)
+optim = AdamW(params=model.parameters(), lr=1e-05)
 
-train_steps = 100
+train_steps = 350
 eval_steps = 100
 
 train_gen = iter(train_dataloader)
 valid_gen = iter(valid_dataloader)
 
+
+block_size_var = [(1022, 5e-6), (510, 1e-5)]
 losses = []
 for step in tqdm.tqdm(range(train_steps)):
     optim.zero_grad()
@@ -155,13 +157,18 @@ for step in tqdm.tqdm(range(train_steps)):
     # for k, v in batch.items():
     #     batch[k] = v.to(device)
 
-    out = model(**batch)
-    loss = out.loss
+    for b, lr in block_size_var:
+        for g in optim.param_groups:
+            g['lr'] = lr
 
-    loss.backward()
-    optim.step()
+        batch['segment_size'] = b
+        out = model(**batch)
+        loss = out.loss
 
-    losses.append(loss.detach().item())
+        loss.backward()
+        optim.step()
+
+        losses.append(loss.detach().item())
 
 plt.plot(losses)
 plt.xlabel('step')
@@ -170,16 +177,52 @@ plt.savefig('loss.png')
 plt.show()
 
 valid_losses = []
+# model = RecurrentWrapper(cell,
+#                         segment_size=block_size,
+#                         max_n_segments=n_segments,
+#                         )
+# model.to(device)
 model.eval()
 for step in tqdm.tqdm(range(eval_steps)):
     batch = next(valid_gen)
     # for k, v in batch.items():
     #     batch[k] = v.to(device)
-
+    batch['segment_size'] = block_size
     with torch.no_grad():
         out = model(**batch)
-    valid_loss = out.loss
+    loss = out.loss
 
     valid_losses.append(loss.detach().item())
 
 print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
+
+# TODO(DONE): RMT is unstable for variable segment width
+# TODO(2): Need a benchmark for very long context (60~100k) and topic switching
+# TODO(DONE): Baseline testing (sliding window)
+
+test_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, 510, 1530),
+                                                        batched=True, desc=f"Grouping valid in chunks of 510")
+test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
+                                        collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
+
+test_losses = []
+model = RecurrentWrapper(cell,
+                        segment_size=510,
+                        max_n_segments=4,
+                        )
+model.to(device)
+model.eval()
+test_gen = iter(test_dataloader)
+
+for step in tqdm.tqdm(range(eval_steps)):
+    batch = next(test_gen)
+    # for k, v in batch.items():
+    #     batch[k] = v.to(device)
+    batch['segment_size'] = 510
+    with torch.no_grad():
+        out = model(**batch)
+    loss = out.loss
+
+    test_losses.append(loss.detach().item())
+
+print(f'Loss on {eval_steps * batch_size} test samples (CrossEntropy): {np.mean(test_losses)}')
