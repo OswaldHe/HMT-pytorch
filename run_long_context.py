@@ -4,6 +4,8 @@ import sys
 import tqdm
 import torch
 import datasets
+from matplotlib import pyplot as plt
+import copy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from itertools import chain
 from torch.utils.data import DataLoader
@@ -14,8 +16,11 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 block_size = 1022
 mask_size = 2048
-history_size = 100000
+history_size = 4000
 n_segments = 60
+batch_size = 2
+
+torch.manual_seed(1358)
 
 model_name = 'facebook/opt-350m'
 model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -24,10 +29,16 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 cell = MemoryCell(model, num_mem_tokens=1)
 cell.load_state_dict(torch.load("model_ckpt/memory_cell_512_1024_save_32.pt"))
 model = RecurrentWrapper(cell,
+                        copy.deepcopy(model.get_input_embeddings()),
                         segment_size=block_size,
                         max_n_segments=n_segments)
 model.to(device)
-model.eval()
+model.train()
+# for param in model.memory_cell.parameters():
+#     param.requires_grad = False
+
+# for param in model.cross_attn.emb.parameters():
+#     param.requires_grad = False
 
 """### Prepare dataset"""
 
@@ -68,7 +79,7 @@ def collate_fn(batch):
 
     return collated
 
-task_name = 'wikitext-103-v1'
+task_name = 'wikitext-2-v1'
 raw_datasets = datasets.load_dataset('wikitext', task_name)
 column_names = raw_datasets["train"].column_names
 text_column_name = "text" if "text" in column_names else column_names[0]
@@ -83,18 +94,64 @@ tokenized_datasets = raw_datasets.map(
     desc="Running tokenizer on dataset",
 )
 
-valid_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, history_size, block_size),
+train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
+                                                        batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
+valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, history_size),
                                                         batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
-valid_dataloader = DataLoader(valid_dataset, batch_size=2,
+train_rnd_generator = torch.Generator()
+train_rnd_generator.manual_seed(42)
+train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
+valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
                                         collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
+
+from torch.optim import AdamW
+optim = AdamW(params=model.parameters(), lr=2e-06)
+
+train_steps = 200
+eval_steps = 100
+
+train_gen = iter(train_dataloader)
 valid_gen = iter(valid_dataloader)
-eval_steps = 50
-valid_losses = []
+
+losses = []
+for step in tqdm.tqdm(range(train_steps)):
+    optim.zero_grad()
+
+    batch = next(train_gen)
+    # for k, v in batch.items():
+    #     batch[k] = v.to(device)
+    batch['segment_size'] = block_size
+    out = model(**batch)
+    loss = out.loss
+
+    loss.backward()
+    optim.step()
+
+    losses.append(loss.detach().item())
+
+plt.plot(losses)
+plt.xlabel('step')
+plt.ylabel('train loss')
+plt.savefig('loss.png')
+plt.show()
+
+model.eval()
+
+test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, 10000, block_size),
+                                                        batched=True, desc=f"Grouping valid in chunks of {block_size}")
+
+test_dataloader = DataLoader(test_dataset, batch_size=2,
+                                        collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
+
+
+test_gen = iter(test_dataloader)
+test_losses = []
 
 for step in tqdm.tqdm(range(eval_steps)):
-    batch = next(valid_gen)
+    batch = next(test_gen)
     for k, v in batch.items():
         batch[k] = v.cpu()
     batch['segment_size'] = block_size
@@ -102,6 +159,6 @@ for step in tqdm.tqdm(range(eval_steps)):
         out = model(**batch)
     loss = out.loss
 
-    valid_losses.append(loss.detach().item())
+    test_losses.append(loss.detach().item())
 
-print(f'Loss on 100 validation samples (CrossEntropy): {np.mean(valid_losses)}')
+print(f'Loss on 100 validation samples (CrossEntropy): {np.mean(test_losses)}')
