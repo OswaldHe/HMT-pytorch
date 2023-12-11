@@ -112,11 +112,11 @@ class MemoryCell(torch.nn.Module):
 
 import random
 class RecurrentWrapper(torch.nn.Module):
-    def __init__(self, memory_cell, **rmt_kwargs):
+    def __init__(self, memory_cell, emb, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
-        # self.cross_attn = CrossAttentionMemory(model, 10, 512, 1024)
+        self.cross_attn = CrossAttentionMemory(emb, 10, 512, 1024)
 
     def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022):
         memory_state = None
@@ -124,18 +124,17 @@ class RecurrentWrapper(torch.nn.Module):
         segmented = self.segment(segment_size=segment_size, input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
-        # memory_seq = None
+        memory_seq = None
         for seg_num, segment in enumerate(segmented):
-            # memory_state = self.cross_attn(memory_seq, segment['input_ids'])
-
+            memory_state = self.cross_attn(memory_seq, segment['input_ids'])
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
             cell_outputs.append(cell_out)
-            # if memory_seq is None:
-            #     memory_seq = memory_state
-            # else:
-            #     memory_seq = torch.cat([memory_seq, memory_state], dim=1)
-            #     if memory_seq.shape[1] > 10:
-            #         memory_seq = memory_seq[:,-10:,:]
+            if memory_seq is None:
+                memory_seq = memory_state.cpu()
+            else:
+                memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                if memory_seq.shape[1] > 10:
+                    memory_seq = memory_seq[:,-10:,:]
 
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
