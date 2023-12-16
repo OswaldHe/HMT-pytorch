@@ -21,6 +21,7 @@ n_segments = 60
 batch_size = 2
 
 torch.manual_seed(1358)
+np.random.seed(1358)
 
 model_name = 'facebook/opt-350m'
 model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -108,10 +109,10 @@ valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
 
 
 from torch.optim import AdamW
-optim = AdamW(params=model.parameters(), lr=2e-06)
+optim = AdamW(params=model.parameters(), lr=1e-05)
 
 train_steps = 200
-eval_steps = 100
+eval_steps = 50
 
 train_gen = iter(train_dataloader)
 valid_gen = iter(valid_dataloader)
@@ -139,11 +140,24 @@ plt.savefig('loss.png')
 plt.show()
 
 model.eval()
+valid_losses = []
+for step in tqdm.tqdm(range(eval_steps)):
+    batch = next(valid_gen)
+    # for k, v in batch.items():
+    #     batch[k] = v.to(device)
+    batch['segment_size'] = block_size
+    with torch.no_grad():
+        out = model(**batch)
+    loss = out.loss
 
-test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, 10000, block_size),
+    valid_losses.append(loss.detach().item())
+
+print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
+
+test_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, 10000, block_size),
                                                         batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
-test_dataloader = DataLoader(test_dataset, batch_size=2,
+test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                         collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
 
@@ -161,4 +175,4 @@ for step in tqdm.tqdm(range(eval_steps)):
 
     test_losses.append(loss.detach().item())
 
-print(f'Loss on 100 validation samples (CrossEntropy): {np.mean(test_losses)}')
+print(f'Loss on {eval_steps * batch_size} test samples (CrossEntropy): {np.mean(test_losses)}')
