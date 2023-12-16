@@ -148,7 +148,7 @@ train_gen = iter(train_dataloader)
 valid_gen = iter(valid_dataloader)
 
 
-block_size_var = [(1022, 5e-6), (510, 1e-5)]
+block_size_var = [(1022, 4e-6), (510, 8e-6)]
 losses = []
 for step in tqdm.tqdm(range(train_steps)):
     optim.zero_grad()
