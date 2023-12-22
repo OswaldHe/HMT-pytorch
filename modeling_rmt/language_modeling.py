@@ -117,7 +117,7 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
         if emb is not None:
-            self.cross_attn = CrossAttentionMemory(emb, 10, 512, 1024)
+            self.cross_attn = CrossAttentionMemory(emb, 30, 2560, 4096)
         else:
             self.cross_attn = None
 
@@ -127,12 +127,15 @@ class RecurrentWrapper(torch.nn.Module):
         segmented = self.segment(segment_size=segment_size, input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
+        n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
         for seg_num, segment in enumerate(segmented):
             if self.cross_attn is not None:
                 memory_state = self.cross_attn(memory_seq, segment['input_ids'])
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
             cell_outputs.append(cell_out)
+            if len(cell_outputs) > n_cell_out:
+                cell_outputs.pop(0)
             
             if self.cross_attn is not None:
                 if memory_seq is None:
@@ -178,7 +181,6 @@ class RecurrentWrapper(torch.nn.Module):
     
     def split_tensor(self, tensor, segment_size):
         align = self.rmt_config.get('segment_alignment')
-        # segment_size = self.rmt_config.get('segment_size')
         if align in {'left', None}:
             split_inds = list(range(0, tensor.shape[1], segment_size)) + [tensor.shape[1]]
             segments = [tensor[:, start:end] for (start, end) in zip(split_inds, split_inds[1:])]
@@ -193,24 +195,19 @@ class RecurrentWrapper(torch.nn.Module):
         return segments
 
     def process_outputs(self, cell_outputs, **kwargs):
+        mask_size = self.rmt_config.get('mask_size')
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
 
         labels = kwargs.get('labels')
         if labels is not None:
-            shift_labels = labels[..., 1:].contiguous()
-            shift_logits = full_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., -mask_size:].contiguous()
+            shift_logits = full_logits[..., -(mask_size+1):-1, :].contiguous()
             flat_labels = shift_labels.view(-1)
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             
             loss_fct = CrossEntropyLoss()
-            labels_mask = kwargs.get('labels_mask')
-            if labels_mask is not None:
-                shift_mask = labels_mask[..., :-1].contiguous()
-
-                flat_labels = flat_labels[shift_mask.view(-1)]
-                flat_logits = flat_logits[shift_mask.view(-1)]
             out['loss'] = loss_fct(flat_logits, flat_labels)
         else:
             out['loss'] = 0
