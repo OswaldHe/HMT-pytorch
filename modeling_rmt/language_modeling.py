@@ -117,7 +117,9 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
         if emb is not None:
-            self.cross_attn = CrossAttentionMemory(emb, 30, 2560, 4096)
+            memory_weights = torch.randn((1, 2560)) * emb.weight.data.std()
+            self.register_parameter('mem', torch.nn.Parameter(memory_weights, requires_grad=True))
+            self.cross_attn = CrossAttentionMemory(30, 2560, 4096)
         else:
             self.cross_attn = None
 
@@ -131,7 +133,9 @@ class RecurrentWrapper(torch.nn.Module):
         memory_seq = None
         for seg_num, segment in enumerate(segmented):
             if self.cross_attn is not None:
-                memory_state = self.cross_attn(memory_seq, segment['input_ids'])
+                s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
+                _, q_mem, _ = self.memory_cell(**segment, memory_state=s_mem)
+                memory_state = self.cross_attn(memory_seq, q_mem)
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
@@ -142,8 +146,8 @@ class RecurrentWrapper(torch.nn.Module):
                     memory_seq = memory_state.cpu()
                 else:
                     memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > 10:
-                        memory_seq = memory_seq[:,-10:,:]
+                    if memory_seq.shape[1] > 40:
+                        memory_seq = memory_seq[:,-40:,:]
 
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
