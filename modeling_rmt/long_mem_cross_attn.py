@@ -5,9 +5,8 @@ from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 class CrossAttentionMemory(torch.nn.Module):
-    def __init__(self, emb, memory_size, dim, hidden_dim):
+    def __init__(self, memory_size, dim, hidden_dim):
         super().__init__()
-        self.emb = emb
         self.memory_size = memory_size
         self.dim = dim
         self.hidden_dim = hidden_dim
@@ -18,14 +17,15 @@ class CrossAttentionMemory(torch.nn.Module):
     def forward(self, memory, inputs):
         if memory is None:
             return None
-        inputs_embeds = self.emb.cpu()(inputs)
-        xq = self.wq.cpu()(inputs_embeds) # (batch, seq_len, hidden_dim)
-        mk = self.wk.cpu()(memory) # (batch, mem_len, hidden_dim)
+        inputs = inputs.cuda()
+        memory = memory.cuda()
+        xq = self.wq(inputs) # (batch, 1, hidden_dim)
+        mk = self.wk(memory) # (batch, mem_len, hidden_dim)
 
         scores = torch.matmul(xq, mk.transpose(1,2)) / math.sqrt(self.hidden_dim)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (seq_len, mem_len)
-        scores = F.softmax(scores.float().sum(dim=1, keepdim=True), dim=-1).type_as(xq) # (1, mem_len)
-        output = torch.matmul(scores, memory) # (1, dim)
-        output = output.cuda()
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (batch, 1, mem_len)
+        output = torch.matmul(scores, memory) # (batch, 1, dim)
+        inputs = inputs.cpu()
+        memory = memory.cpu()
 
         return output
