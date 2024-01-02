@@ -14,12 +14,10 @@ from accelerate import Accelerator
 
 # Experiments:
 # TODO(DONE): OPT-2.7B w/o long term mem
-# TODO(OOM): OPT-2.7B w/ long mem 5 token attention (maybe too short)
-# TODO: change cross-attn arch (add output linear + MLPs ?)
-# TODO: only attend first k tokens / transform to lower dim
-# TODO: OPT-1.3B w/o long mem (various config and seq length)
-# TODO: OPT-1.3B w/ long mem 10 token attn
-# TODO: OPT-350M & OPT-1.3B test larger dataset (war and peace + les miserables)
+# TODO(DONE): OPT-2.7B w/ long mem 40 token attention (maybe too short)
+# TODO(DONE): change cross-attn arch (add output linear + MLPs ?)
+# TODO(DONE): only attend first k tokens
+# TODO(DONE): OPT-350M & OPT-2.7B test larger dataset (war and peace + les miserables)
 # TODO: multi-level summarization (? optimizer state may explode)
 
 def main():
@@ -41,7 +39,7 @@ def main():
 
     input_size = 256
     memory_size = 1
-    n_segments = 2
+    n_segments = 5
 
     batch_size = 2
 
@@ -49,7 +47,7 @@ def main():
     block_size -= 2 * memory_size
     history_size = (n_segments - 1) * block_size
 
-    mask_size = block_size
+    mask_size = 512
 
     """### Prepare dataset"""
 
@@ -91,7 +89,7 @@ def main():
         return collated
 
     task_name = 'wikitext-2-v1'
-    raw_datasets = datasets.load_dataset('wikitext', task_name)
+    raw_datasets = datasets.load_dataset('OswaldHe123/novel-text')
     column_names = raw_datasets["train"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -105,10 +103,10 @@ def main():
         desc="Running tokenizer on dataset",
     )
 
-    train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
-                                                            batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-    valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, history_size),
-                                                            batched=True, desc=f"Grouping valid in chunks of {block_size}")
+    train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, history_size, block_size),
+                                                            batched=True, batch_size=len(tokenized_datasets["train"]), desc=f"Grouping train in chunks of {block_size} and history {history_size}")
+    valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, history_size, block_size),
+                                                            batched=True, batch_size=len(tokenized_datasets["validation"]), desc=f"Grouping valid in chunks of {block_size}")
 
     train_rnd_generator = torch.Generator()
     train_rnd_generator.manual_seed(42)
@@ -131,7 +129,7 @@ def main():
                             segment_size=block_size,
                             max_n_segments=n_segments*4,
                             mask_size=mask_size,
-                            n_cell_out=4
+                            n_cell_out=5
                             )
     model.to(device)
 
@@ -139,7 +137,6 @@ def main():
         model.eval()
         gen = iter(train_dataloader)
         batch = next(gen)
-        batch.pop('labels_mask')
         with torch.no_grad():
             out = model(**batch)
         print('Success!')
@@ -153,8 +150,8 @@ def main():
     optim = AdamW(params=model.parameters(), lr=1e-05)
     lr_sched = LambdaLR(optim, lr_lambda=(lambda step: 0.5 if step%2 == 0 else 1.0))
 
-    train_steps = 250
-    eval_steps = 100
+    train_steps = 200
+    eval_steps = 50
 
     model, optim, train_dataloader, valid_dataloader, lr_sched = accelerator.prepare(
         model, optim, train_dataloader, valid_dataloader, lr_sched
@@ -184,7 +181,6 @@ def main():
             accelerator.backward(loss)
             optim.step()
             lr_sched.step()
-
             losses.append(loss.detach().item())
 
     plt.plot(losses)
