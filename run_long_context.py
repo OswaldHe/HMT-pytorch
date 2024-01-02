@@ -22,7 +22,7 @@ def main():
 
     block_size = 254
     mask_size = 512
-    n_segments = 10
+    n_segments = 15
     history_size = (n_segments-1)*block_size
     batch_size = 2
 
@@ -90,7 +90,7 @@ def main():
 
 
     task_name = 'wikitext-2-v1'
-    raw_datasets = datasets.load_dataset('wikitext', task_name)
+    raw_datasets = datasets.load_dataset('OswaldHe123/novel-text')
     column_names = raw_datasets["train"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -106,7 +106,7 @@ def main():
 
     train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, history_size, block_size),
                                                             batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-    valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, history_size, block_size),
+    valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, 2000, block_size),
                                                             batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
     train_rnd_generator = torch.Generator()
@@ -120,14 +120,14 @@ def main():
     from torch.optim import AdamW
     optim = AdamW(params=model.parameters(), lr=8e-6)
 
-    model, optim, train_dataloader = accelerator.prepare(
-        model, optim, train_dataloader
+    model, optim, train_dataloader, valid_dataloader = accelerator.prepare(
+        model, optim, train_dataloader, valid_dataloader
     )
 
     model.to(device)
     model.train()
 
-    train_steps = 200
+    train_steps = 350
     eval_steps = 50
 
     train_gen = iter(train_dataloader)
@@ -170,7 +170,7 @@ def main():
 
     print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
 
-    test_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, 10000, block_size),
+    test_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, 60000, block_size),
                                                             batched=True, batch_size=len(tokenized_datasets["validation"]), desc=f"Grouping valid in chunks of {block_size}")
 
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size,

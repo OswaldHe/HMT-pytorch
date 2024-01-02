@@ -1,5 +1,6 @@
 import math
 import torch
+import copy
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
@@ -134,7 +135,10 @@ class RecurrentWrapper(torch.nn.Module):
         for seg_num, segment in enumerate(segmented):
             if self.cross_attn is not None:
                 s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
-                _, q_mem, _ = self.memory_cell(**segment, memory_state=s_mem)
+                seg = copy.deepcopy(segment)
+                seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
+                seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
+                _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
                 memory_state = self.cross_attn(memory_seq, q_mem)
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
             cell_outputs.append(cell_out)
@@ -146,8 +150,8 @@ class RecurrentWrapper(torch.nn.Module):
                     memory_seq = memory_state.cpu()
                 else:
                     memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > 40:
-                        memory_seq = memory_seq[:,-40:,:]
+                    if memory_seq.shape[1] > 100:
+                        memory_seq = memory_seq[:,-100:,:]
 
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
