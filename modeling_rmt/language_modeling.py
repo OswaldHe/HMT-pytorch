@@ -1,15 +1,16 @@
 import math
 import torch
 import copy
+import numpy as np
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
 
 class MemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens):
+    def __init__(self, base_model, num_mem_tokens, num_prepend):
         super().__init__()
         self.model = base_model
-        self.n_prepend = 32
+        self.n_prepend = num_prepend
         self.prepend_list = None
         self.create_memory(num_mem_tokens)
 
@@ -17,11 +18,11 @@ class MemoryCell(torch.nn.Module):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
         if num_mem_tokens > 0:
-            memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.word_embed_proj_dim)
+            memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
             memory_weights = torch.randn((num_mem_tokens, memory_dim)) * embeddings.weight.data.std()
-            signifier_weights = torch.randn((1, memory_dim)) * embeddings.weight.data.std()
             self.register_parameter('memory', torch.nn.Parameter(memory_weights, requires_grad=True))
-            self.register_parameter('signifier', torch.nn.Parameter(signifier_weights, requires_grad=False))
+            # signifier_weights = torch.randn((1, memory_dim)) * embeddings.weight.data.std()
+            # self.register_parameter('signifier', torch.nn.Parameter(signifier_weights, requires_grad=False))
 
         self.read_memory_position = range(num_mem_tokens)
         self.write_memory_position = range(-num_mem_tokens, 0)
@@ -68,7 +69,7 @@ class MemoryCell(torch.nn.Module):
         if memory_state is not None:
             inputs_embeds = torch.cat([memory_state, inputs_embeds, memory_state], dim=1)
         
-        self.prepend_list = input_ids[:,-self.n_prepend:]
+        self.prepend_list = input_ids[:,-self.n_prepend:] if self.n_prepend != 0 else None
 
         seg_kwargs['input_ids'] = None
         seg_kwargs['inputs_embeds'] = inputs_embeds
@@ -113,18 +114,18 @@ class MemoryCell(torch.nn.Module):
 
 import random
 class RecurrentWrapper(torch.nn.Module):
-    def __init__(self, memory_cell, emb=None, **rmt_kwargs):
+    def __init__(self, memory_cell, emb=None, word_emb_dim=4096, hidden_dim=4096, ltm_context=100, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
         if emb is not None:
-            memory_weights = torch.randn((1, 2560)) * emb.weight.data.std()
+            memory_weights = torch.randn((1, word_emb_dim)) * emb.weight.data.std()
             self.register_parameter('mem', torch.nn.Parameter(memory_weights, requires_grad=True))
-            self.cross_attn = CrossAttentionMemory(30, 2560, 4096)
+            self.cross_attn = CrossAttentionMemory(word_emb_dim, hidden_dim)
         else:
             self.cross_attn = None
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022):
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022, mode='train'):
         memory_state = None
         prepend_state = None
         segmented = self.segment(segment_size=segment_size, input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
@@ -132,6 +133,9 @@ class RecurrentWrapper(torch.nn.Module):
         cell_outputs = []
         n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
+
+        total_hist = []
+
         for seg_num, segment in enumerate(segmented):
             if self.cross_attn is not None:
                 s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
@@ -139,8 +143,11 @@ class RecurrentWrapper(torch.nn.Module):
                 seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
                 seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
                 _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
-                memory_state = self.cross_attn(memory_seq, q_mem)
+                memory_state, hist = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < ltm_context else ltm_context)
+                if hist is not None:
+                    total_hist.extend(hist)
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
+
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
                 cell_outputs.pop(0)
@@ -150,8 +157,8 @@ class RecurrentWrapper(torch.nn.Module):
                     memory_seq = memory_state.cpu()
                 else:
                     memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > 100:
-                        memory_seq = memory_seq[:,-100:,:]
+                    if memory_seq.shape[1] > ltm_context:
+                        memory_seq = memory_seq[:,-ltm_context:,:]
 
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
@@ -160,7 +167,7 @@ class RecurrentWrapper(torch.nn.Module):
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
                                    output_hidden_states=output_hidden_states)
-        return out
+        return out, total_hist
     
     def generate(self, input_ids, attention_mask, **generate_kwargs):
         memory_state = None
@@ -216,9 +223,11 @@ class RecurrentWrapper(torch.nn.Module):
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             
             loss_fct = CrossEntropyLoss()
-            out['loss'] = loss_fct(flat_logits, flat_labels)
+            out['loss'] = loss_fct(flat_logits.cuda(), flat_labels.cuda())
+            out['ppl'] = torch.exp(out['loss'])
         else:
             out['loss'] = 0
+            out['ppl'] = 0
 
         out['logits'] = full_logits
         segment_keys = ['loss', 'logits']
