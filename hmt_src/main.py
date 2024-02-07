@@ -27,7 +27,7 @@ from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoin
 '''
 TODO(DONE): Use LoRA to reduce memory consumption
 TODO(DONE): Clean up code and parametrize
-TODO: Llama 2 7B explore model hyperparameters to get optimal
+TODO(DONE): Llama 2 7B explore model hyperparameters to get optimal
     1. baseline test
     2. num of preserved tokens
     3. multi-stage training
@@ -53,7 +53,7 @@ parser = ArgumentParser()
 
 #cli arguments
 parser.add_argument('--task_name', type=str, default='wikitext', help='training/validation task name (e.g. wikitext, pg19, samsum, etc.)')
-parser.add_argument('--task_subset', type=str, default='wikitext-103-v1', help='subset of dataset (e.g., wikitext-2-v1)')
+parser.add_argument('--task_subset', type=str, default=None, help='subset of dataset (e.g., wikitext-2-v1)')
 parser.add_argument('--batch_size', type=int, default=2, help='number of batches per device')
 parser.add_argument('--num_seg_save', type=int, default=5, help='max number of segment inference results saved on GPU')
 parser.add_argument('--seed', type=int, default=3407, help='random seed for training')
@@ -79,6 +79,8 @@ parser.add_argument('--save_ckpt', type=str, default=None, help='store the model
 parser.add_argument('--load_from_ckpt', type=str, default=None, help='load the checkpoint for HMT stage 2')
 parser.add_argument('--mem_recall_context', type=int, default=100, help='number of memory embeddings cached in memory recall mech.')
 parser.add_argument('--token_file', type=str, default='hmt_src/cred.txt', help='path to the file with Huggingface token. Used for gated model such as Llama2.')
+parser.add_argument('--train_set_split', type=str, default=None, 
+        help='slice upper bound of training set to reduce time for tokenization. use percentage notation (e.g., 2%), or integer')
 
 
 torch.manual_seed(3407)
@@ -127,6 +129,7 @@ def main():
 
     block_size = input_size
     block_size -= 2 * memory_size
+    block_size -= args.num_sensory
     history_size = (n_segments - 1) * block_size
 
     mask_size = block_size
@@ -171,7 +174,10 @@ def main():
         return collated
 
     task_name = args.task_subset
-    train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'])
+    if args.train_set_split is not None:
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:'+args.train_set_split+']', 'validation', 'test'])
+    else:
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'])
     column_names = train_ds.column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 

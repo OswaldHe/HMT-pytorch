@@ -118,6 +118,7 @@ class RecurrentWrapper(torch.nn.Module):
         super().__init__()
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
+        self.ltm_context = ltm_context
         if emb is not None:
             memory_weights = torch.randn((1, word_emb_dim)) * emb.weight.data.std()
             self.register_parameter('mem', torch.nn.Parameter(memory_weights, requires_grad=True))
@@ -143,7 +144,7 @@ class RecurrentWrapper(torch.nn.Module):
                 seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
                 seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
                 _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
-                memory_state, hist = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < ltm_context else ltm_context)
+                memory_state, hist = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context)
                 if hist is not None:
                     total_hist.extend(hist)
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
@@ -157,8 +158,8 @@ class RecurrentWrapper(torch.nn.Module):
                     memory_seq = memory_state.cpu()
                 else:
                     memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > ltm_context:
-                        memory_seq = memory_seq[:,-ltm_context:,:]
+                    if memory_seq.shape[1] > self.ltm_context:
+                        memory_seq = memory_seq[:,-self.ltm_context:,:]
 
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
