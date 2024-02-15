@@ -12,9 +12,11 @@ import accelerate
 import datetime
 
 from matplotlib import pyplot as plt
+from matplotlib.ticker import PercentFormatter
 from argparse import ArgumentParser
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from itertools import chain
+from functools import partial
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from accelerate import Accelerator
@@ -32,12 +34,15 @@ TODO(DONE): Llama 2 7B explore model hyperparameters to get optimal
     2. num of preserved tokens
     3. multi-stage training
     4. add more layers to mem recall, increase hidden dim
-TODO: Interleaving dataset
+TODO(DONE): Interleaving dataset
 TODO: PubMed QA context+question+answer concatenation
 TODO: inspect memory recall to specific segments
+TODO: Quantized Llama2-13B GPTQ + QLoRA
 
 TODO(EXTRA): redo previous experiments for new datasets
 TODO(EXTRA): find a heuristic for dynamic concentration and measure the efficiency
+    (e.g.) if two similar memory embeddings, then reduce concentration.
+TODO(EXTRA): use long-term memory as a dependency to generate multiple tokens in parallel
 '''
 
 
@@ -69,7 +74,7 @@ parser.add_argument('--learning_rate', type=float, default=1e-5, help='training 
 parser.add_argument('--lr_decay', action='store_true', default=False, help='whether having learning rate decay or not')
 parser.add_argument('--use_lora', action='store_true', default=False, help='whether use PEFT LoRA to speed up training')
 parser.add_argument('--lr_decay_gamma', type=float, default=0.8, help='rate of lr decay')
-parser.add_argument('--num_sensory', type=int, default=32, help='number of preserved tokens for sensory memory')
+parser.add_argument('--num_sensory', type=int, default=0, help='number of preserved tokens for sensory memory')
 parser.add_argument('--mem_recall_hidden_dim', type=int, default=4096, help='hidden dimension of cross attention in memory recall mech.')
 parser.add_argument('--rmt_only', action='store_true', default=False, help='train and evaluate with only rmt')
 parser.add_argument('--baseline_only', action='store_true', default=False, help='train and evaluate only the backbone model')
@@ -81,9 +86,15 @@ parser.add_argument('--mem_recall_context', type=int, default=100, help='number 
 parser.add_argument('--token_file', type=str, default='hmt_src/cred.txt', help='path to the file with Huggingface token. Used for gated model such as Llama2.')
 parser.add_argument('--train_set_split', type=str, default=None, 
         help='slice upper bound of training set to reduce time for tokenization. use percentage notation (e.g., 2%), or integer')
+parser.add_argument('--interleave_dataset', action='store_true', default=False, help='whether mix every two samples in the dataset to create context switching.')
+parser.add_argument('--interleave_len', type=int, default=100, help='the interleaving length of dataset (first sample pick some tokens, then the second).')
+parser.add_argument('--plot_hist', action='store_true', default=False, help='show memory recall context histogram.')
 
 
 torch.manual_seed(3407)
+
+def gen_from_iterable_dataset(iterable_ds):
+    yield from iterable_ds
 
 def main():
     global torch
@@ -136,7 +147,35 @@ def main():
 
     """### Prepare dataset"""
 
+    def interleaving_sample(examples, context_len):
+        interleave = {}
+        for k in examples.keys():
+            interleave[k] = []
+            for i in range(0, len(examples[k]), 2):
+                first = examples[k][i]
+                if i+1 >= len(examples[k]):
+                    interleave[k].append(first)
+                    break
+                second = examples[k][i+1]
+
+                # interleaving the tokens
+                res = []
+                while i < len(first) and i < len(second):
+                    res.extend(first[i:i+context_len]) 
+                    res.extend(second[i:i+context_len])
+                    i+=context_len
+                if i < len(first):
+                    res.extend(first[i:])
+                if i < len(second):
+                    res.extend(second[i:])
+                interleave[k].append(res)
+
+        return interleave
+
+
     def group_texts(examples, block_size, history_size=None):
+        if args.interleave_dataset:
+            examples = interleaving_sample(examples, args.interleave_len)
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
 
@@ -175,9 +214,17 @@ def main():
 
     task_name = args.task_subset
     if args.train_set_split is not None:
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:'+args.train_set_split+']', 'validation', 'test'])
+        train_ds = datasets.load_dataset(args.task_name, task_name, split='train', streaming=True)
+        valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=True)
+        test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=True)
+        train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+        valid_ds = valid_ds.take(int(args.train_set_split))
+        test_ds = test_ds.take(int(args.train_set_split))
+        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
+        valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
+        test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
     else:
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'])
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], streaming=True)
     column_names = train_ds.column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -187,6 +234,7 @@ def main():
     train_ds_tok = train_ds.map(
         tokenize_function,
         batched=True,
+        batch_size=4,
         remove_columns=column_names,
         desc="Running tokenizer on training dataset",
         num_proc=32
@@ -221,7 +269,7 @@ def main():
                                             collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
     
     test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
-                                                            batched=True, desc=f"Grouping valid in chunks of {block_size}")
+                                                            batched=True, batch_size=4, desc=f"Grouping test in chunks of {block_size}", writer_batch_size=50)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                             collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
@@ -313,8 +361,8 @@ def main():
         optim.step()
         if args.lr_decay:
             scheduler.step()
-        logger.info(f'loss: {loss.item()}')
-        logger.info(f'ppl: {out.ppl.item()}')
+        logger.debug(f'loss: {loss.item()}')
+        logger.debug(f'ppl: {out.ppl.item()}')
         losses.append(loss.detach().item())
 
     accelerator.wait_for_everyone()
@@ -327,6 +375,7 @@ def main():
     date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     plt.savefig('artifact/loss_' + date_str + '.png')
     plt.show()
+    plt.close()
 
     valid_losses = []
     valid_ppl = []
@@ -349,6 +398,7 @@ def main():
 
     test_losses = []
     test_ppl = []
+    total_hist = []
 
     test_gen = iter(test_dataloader)
 
@@ -358,11 +408,22 @@ def main():
             batch[k] = v.cpu()
         batch['segment_size'] = block_size
         with torch.no_grad():
-            out, _ = model(**batch)
+            out, hist = model(**batch)
         loss = out.loss
         ppl = out.ppl
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
+        if hist is not None:
+            total_hist.extend(hist)
+    
+    if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
+        max_d = np.max(total_hist)
+        plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=np.arange(max_d+1))
+        plt.gca().yaxis.set_major_formatter(PercentFormatter(1))
+        plt.xlabel("Context Distance")
+        plt.ylabel("Probability")
+        plt.savefig('artifact/heatmap_' + date_str + '.png')
+        plt.show()
 
     print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
