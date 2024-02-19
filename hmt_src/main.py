@@ -24,6 +24,7 @@ from pathlib import Path
 from peft import get_peft_model, LoraConfig, TaskType
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 
 
 '''
@@ -35,8 +36,8 @@ TODO(DONE): Llama 2 7B explore model hyperparameters to get optimal
     3. multi-stage training
     4. add more layers to mem recall, increase hidden dim
 TODO(DONE): Interleaving dataset
-TODO: PubMed QA context+question+answer concatenation
-TODO: inspect memory recall to specific segments
+TODO(DONE): PubMed QA context+question+answer concatenation
+TODO(DONE): inspect memory recall to specific segments
 TODO: Quantized Llama2-13B GPTQ + QLoRA
 
 TODO(EXTRA): redo previous experiments for new datasets
@@ -89,6 +90,7 @@ parser.add_argument('--train_set_split', type=str, default=None,
 parser.add_argument('--interleave_dataset', action='store_true', default=False, help='whether mix every two samples in the dataset to create context switching.')
 parser.add_argument('--interleave_len', type=int, default=100, help='the interleaving length of dataset (first sample pick some tokens, then the second).')
 parser.add_argument('--plot_hist', action='store_true', default=False, help='show memory recall context histogram.')
+parser.add_argument('--fuse_size', type=int, default=2, help='the number of questions and context to fuse for PubMedQA dataset')
 
 
 torch.manual_seed(3407)
@@ -224,54 +226,65 @@ def main():
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
     else:
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], streaming=True)
-    column_names = train_ds.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
+        if args.task_name == 'pubmed_qa':
+            # split train set into three subsets
+            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
+        else:
+            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'])
 
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name])
+    if args.task_name == 'pubmed_qa':
+        # preprocess qa database
+        train_dataloader = PubMedQA(train_ds, tokenizer, fuse_size=2, batch_size=batch_size, shuffle=True, seed=args.seed)
+        valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
+        test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
+    else:
+        column_names = train_ds.column_names
+        text_column_name = "text" if "text" in column_names else column_names[0]
 
-    train_ds_tok = train_ds.map(
-        tokenize_function,
-        batched=True,
-        batch_size=4,
-        remove_columns=column_names,
-        desc="Running tokenizer on training dataset",
-        num_proc=32
-    )
+        def tokenize_function(examples):
+            return tokenizer(examples[text_column_name])
 
-    valid_ds_tok = valid_ds.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=column_names,
-        desc="Running tokenizer on valid dataset",
-        num_proc=32
-    )
+        train_ds_tok = train_ds.map(
+            tokenize_function,
+            batched=True,
+            batch_size=4,
+            remove_columns=column_names,
+            desc="Running tokenizer on training dataset",
+            num_proc=32
+        )
 
-    test_ds_tok = test_ds.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=column_names,
-        desc="Running tokenizer on test dataset",
-        num_proc=32
-    )
+        valid_ds_tok = valid_ds.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=column_names,
+            desc="Running tokenizer on valid dataset",
+            num_proc=32
+        )
 
-    train_dataset = train_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
-                                                            batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-    valid_dataset = valid_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
-                                                            batched=True, desc=f"Grouping valid in chunks of {block_size}")
+        test_ds_tok = test_ds.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=column_names,
+            desc="Running tokenizer on test dataset",
+            num_proc=32
+        )
 
-    train_rnd_generator = torch.Generator()
-    train_rnd_generator.manual_seed(args.seed)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
-                                            collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
-    
-    test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
-                                                            batched=True, batch_size=4, desc=f"Grouping test in chunks of {block_size}", writer_batch_size=50)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                            collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
+        train_dataset = train_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
+                                                                batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
+        valid_dataset = valid_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
+                                                                batched=True, desc=f"Grouping valid in chunks of {block_size}")
+
+        train_rnd_generator = torch.Generator()
+        train_rnd_generator.manual_seed(args.seed)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                        shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
+        valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
+                                                collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
+        
+        test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
+                                                                batched=True, batch_size=4, desc=f"Grouping test in chunks of {block_size}", writer_batch_size=50)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
+                                                collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
 
     if args.rmt_only or args.baseline_only:
