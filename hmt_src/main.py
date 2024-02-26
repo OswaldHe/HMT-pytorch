@@ -38,11 +38,13 @@ TODO(DONE): Llama 2 7B explore model hyperparameters to get optimal
 TODO(DONE): Interleaving dataset
 TODO(DONE): PubMed QA context+question+answer concatenation
 TODO(DONE): inspect memory recall to specific segments
-TODO: Quantized Llama2-13B GPTQ + QLoRA
-
-TODO(EXTRA): redo previous experiments for new datasets
-TODO(EXTRA): find a heuristic for dynamic concentration and measure the efficiency
+TODO: Dialated dataset (insert invalid tokens)
+TODO: find a heuristic for dynamic concentration (various sensory memory length) and measure the efficiency
     (e.g.) if two similar memory embeddings, then reduce concentration.
+TODO: ablation study on # of segments.
+
+TODO(EXTRA): Quantized Llama2-13B GPTQ + QLoRA
+TODO(EXTRA): redo previous experiments for new datasets
 TODO(EXTRA): use long-term memory as a dependency to generate multiple tokens in parallel
 '''
 
@@ -91,6 +93,9 @@ parser.add_argument('--interleave_dataset', action='store_true', default=False, 
 parser.add_argument('--interleave_len', type=int, default=100, help='the interleaving length of dataset (first sample pick some tokens, then the second).')
 parser.add_argument('--plot_hist', action='store_true', default=False, help='show memory recall context histogram.')
 parser.add_argument('--fuse_size', type=int, default=2, help='the number of questions and context to fuse for PubMedQA dataset')
+parser.add_argument('--timing', action='store_true', default=False, help='profile the timing of inference.')
+parser.add_argument('--inference_only', action='store_true', default=False, help='perform inference of the model only.')
+parser.add_argument('--dynamic', action='store_true', default=False, help='whether dynamically change reading speed based on memory.')
 
 
 torch.manual_seed(3407)
@@ -145,7 +150,9 @@ def main():
     block_size -= args.num_sensory
     history_size = (n_segments - 1) * block_size
 
-    mask_size = block_size
+    mask_size = args.mask_size
+
+    block_size_2 = input_size - (2*memory_size) - args.num_sensory//2
 
     """### Prepare dataset"""
 
@@ -339,9 +346,13 @@ def main():
 
     from torch.optim import AdamW
     optim = AdamW(params=model.parameters(), lr=args.learning_rate)
-    from torch.optim.lr_scheduler import StepLR
+    from torch.optim.lr_scheduler import StepLR, LambdaLR
     if args.lr_decay:
-        scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+        if not args.dynamic:
+            scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+        else:
+            lambda_f = lambda epoch: (args.lr_decay_gamma ** (epoch // 100)) * 0.1 if epoch%2==0 else (args.lr_decay_gamma ** (epoch // 100))
+            scheduler = LambdaLR(optim, lr_lambda=lambda_f)
     else:
         scheduler = StepLR(optim, step_size=100, gamma=1.0)
 
@@ -358,37 +369,57 @@ def main():
     model.to(device)
     model.train()
 
-    losses = []
-    for step in tqdm.tqdm(range(train_steps)):
-        optim.zero_grad()
+    block_size_list = [block_size, block_size_2]
 
-        batch = next(train_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
+    if not args.inference_only:
+        losses = []
+        for step in tqdm.tqdm(range(train_steps)):
+            optim.zero_grad()
 
-        batch['segment_size'] = block_size
-        out, _ = model(**batch)
-        loss = out.loss
+            batch = next(train_gen)
+            for k, v in batch.items():
+                batch[k] = v.cpu()
 
-        accelerator.backward(loss)
-        optim.step()
-        if args.lr_decay:
-            scheduler.step()
-        logger.debug(f'loss: {loss.item()}')
-        logger.debug(f'ppl: {out.ppl.item()}')
-        losses.append(loss.detach().item())
+            if not args.dynamic:
+                batch['segment_size'] = block_size
+                out, _ = model(**batch)
+                loss = out.loss
 
-    accelerator.wait_for_everyone()
-    if args.save_ckpt is not None:
-        model.save_checkpoint(args.save_ckpt)
+                accelerator.backward(loss)
+                optim.step()
+                if args.lr_decay:
+                    scheduler.step()
+                logger.debug(f'loss: {loss.item()}')
+                logger.debug(f'ppl: {out.ppl.item()}')
+                losses.append(loss.detach().item())
 
-    plt.plot(losses)
-    plt.xlabel('step')
-    plt.ylabel('train loss')
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    plt.savefig('artifact/loss_' + date_str + '.png')
-    plt.show()
-    plt.close()
+            else:
+                for i in range(2):
+                    batch['segment_size'] = block_size_list[i]
+                    if i == 1:
+                        batch['mode'] = 'browse'
+                    out, _ = model(**batch)
+                    loss = out.loss
+
+                    accelerator.backward(loss)
+                    optim.step()
+                    if args.lr_decay:
+                        scheduler.step()
+                    logger.debug(f'loss: {loss.item()}')
+                    logger.debug(f'ppl: {out.ppl.item()}')
+                    losses.append(loss.detach().item())
+
+        accelerator.wait_for_everyone()
+        if args.save_ckpt is not None:
+            model.save_checkpoint(args.save_ckpt)
+
+        plt.plot(losses)
+        plt.xlabel('step')
+        plt.ylabel('train loss')
+        date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        plt.savefig('artifact/loss_' + date_str + '.png')
+        plt.show()
+        plt.close()
 
     valid_losses = []
     valid_ppl = []
@@ -398,6 +429,8 @@ def main():
         for k, v in batch.items():
             batch[k] = v.cpu()
         batch['segment_size'] = block_size
+        # if args.timing:
+        #     batch['profile'] = True
         with torch.no_grad():
             out, _ = model(**batch)
         loss = out.loss
@@ -420,12 +453,18 @@ def main():
         for k, v in batch.items():
             batch[k] = v.cpu()
         batch['segment_size'] = block_size
+        if args.dynamic:
+            batch['extra_size'] = args.num_sensory//2
+            batch['mode'] = 'test'
+        if args.timing:
+            batch['profile'] = True
         with torch.no_grad():
             out, hist = model(**batch)
         loss = out.loss
         ppl = out.ppl
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
+        logger.debug(f'loss: {loss.item()}')
         if hist is not None:
             total_hist.extend(hist)
     
