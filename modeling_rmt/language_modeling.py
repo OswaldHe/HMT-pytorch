@@ -5,6 +5,8 @@ import numpy as np
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
+from accelerate.logging import get_logger
+import random
 
 class MemoryCell(torch.nn.Module):
     def __init__(self, base_model, num_mem_tokens, num_prepend):
@@ -31,7 +33,7 @@ class MemoryCell(torch.nn.Module):
         memory = self.memory.repeat(input_shape[0], 1, 1)
         return memory
 
-    def forward(self, input_ids, memory_state=None, prepend_state=None, **kwargs):
+    def forward(self, input_ids, memory_state=None, prepend_state=None, browse=False, **kwargs):
         input_ids = input_ids.cuda()
         for k, v in kwargs.items():
             if torch.is_tensor(v):
@@ -42,7 +44,8 @@ class MemoryCell(torch.nn.Module):
         seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, **kwargs)
 
         out = self.model(**seg_kwargs)
-        out, new_memory_state = self.process_output(out, 0 if prepend_state is None else self.n_prepend, **kwargs)
+        n_prepend = self.n_prepend//2 if browse else self.n_prepend
+        out, new_memory_state = self.process_output(out, 0 if prepend_state is None else n_prepend, **kwargs)
         input_ids = input_ids.cpu()
         for k, v in kwargs.items():
                 if torch.is_tensor(v):
@@ -111,14 +114,34 @@ class MemoryCell(torch.nn.Module):
             
         return out, memory_state 
 
+class SegmentIterator:
+    def __init__(self, **kwargs):
+        self.iter_content = kwargs
+        self.pointer = 0
+        self.empty = False
+    
+    def next(self, segment_length):
+        segment = {}
+        for k, tensor in self.iter_content.items():
+            if tensor is not None:
+                if self.pointer > tensor.shape[1]:
+                    self.empty = True
+                    return None
+                segment[k] = tensor[:, self.pointer:self.pointer+segment_length]
+        
+        self.pointer += segment_length
+        return segment
+    
+    def is_empty(self):
+        return self.empty
 
-import random
 class RecurrentWrapper(torch.nn.Module):
     def __init__(self, memory_cell, emb=None, word_emb_dim=4096, hidden_dim=4096, ltm_context=100, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
         self.ltm_context = ltm_context
+        self.logger = get_logger('')
         if emb is not None:
             memory_weights = torch.randn((1, word_emb_dim)) * emb.weight.data.std()
             self.register_parameter('mem', torch.nn.Parameter(memory_weights, requires_grad=True))
@@ -126,10 +149,10 @@ class RecurrentWrapper(torch.nn.Module):
         else:
             self.cross_attn = None
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022, mode='train'):
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, segment_size=1022, extra_size=16, mode='train', profile=False):
         memory_state = None
         prepend_state = None
-        segmented = self.segment(segment_size=segment_size, input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+        seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
         n_cell_out = self.rmt_config.get('n_cell_out')
@@ -137,17 +160,48 @@ class RecurrentWrapper(torch.nn.Module):
 
         total_hist = []
 
-        for seg_num, segment in enumerate(segmented):
+        seg_num = 0
+        segment = None
+
+        if profile:
+            self.logger.info('start inferencing segments')
+
+        while not seg_iter.is_empty():
+            segment = seg_iter.next(segment_size)
+            if segment is None:
+                break
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+
+            browse = False
             if self.cross_attn is not None:
                 s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
                 seg = copy.deepcopy(segment)
                 seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
                 seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
                 _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
-                memory_state, hist = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context)
+                browse_thres = 0
+                if mode == 'test':
+                    browse_thres = 2
+                memory_state, hist, browse = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context, browse_thres)
                 if hist is not None:
                     total_hist.extend(hist)
-            cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
+            
+            if browse and mode == 'test':
+                # proceed extra tokens
+                extra_seg = seg_iter.next(extra_size)
+                if extra_seg is not None:
+                    for k, tensor in extra_seg.items():
+                        segment[k] = torch.cat([segment[k], tensor], dim=1)
+
+            browse = browse or mode == 'browse'
+            start.record()
+            cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, output_hidden_states=True)
+            end.record()
+
+            if profile:
+                torch.cuda.synchronize()
+                self.logger.info('segment ' + str(seg_num) + ' elapsed time: ' + str(start.elapsed_time(end)) + ' ms')
 
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
@@ -164,6 +218,11 @@ class RecurrentWrapper(torch.nn.Module):
             if memory_state is not None:
                 self.manage_gradients(memory_state, seg_num)
 
+            seg_num+=1
+        
+        if profile:
+            self.logger.info('end inferencing segments')
+
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
@@ -171,6 +230,7 @@ class RecurrentWrapper(torch.nn.Module):
         return out, total_hist
     
     def generate(self, input_ids, attention_mask, **generate_kwargs):
+        #TODO: rewrite generation function
         memory_state = None
         segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
 
