@@ -174,6 +174,7 @@ class RecurrentWrapper(torch.nn.Module):
             end = torch.cuda.Event(enable_timing=True)
 
             browse = False
+            start.record()
             if self.cross_attn is not None:
                 s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
                 seg = copy.deepcopy(segment)
@@ -195,7 +196,7 @@ class RecurrentWrapper(torch.nn.Module):
                         segment[k] = torch.cat([segment[k], tensor], dim=1)
 
             browse = browse or mode == 'browse'
-            start.record()
+            # start.record()
             cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, output_hidden_states=True)
             end.record()
 
