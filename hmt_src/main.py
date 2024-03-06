@@ -69,7 +69,6 @@ parser.add_argument('--model_name', type=str, default='facebook/opt-2.7b', help=
 parser.add_argument('--segment_length', type=int, default=256, help='segment length of HMT')
 parser.add_argument('--bptt_depth', type=int, default=2, help='number of segments unrolled in bptt')
 parser.add_argument('--test_length', type=int, default=2000, help='context length of input to test')
-parser.add_argument('--mask_size', type=int, default=256, help='loss computation mask length')
 parser.add_argument('--training_step', type=int, default=500, help='number of training steps')
 parser.add_argument('--eval_step', type=int, default=100, help='number of evaluation steps')
 parser.add_argument('--test_step', type=int, default=100, help='number of testing steps')
@@ -96,6 +95,9 @@ parser.add_argument('--fuse_size', type=int, default=2, help='the number of ques
 parser.add_argument('--timing', action='store_true', default=False, help='profile the timing of inference.')
 parser.add_argument('--inference_only', action='store_true', default=False, help='perform inference of the model only.')
 parser.add_argument('--dynamic', action='store_true', default=False, help='whether dynamically change reading speed based on memory.')
+parser.add_argument('--dilate_dataset', action='store_true', default=False, help='dilate the sample by inserting padding tokens.')
+parser.add_argument('--dilate_len', type=int, default=888, help='number of padding tokens inserted to dilate the sample.')
+parser.add_argument('--dilate_str', type=str, default='$', help='the token you want to insert to dilate the sample.')
 
 
 torch.manual_seed(3407)
@@ -150,7 +152,7 @@ def main():
     block_size -= args.num_sensory
     history_size = (n_segments - 1) * block_size
 
-    mask_size = args.mask_size
+    mask_size = block_size
 
     block_size_2 = input_size - (2*memory_size) - args.num_sensory//2
 
@@ -167,24 +169,46 @@ def main():
                     break
                 second = examples[k][i+1]
 
-                # interleaving the tokens
                 res = []
-                while i < len(first) and i < len(second):
-                    res.extend(first[i:i+context_len]) 
-                    res.extend(second[i:i+context_len])
-                    i+=context_len
-                if i < len(first):
-                    res.extend(first[i:])
-                if i < len(second):
-                    res.extend(second[i:])
+                j = 0
+                while j < len(first) and j < len(second):
+                    res.extend(first[j:j+context_len]) 
+                    res.extend(second[j:j+context_len])
+                    j+=context_len
+                if j < len(first):
+                    res.extend(first[j:])
+                if j < len(second):
+                    res.extend(second[j:])
                 interleave[k].append(res)
 
         return interleave
+
+    def dilated_sample(examples, insert_len, period, insert_str):
+        res = {}
+        tok = tokenizer(insert_str)['input_ids'][1]
+        attn_mask = tokenizer(insert_str)['attention_mask'][1]
+        for k in examples.keys():
+            res[k] = []
+            for sample in examples[k]:
+                ans = []
+                i = 0
+                while i < len(sample):
+                    ans.extend(sample[i:i+period])
+                    if k == 'input_ids':
+                        ans.extend(insert_len * [tok]) #padding token [double space]
+                    else:
+                        ans.extend(insert_len * [attn_mask])
+                    i+=period
+                res[k].append(ans)
+
+        return res
 
 
     def group_texts(examples, block_size, history_size=None):
         if args.interleave_dataset:
             examples = interleaving_sample(examples, args.interleave_len)
+        elif args.dilate_dataset:
+            examples = dilated_sample(examples, args.dilate_len, args.dilate_len, args.dilate_str)
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
 
@@ -470,7 +494,7 @@ def main():
     
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
         max_d = np.max(total_hist)
-        plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=np.arange(max_d+1))
+        plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=50)
         plt.gca().yaxis.set_major_formatter(PercentFormatter(1))
         plt.xlabel("Context Distance")
         plt.ylabel("Probability")
