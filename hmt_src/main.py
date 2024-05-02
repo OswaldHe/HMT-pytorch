@@ -28,28 +28,6 @@ from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
 
 
-'''
-TODO(DONE): Use LoRA to reduce memory consumption
-TODO(DONE): Clean up code and parametrize
-TODO(DONE): Llama 2 7B explore model hyperparameters to get optimal
-    1. baseline test
-    2. num of preserved tokens
-    3. multi-stage training
-    4. add more layers to mem recall, increase hidden dim
-TODO(DONE): Interleaving dataset
-TODO(DONE): PubMed QA context+question+answer concatenation
-TODO(DONE): inspect memory recall to specific segments
-TODO(DONE): Dialated dataset (insert invalid tokens)
-TODO: find a heuristic for dynamic concentration (various sensory memory length) and measure the efficiency
-    (e.g.) if two similar memory embeddings, then reduce concentration.
-TODO: ablation study on # of segments.
-
-TODO(EXTRA): Quantized Llama2-13B GPTQ + QLoRA
-TODO(EXTRA): redo previous experiments for new datasets
-TODO(EXTRA): use long-term memory as a dependency to generate multiple tokens in parallel
-'''
-
-
 # set up logging
 logging_fmt = "[%(levelname)s] (%(asctime)s): %(message)s"
 date_fmt = '%m/%d/%Y %I:%M:%S %p'
@@ -558,7 +536,7 @@ def main():
     print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
     if args.generate and device == torch.device('cuda:0'):
-        with open('hmt_src/harry_potter_full.txt', 'r') as f:
+        with open('hmt_src/lotr.txt', 'r') as f:
             prompt_text = f.read()
 
         encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
