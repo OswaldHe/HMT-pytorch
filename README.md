@@ -1,5 +1,7 @@
 # HMT: Hierarchical Memory Transformer
 
+![hmt](/img/hmt_flow_v2.png)
+
 ## Instructions
 The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). Before using the code, pull this repository and replace or add the files. Then install the dependencies in `requirement.txt`.
 
