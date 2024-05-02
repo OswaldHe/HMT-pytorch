@@ -10,14 +10,14 @@ class CrossAttentionMemory(torch.nn.Module):
         self.dim = dim
         self.hidden_dim = hidden_dim
         
-        self.wq = torch.nn.Linear(self.dim, self.hidden_dim, bias=False)
-        self.wk = torch.nn.Linear(self.dim, self.hidden_dim, bias=False)
+        self.wq = torch.nn.Linear(self.dim, self.hidden_dim, bias=False, dtype=torch.bfloat16)
+        self.wk = torch.nn.Linear(self.dim, self.hidden_dim, bias=False, dtype=torch.bfloat16)
 
     def forward(self, memory, inputs, mode="train", seg_num=0, browse_thres=4):
         if memory is None:
             return None, None, False
-        inputs = inputs.cuda()
-        memory = memory.cuda()
+        inputs = inputs.cuda().bfloat16()
+        memory = memory.cuda().bfloat16()
         batch_size, _, _ = inputs.shape
         xq = self.wq(inputs) # (batch, 1, hidden_dim)
         mk = self.wk(memory) # (batch, mem_len, hidden_dim)
