@@ -1,7 +1,18 @@
 # HMT: Hierarchical Memory Transformer
 
+![hmt](/img/hmt_flow_v2.png)
+
+Hierarchical Memory Transformer (HMT) is a novel framework that enables and improves models' long-context processing ability by imitating human memorization behavior. Leveraging memory-augmented segment-level recurrence, we organize the memory hierarchy by preserving tokens from early input tokens segments, passing memory embeddings along the sequence, and recalling relevant information from history.
+
+## Features
+
+- **Easy to use**: If you pretrained a new LLM and want to augment with HMT, simply push the model checkpoints to huggingface and use the `--model_name` argument to pull your model. 
+- **Command line centric**: To play with different configurations of HMT during training, simply modify the argument in the command line. There is no need to modify the source code.
+- **Memory efficient**: With small and fixed segment length for inputs, HMT can still achieve comparable or better effectiveness than models inferencing with longer context, which consumes more GPU VRAM.
+- **Long context with topic switching**: HMT equiped a memory recall mechanism, which can handle multiple topics in a single long document to filter distractive information.
+
 ## Instructions
-The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). Before using the code, pull this repository and replace or add the files. Then install the dependencies in `requirement.txt`.
+The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). To use HMT, please install the dependencies in `requirement.txt`.
 
 1. Run `accelerate config` based on your cluster configuration. If you use AMD MI210 GPUs, here is an example configuration with DeepSpeed for 4 GPU cluster:
 ```
@@ -38,27 +49,9 @@ accelerate launch hmt_src/main.py --task_name=emozilla/pg19 --use_lora --learnin
 ```
 You can use `--inference_only` flag to only perform inferencing for GPU profiling.
 
-## Reference
-```
-@inproceedings{
-        bulatov2022recurrent,
-        title={Recurrent Memory Transformer},
-        author={Aydar Bulatov and Yuri Kuratov and Mikhail Burtsev},
-        booktitle={Advances in Neural Information Processing Systems},
-        editor={Alice H. Oh and Alekh Agarwal and Danielle Belgrave and Kyunghyun Cho},
-        year={2022},
-        url={https://openreview.net/forum?id=Uynr3iPhksa}
-}
+For more functionalities of HMT, please check `accelerate launch hmt_src/main.py --help`.
 
-@misc{bulatov2023scaling,
-      title={Scaling Transformer to 1M tokens and beyond with RMT}, 
-      author={Aydar Bulatov and Yuri Kuratov and Mikhail S. Burtsev},
-      year={2023},
-      eprint={2304.11062},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
-}
-```
+
 
 
 
