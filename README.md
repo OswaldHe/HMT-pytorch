@@ -8,8 +8,11 @@ Hierarchical Memory Transformer (HMT) is a novel framework that enables and impr
 
 - **Easy to use**: If you pretrained a new LLM and want to augment with HMT, simply push the model checkpoints to huggingface and use the `--model_name` argument to pull your model. 
 - **Command line centric**: To play with different configurations of HMT during training, simply modify the argument in the command line. There is no need to modify the source code.
-- **Memory efficient**: With small and fixed segment length for inputs, HMT can still achieve comparable or better effectiveness than models inferencing with longer context, which consumes more GPU VRAM.
-- **Long context with topic switching**: HMT equiped a memory recall mechanism, which can handle multiple topics in a single long document to filter distractive information.
+- **Memory efficient**: With small and fixed segment lengths for inputs, HMT can still achieve comparable or better effectiveness than models inferencing with longer context, which consumes more GPU VRAM.
+- **Long context with topic switching**: HMT is equipped with a memory recall mechanism, which can handle multiple topics in a single long document to filter distractive information.
+
+## Updates
+The manuscript will be posted on Arxiv soon.
 
 ## Instructions
 The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). To use HMT, please install the dependencies in `requirement.txt`.
