@@ -51,27 +51,7 @@ You can use `--inference_only` flag to only perform inferencing for GPU profilin
 
 For more functionalities of HMT, please check `accelerate launch hmt_src/main.py --help`.
 
-## Reference
-```
-@inproceedings{
-        bulatov2022recurrent,
-        title={Recurrent Memory Transformer},
-        author={Aydar Bulatov and Yuri Kuratov and Mikhail Burtsev},
-        booktitle={Advances in Neural Information Processing Systems},
-        editor={Alice H. Oh and Alekh Agarwal and Danielle Belgrave and Kyunghyun Cho},
-        year={2022},
-        url={https://openreview.net/forum?id=Uynr3iPhksa}
-}
 
-@misc{bulatov2023scaling,
-      title={Scaling Transformer to 1M tokens and beyond with RMT}, 
-      author={Aydar Bulatov and Yuri Kuratov and Mikhail S. Burtsev},
-      year={2023},
-      eprint={2304.11062},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
-}
-```
 
 
 
