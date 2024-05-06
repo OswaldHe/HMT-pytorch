@@ -79,7 +79,7 @@ parser.add_argument('--dilate_len', type=int, default=888, help='number of paddi
 parser.add_argument('--dilate_str', type=str, default='$', help='the token you want to insert to dilate the sample.')
 parser.add_argument('--train_memory_map', action='store_true', default=False, help='train memory projection for dynamic reading speed.')
 parser.add_argument('--inject_autoencoder', action='store_true', default=False, help='use autoencoder to compress/decompress the intermediate embeddings.')
-parser.add_argument('--generate', action='store_true', default=False, help='generate for harry potter book.')
+parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 
 
 torch.manual_seed(3407)
@@ -535,8 +535,8 @@ def main():
 
     print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
-    if args.generate and device == torch.device('cuda:0'):
-        with open('hmt_src/lotr.txt', 'r') as f:
+    if args.generate is not None and device == torch.device('cuda:0'):
+        with open(args.generate, 'r') as f:
             prompt_text = f.read()
 
         encoded_prompt = tokenizer(prompt_text, return_tensors="pt")

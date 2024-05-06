@@ -24,7 +24,13 @@ The manuscript will be posted on Arxiv soon.
 ## Instructions
 The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). To use HMT, please install the dependencies in `requirement.txt`.
 
-1. Run `accelerate config` based on your cluster configuration. If you use AMD MI210 GPUs, here is an example configuration with DeepSpeed for 4 GPU cluster:
+```
+conda create -n hmt python=3.10 -y
+conda activate hmt
+pip install -r requirement.txt
+```
+
+1. Run `accelerate config` and set up the distributed training/evaluation environment based on your cluster configuration. If you use AMD MI210 GPUs, here is an example configuration with DeepSpeed for 4 GPU cluster:
 ```
 - `Accelerate` version: 0.25.0
 - Platform: Linux-5.15.0-91-generic-x86_64-with-glibc2.35
@@ -61,7 +67,11 @@ You can use `--inference_only` flag to only perform inferencing for GPU profilin
 
 For more functionalities of HMT, please check `accelerate launch hmt_src/main.py --help`.
 
+## Author's Note
 
+This work is developed and experimented on AMD GPUs, which is a relatively new attempt considering that a majority of deep learning/natural language processing works use NVIDIA GPUs. It is possible that we can utilize tools that currently do not support ROCm (e.g., FlashAttention, bitsandbytes, etc.) to further optimize memory utilization, inference speed, and effectiveness. If you have any new ideas in improving the HMT framework on AMD/NVIDIA GPUs or new evaluation results using these tools, please don't hesitate creating a Github issue and we will look into it.
+
+If you encounter bugs or have any questions, you can send an email to Zifan (`zifanhe1202@g.ucla.edu`) or submit a Github issue.
 
 
 
