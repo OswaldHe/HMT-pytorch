@@ -14,7 +14,7 @@ import datetime
 from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
 from argparse import ArgumentParser
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, OPTConfig
 from itertools import chain
 from functools import partial
 from torch.utils.data import DataLoader
@@ -104,7 +104,11 @@ def main():
     """### Load model"""
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token) 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token)
-    word_emb_dim = model.config.hidden_size
+    
+    if isinstance(model.config, OPTConfig):
+        word_emb_dim = model.config.word_embed_proj_dim
+    else:
+        word_emb_dim = model.config.hidden_size
 
     if args.inject_autoencoder:
         model = inject_eae(model, word_emb_dim, 16, 2)
@@ -246,7 +250,7 @@ def main():
             # split train set into three subsets
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
         else:
-            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'])
+            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
 
     if args.task_name == 'pubmed_qa':
         # preprocess qa database
@@ -460,7 +464,7 @@ def main():
                 optim.step()
                 if args.lr_decay:
                     scheduler.step()
-                logger.debug(f'loss: {loss.item()}')
+                logger.info(f'loss: {loss.item()}')
                 logger.debug(f'ppl: {out.ppl.item()}')
                 losses.append(loss.detach().item())
 
