@@ -4,6 +4,7 @@ import copy
 import numpy as np
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
+from transformers import OPTConfig
 from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
 from accelerate.logging import get_logger
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -15,14 +16,20 @@ class MemoryCell(torch.nn.Module):
         self.model = base_model
         self.n_prepend = num_prepend
         self.prepend_list = None
-        self.mem_map = MemoryMap(getattr(self.model.config, 'n_embd', self.model.config.hidden_size))
+        if isinstance(self.model.config, OPTConfig):
+            self.mem_map = MemoryMap(getattr(self.model.config, 'n_embd', self.model.config.word_embed_proj_dim))
+        else:
+            self.mem_map = MemoryMap(getattr(self.model.config, 'n_embd', self.model.config.hidden_size))
         self.create_memory(num_mem_tokens)
 
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
         if num_mem_tokens > 0:
-            memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
+            if isinstance(self.model.config, OPTConfig):
+                memory_dim = getattr(self.model.config, 'n_embd', self.model.config.word_embed_proj_dim)
+            else:
+                memory_dim = getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
             memory_weights = torch.randn((num_mem_tokens, memory_dim)) * embeddings.weight.data.std()
             self.register_parameter('memory', torch.nn.Parameter(memory_weights, requires_grad=True))
             # signifier_weights = torch.randn((1, memory_dim)) * embeddings.weight.data.std()
