@@ -21,6 +21,7 @@ Hierarchical Memory Transformer (HMT) is a novel framework that enables and impr
 - `modeling_rmt/language_modeling.py`: The HMT model source code.
 - `modeling_rmt/long_mem_cross_attn.py`: The memory recall module.
 
+
 ## Instructions
 The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). To use HMT, please install the dependencies in `requirement.txt`.
 
