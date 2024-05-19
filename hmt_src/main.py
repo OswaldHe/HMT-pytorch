@@ -61,6 +61,7 @@ parser.add_argument('--rmt_only', action='store_true', default=False, help='trai
 parser.add_argument('--baseline_only', action='store_true', default=False, help='train and evaluate only the backbone model')
 parser.add_argument('--segment_alignment', type=str, default=None, help='alignment of segments in evaluation.')
 parser.add_argument('--hmt_stage_1', action='store_true', default=False, help='stage 1 of HMT to find memory param')
+parser.add_argument('--hmt_stage_2', action='store_true', default=False, help='stage 2 of HMT to find memory param')
 parser.add_argument('--save_ckpt', type=str, default=None, help='store the model checkpoint to the specified directory, only used for HMT')
 parser.add_argument('--load_from_ckpt', type=str, default=None, help='load the checkpoint for HMT stage 2')
 parser.add_argument('--mem_recall_context', type=int, default=100, help='number of memory embeddings cached in memory recall mech.')
@@ -117,6 +118,7 @@ def main():
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False, 
+            # target_modules=['embed_tokens', 'gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj'],
             r=8, 
             lora_alpha=32, 
             lora_dropout=0.1
@@ -249,6 +251,8 @@ def main():
         if args.task_name == 'pubmed_qa':
             # split train set into three subsets
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
+        elif args.task_name == 'suolyer/pile_arxiv':
+            valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['validation', 'test'])
         else:
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
 
@@ -258,20 +262,21 @@ def main():
         valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
         test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
     else:
-        column_names = train_ds.column_names
+        column_names = valid_ds.column_names
         text_column_name = "text" if "text" in column_names else column_names[0]
 
         def tokenize_function(examples):
             return tokenizer(examples[text_column_name])
 
-        train_ds_tok = train_ds.map(
-            tokenize_function,
-            batched=True,
-            batch_size=4,
-            remove_columns=column_names,
-            desc="Running tokenizer on training dataset",
-            num_proc=32
-        )
+        if args.task_name != 'suolyer/pile_arxiv':
+            train_ds_tok = train_ds.map(
+                tokenize_function,
+                batched=True,
+                batch_size=4,
+                remove_columns=column_names,
+                desc="Running tokenizer on training dataset",
+                num_proc=32
+            )
 
         valid_ds_tok = valid_ds.map(
             tokenize_function,
@@ -289,20 +294,26 @@ def main():
             num_proc=32
         )
 
-        train_dataset = train_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
-                                                                batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
+        if args.task_name != 'suolyer/pile_arxiv':
+            train_dataset = train_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
+                                                                    batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
         valid_dataset = valid_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
                                                                 batched=True, desc=f"Grouping valid in chunks of {block_size}")
-
-        train_rnd_generator = torch.Generator()
-        train_rnd_generator.manual_seed(args.seed)
-        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                        shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
         valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
                                                 collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
+        if args.task_name != 'suolyer/pile_arxiv':
+            train_rnd_generator = torch.Generator()
+            train_rnd_generator.manual_seed(args.seed)
+            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                            shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
+        else:
+            train_dataloader = valid_dataloader
         
-        test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
-                                                                batched=True, desc=f"Grouping test in chunks of {block_size}")
+        if args.task_name != 'suolyer/pile_arxiv':
+            test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
+                                                                    batched=True, desc=f"Grouping test in chunks of {block_size}")
+        else:
+            test_dataset = test_ds_tok
         test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                                 collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
@@ -333,7 +344,7 @@ def main():
                                 segment_alignment=args.segment_alignment
                                 )
         else:
-            if args.load_from_ckpt is not None and not args.train_memory_map:
+            if args.load_from_ckpt is not None and args.hmt_stage_2:
                 ori_model = RecurrentWrapper(cell,
                                 segment_size=block_size,
                                 max_n_segments=n_segments,
@@ -357,7 +368,7 @@ def main():
                                 segment_alignment=args.segment_alignment
                                 )
             
-            if args.load_from_ckpt is not None and args.train_memory_map:
+            if args.load_from_ckpt is not None and not args.hmt_stage_2:
                 state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
                 model.load_state_dict(state_dict)
 

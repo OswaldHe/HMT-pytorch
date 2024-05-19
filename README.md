@@ -12,7 +12,7 @@ Hierarchical Memory Transformer (HMT) is a novel framework that enables and impr
 - **Long context with topic switching**: HMT is equipped with a memory recall mechanism, which can handle multiple topics in a single long document to filter distractive information.
 
 ## Updates
-The manuscript will be posted on Arxiv soon.
+**[2024/05/12]**: The paper is available on [Arxiv](https://arxiv.org/abs/2405.06067)
 
 ## Instructions
 The code adapts the recurrent memory transformer repository (https://github.com/booydar/recurrent-memory-transformer). To use HMT, please install the dependencies in `requirement.txt`.
