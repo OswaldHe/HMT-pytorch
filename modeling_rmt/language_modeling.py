@@ -376,6 +376,8 @@ class RecurrentWrapper(torch.nn.Module):
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
 
         labels = kwargs.get('labels')
+        if labels.shape[1] <= mask_size:
+            mask_size = labels.shape[1]-1
         if labels is not None:
             shift_labels = labels[..., -mask_size:].contiguous()
             shift_logits = full_logits[..., -(mask_size+1):-1, :].contiguous()
