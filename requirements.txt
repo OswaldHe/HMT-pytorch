@@ -5,3 +5,8 @@ accelerate
 datasets
 nltk
 six
+matplotlib
+torch
+torchvision
+peft
+tqdm

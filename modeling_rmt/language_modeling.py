@@ -251,10 +251,10 @@ class RecurrentWrapper(torch.nn.Module):
                     with record_function("model_inference"):
                         cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, switch=(switch_at==seg_num), output_hidden_states=True)
                 
-                with open('llama2_profile_dump.txt', 'w') as file:
+                with open('model_profile_dump.txt', 'w') as file:
                     file.write(prof_m.key_averages().table(sort_by="cuda_time_total"))
                 
-                prof_m.export_chrome_trace("llama2_trace.json")
+                prof_m.export_chrome_trace("model_trace.json")
                 exit(0)
             else:
                 cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, switch=(switch_at==seg_num), output_hidden_states=True)
