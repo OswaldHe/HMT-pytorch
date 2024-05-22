@@ -31,6 +31,12 @@ conda activate hmt
 pip install -r requirement.txt
 ```
 
+*For AMD GPUs:* Please install the ROCm version of pytorch
+```
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/rocm5.6
+```
+
+
 1. Run `accelerate config` and set up the distributed training/evaluation environment based on your cluster configuration. If you use AMD MI210 GPUs, here is an example configuration with DeepSpeed for 4 GPU cluster:
 ```
 - `Accelerate` version: 0.25.0
