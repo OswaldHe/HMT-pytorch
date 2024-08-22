@@ -196,6 +196,7 @@ class RecurrentWrapper(torch.nn.Module):
             attention_mask=None, 
             output_attentions=None, 
             output_hidden_states=None, 
+            sum_fraction=0.5,
             segment_size=1022, 
             extra_size=16, 
             mode='train', 
@@ -226,8 +227,8 @@ class RecurrentWrapper(torch.nn.Module):
             if self.cross_attn is not None:
                 s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
                 seg = copy.deepcopy(segment)
-                seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
-                seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
+                seg['input_ids'] = seg['input_ids'][:,:int(round(segment_size * sum_fraction))]
+                seg['attention_mask'] = seg['attention_mask'][:,:int(round(segment_size * sum_fraction))]
                 _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
                 browse_thres = 0
                 if mode == 'test':
