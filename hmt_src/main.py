@@ -47,6 +47,7 @@ parser.add_argument('--seed', type=int, default=3407, help='random seed for trai
 parser.add_argument('--model_name', type=str, default='facebook/opt-2.7b', help='transformer model name for backbone of HMT')
 parser.add_argument('--segment_length', type=int, default=256, help='segment length of HMT')
 parser.add_argument('--bptt_depth', type=int, default=2, help='number of segments unrolled in bptt')
+parser.add_argument('--sum_fraction', type=float, default=0.5, help='fraction of the segment that will be used for representation extraction')
 parser.add_argument('--test_length', type=int, default=2000, help='context length of input to test')
 parser.add_argument('--training_step', type=int, default=500, help='number of training steps')
 parser.add_argument('--eval_step', type=int, default=100, help='number of evaluation steps')
@@ -464,6 +465,7 @@ def main():
             
             else:
                 batch['segment_size'] = block_size
+                batch['sum_fraction'] = args.sum_fraction
                 out, _ = model(**batch)
                 loss = out.loss
                 # logger.debug(f'crl: {loss.item()}')
