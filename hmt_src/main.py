@@ -11,6 +11,8 @@ import math
 import accelerate
 import datetime
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
 from argparse import ArgumentParser
@@ -35,6 +37,30 @@ logging.basicConfig(format=logging_fmt, datefmt=date_fmt, level=logging.INFO)
 setup_logger = logging.getLogger('')
 
 setup_logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
+
+# Create a new logger for the program process
+logger = logging.getLogger('program_process')
+logger.setLevel(logging.INFO)
+
+# Create a file handler
+file_handler = logging.FileHandler('program_process.log')
+file_handler.setLevel(logging.INFO)
+
+# Create a console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Create a formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Set the formatter for both handlers
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add the handlers to the logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
 
 parser = ArgumentParser()
 
@@ -66,7 +92,7 @@ parser.add_argument('--hmt_stage_2', action='store_true', default=False, help='s
 parser.add_argument('--save_ckpt', type=str, default=None, help='store the model checkpoint to the specified directory, only used for HMT')
 parser.add_argument('--load_from_ckpt', type=str, default=None, help='load the checkpoint for HMT stage 2')
 parser.add_argument('--mem_recall_context', type=int, default=100, help='number of memory embeddings cached in memory recall mech.')
-parser.add_argument('--token_file', type=str, default='hmt_src/cred.txt', help='path to the file with Huggingface token. Used for gated model such as Llama2.')
+parser.add_argument('--token_file', type=str, default=None, help='path to the file with Huggingface token. Used for gated model such as Llama2.')
 parser.add_argument('--train_set_split', type=str, default=None, 
         help='slice upper bound of training set to reduce time for tokenization. use percentage notation (e.g., 2%), or integer')
 parser.add_argument('--interleave_dataset', action='store_true', default=False, help='whether mix every two samples in the dataset to create context switching.')
@@ -82,7 +108,7 @@ parser.add_argument('--dilate_str', type=str, default='$', help='the token you w
 parser.add_argument('--train_memory_map', action='store_true', default=False, help='train memory projection for dynamic reading speed.')
 parser.add_argument('--inject_autoencoder', action='store_true', default=False, help='use autoencoder to compress/decompress the intermediate embeddings.')
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
-
+parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 
 torch.manual_seed(3407)
 
@@ -104,8 +130,8 @@ def main():
             token = f.read()
 
     """### Load model"""
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token) 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir='/home/yingqi/scratch/hmt/cache')
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir='/home/yingqi/scratch/hmt/cache')
     
     if isinstance(model.config, OPTConfig):
         word_emb_dim = model.config.word_embed_proj_dim
@@ -236,13 +262,14 @@ def main():
             collated['labels_mask'] = labels_mask
 
         return collated
-
+    # Log the step
+    logger.info("Preparing datasets and dataloaders")
     task_name = args.task_subset
     if args.train_set_split is not None:
-        train_ds = datasets.load_dataset(args.task_name, task_name, split='train', streaming=True)
-        valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=True)
-        test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=True)
-        train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+        train_ds = datasets.load_dataset(args.task_name, task_name, split='train', streaming=args.streaming)
+        valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=args.streaming)
+        test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=args.streaming)
+        # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
         valid_ds = valid_ds.take(int(args.train_set_split))
         test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
@@ -258,11 +285,13 @@ def main():
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
 
     if args.task_name == 'pubmed_qa':
+        logger.info("Preprocessing PubMedQA dataset")
         # preprocess qa database
         train_dataloader = PubMedQA(train_ds, tokenizer, fuse_size=2, batch_size=batch_size, shuffle=True, seed=args.seed)
         valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
         test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
     else:
+        logger.info("Preprocessing other datasets")
         column_names = valid_ds.column_names
         text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -284,7 +313,7 @@ def main():
             batched=True,
             remove_columns=column_names,
             desc="Running tokenizer on valid dataset",
-            num_proc=32
+            num_proc=2
         )
 
         test_ds_tok = test_ds.map(
@@ -292,7 +321,7 @@ def main():
             batched=True,
             remove_columns=column_names,
             desc="Running tokenizer on test dataset",
-            num_proc=32
+            num_proc=2
         )
 
         if args.task_name != 'suolyer/pile_arxiv':
@@ -306,7 +335,7 @@ def main():
             train_rnd_generator = torch.Generator()
             train_rnd_generator.manual_seed(args.seed)
             train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                            shuffle=True, drop_last=False, generator=train_rnd_generator, pin_memory=True)
+                                            shuffle=False, drop_last=False, generator=train_rnd_generator, pin_memory=True)
         else:
             train_dataloader = valid_dataloader
         
@@ -318,7 +347,7 @@ def main():
         test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                                 collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
-
+    logger.info("Preparing memory cell")
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
                     num_mem_tokens=memory_size,
@@ -373,6 +402,7 @@ def main():
                 state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
                 model.load_state_dict(state_dict)
 
+    logger.info("Preparing optimizer")
     from torch.optim import AdamW
     optim = AdamW(params=model.parameters(), lr=args.learning_rate)
     from torch.optim.lr_scheduler import StepLR, LambdaLR
@@ -388,14 +418,21 @@ def main():
     train_steps = args.training_step
     eval_steps = args.eval_step
 
+
+    logger.info("Preparing accelerator")
+    # wrap with accelerate
     model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
         model, optim, train_dataloader, valid_dataloader, scheduler
     )
 
+    logger.info("Preparing generators")
     train_gen = iter(train_dataloader)
     valid_gen = iter(valid_dataloader)
 
+    logger.info("Moving model to device")
     model.to(device)
+
+    logger.info("Setting model to train mode")
     model.train()
 
     block_size_list = [block_size, block_size_2]
@@ -408,50 +445,37 @@ def main():
             else:
                 p.requires_grad = True
 
+
     if not args.inference_only:
+        logger.info("Starting training")
         losses = []
         for step in tqdm.tqdm(range(train_steps)):
+            logger.info("Step: ")
             optim.zero_grad()
 
-            batch = next(train_gen)
-            for k, v in batch.items():
-                batch[k] = v.cpu()
+            # batch = next(train_gen)
+            # for k, v in batch.items():
+            #     batch[k] = v.cpu()
+            for batch in train_dataloader:
+                logger.info(batch)
+                if args.dynamic:
+                    # for i in range(2):
+                    #     batch['segment_size'] = block_size_list[i]
+                    #     if i == 1:
+                    #         batch['mode'] = 'browse'
+                    #     out, _ = model(**batch)
+                    #     loss = out.loss
 
-            if args.dynamic:
-                # for i in range(2):
-                #     batch['segment_size'] = block_size_list[i]
-                #     if i == 1:
-                #         batch['mode'] = 'browse'
-                #     out, _ = model(**batch)
-                #     loss = out.loss
-
-                #     accelerator.backward(loss)
-                #     optim.step()
-                #     if args.lr_decay:
-                #         scheduler.step()
-                #     logger.debug(f'loss: {loss.item()}')
-                #     logger.debug(f'ppl: {out.ppl.item()}')
-                #     losses.append(loss.detach().item())
-                batch['segment_size'] = block_size
-                batch['extra_size'] = args.num_sensory//2
-                batch['mode'] = 'test'
-                out, _ = model(**batch)
-                loss = out.loss
-
-                accelerator.backward(loss)
-                optim.step()
-                if args.lr_decay:
-                    scheduler.step()
-                logger.debug(f'loss: {loss.item()}')
-                logger.debug(f'ppl: {out.ppl.item()}')
-                losses.append(loss.detach().item())
-
-            elif args.train_memory_map:
-                for i in range(args.bptt_depth-1):
-                    optim.zero_grad()
+                    #     accelerator.backward(loss)
+                    #     optim.step()
+                    #     if args.lr_decay:
+                    #         scheduler.step()
+                    #     logger.debug(f'loss: {loss.item()}')
+                    #     logger.debug(f'ppl: {out.ppl.item()}')
+                    #     losses.append(loss.detach().item())
                     batch['segment_size'] = block_size
                     batch['extra_size'] = args.num_sensory//2
-                    batch['switch_at'] = i
+                    batch['mode'] = 'test'
                     out, _ = model(**batch)
                     loss = out.loss
 
@@ -462,24 +486,42 @@ def main():
                     logger.debug(f'loss: {loss.item()}')
                     logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-            
-            else:
-                batch['segment_size'] = block_size
-                batch['sum_fraction'] = args.sum_fraction
-                out, _ = model(**batch)
-                loss = out.loss
-                # logger.debug(f'crl: {loss.item()}')
-                # if args.inject_autoencoder:
-                #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
-                #         loss += (layer.mlp[0].rec_loss)
 
-                accelerator.backward(loss)
-                optim.step()
-                if args.lr_decay:
-                    scheduler.step()
-                logger.info(f'loss: {loss.item()}')
-                logger.debug(f'ppl: {out.ppl.item()}')
-                losses.append(loss.detach().item())
+                elif args.train_memory_map:
+                    for i in range(args.bptt_depth-1):
+                        optim.zero_grad()
+                        batch['segment_size'] = block_size
+                        batch['extra_size'] = args.num_sensory//2
+                        batch['switch_at'] = i
+                        out, _ = model(**batch)
+                        loss = out.loss
+                        # need to use this for loss
+                        accelerator.backward(loss)
+                        optim.step()
+                        if args.lr_decay:
+                            scheduler.step()
+                        logger.debug(f'loss: {loss.item()}')
+                        logger.debug(f'ppl: {out.ppl.item()}')
+                        losses.append(loss.detach().item())
+                
+                else:
+                    logger.info("Batch: ", batch)
+                    batch['segment_size'] = block_size
+                    batch['sum_fraction'] = args.sum_fraction
+                    out, _ = model(**batch)
+                    loss = out.loss
+                    # logger.debug(f'crl: {loss.item()}')
+                    # if args.inject_autoencoder:
+                    #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
+                    #         loss += (layer.mlp[0].rec_loss)
+
+                    accelerator.backward(loss)
+                    optim.step()
+                    if args.lr_decay:
+                        scheduler.step()
+                    logger.info(f'loss: {loss.item()}')
+                    logger.debug(f'ppl: {out.ppl.item()}')
+                    losses.append(loss.detach().item())
 
         accelerator.wait_for_everyone()
         if args.save_ckpt is not None:
