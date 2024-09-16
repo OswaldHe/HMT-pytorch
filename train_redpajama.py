@@ -28,39 +28,8 @@ from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
-
-
-# set up logging
-logging_fmt = "[%(levelname)s] (%(asctime)s): %(message)s"
-date_fmt = '%m/%d/%Y %I:%M:%S %p'
-logging.basicConfig(format=logging_fmt, datefmt=date_fmt, level=logging.INFO)
-setup_logger = logging.getLogger('')
-
-setup_logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
-
-# Create a new logger for the program process
-logger = logging.getLogger('program_process')
-logger.setLevel(logging.INFO)
-
-# Create a file handler
-file_handler = logging.FileHandler('program_process.log')
-file_handler.setLevel(logging.INFO)
-
-# Create a console handler
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-
-# Create a formatter
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# Set the formatter for both handlers
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-
-# Add the handlers to the logger
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
-
+from typing import List
+from accelerate.logging import get_logger
 
 parser = ArgumentParser()
 
@@ -110,21 +79,38 @@ parser.add_argument('--inject_autoencoder', action='store_true', default=False, 
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
+parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
+parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
+parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
+parser.add_argument('--dir_logs', type=str, default='tensorboard_logs', help='Directory to save tensorboard logs')
+parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
+parser.add_argument('--logger_name', type=str, default='redpajama_curriculum', help='Name for the logger')
+parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+
 
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
     yield from iterable_ds
 
+
 def main():
     global torch
 
+    levels = [3, 4, 5, 6, 7, 8] # IMPORTANT: if curriculum is used, there should be a list specifying the number of segments for each level
+
     args = parser.parse_args()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with='wandb')
     device = accelerator.device
-    from accelerate.logging import get_logger
+
     logger = get_logger('')
+    accelerator.init_trackers(
+        project_name=args.logger_name, 
+        config={"dropout": 0.1, "learning_rate": 1e-4},
+        init_kwargs={"wandb": {"entity": args.wandb_entity}}
+    )
 
     token=None
     if args.token_file is not None:
@@ -140,11 +126,17 @@ def main():
     cache_dir = os.environ.get('HF_HOME', '.')
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
-    
+    # May train from scratch with the following config
+    # from transformers import AutoConfig, AutoModel
+    # config = AutoConfig.from_pretrained(args.model_name)
+    # model =  AutoModelForCausalLM.from_config(config)
+
     if isinstance(model.config, OPTConfig):
         word_emb_dim = model.config.word_embed_proj_dim
     else:
         word_emb_dim = model.config.hidden_size
+
+    curriculum = args.curriculum
 
     if args.inject_autoencoder:
         model = inject_eae(model, word_emb_dim, 16, 2)
@@ -162,6 +154,7 @@ def main():
         logger.info(f'Added LoRA, trainable parameters with LoRA only:')
         model.print_trainable_parameters()
 
+    # batch_size, block_size, history_size, mask_size, block_size_2, n_segments
     input_size = args.segment_length
     memory_size = 1
     n_segments = args.bptt_depth
@@ -271,91 +264,144 @@ def main():
 
         return collated
     # Log the step
-    logger.info("Preparing datasets and dataloaders")
+    logger.info("Loading datasets")
     task_name = args.task_subset
     if args.train_set_split is not None:
-        train_ds = datasets.load_dataset(args.task_name, task_name, split='train', streaming=args.streaming, trust_remote_code=True)
-        valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=args.streaming)
-        test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=args.streaming)
+        # remember to change the sizes
+        # train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
+    
         # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-        valid_ds = valid_ds.take(int(args.train_set_split))
-        test_ds = test_ds.take(int(args.train_set_split))
+        # valid_ds = valid_ds.take(int(args.train_set_split))
+        # test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
     else:
-        if args.task_name == 'pubmed_qa':
-            # split train set into three subsets
-            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
-        elif args.task_name == 'suolyer/pile_arxiv':
-            valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['validation', 'test'])
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
+
+    logger.info(f"Tokenizing datasets")
+    column_names = valid_ds.column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    def tokenize_function(examples):
+        return tokenizer(examples[text_column_name])
+
+    # Define the cache directory for tokenized datasets
+    tokenized_datasets_dir = os.path.join(cache_dir, "tokenized")
+    if not os.path.exists(tokenized_datasets_dir):
+        os.makedirs(tokenized_datasets_dir)
+
+    # Function to load or create tokenized dataset
+    def load_or_create_tokenized_dataset(dataset, split):
+        cache_path = os.path.join(tokenized_datasets_dir, f"{args.task_name}_{split}.hf")
+        
+        if os.path.exists(cache_path):
+            logger.info(f"Loading tokenized {split} dataset from cache")
+            return datasets.load_from_disk(cache_path)
         else:
-            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
-
-    if args.task_name == 'pubmed_qa':
-        logger.info("Preprocessing PubMedQA dataset")
-        # preprocess qa database
-        train_dataloader = PubMedQA(train_ds, tokenizer, fuse_size=2, batch_size=batch_size, shuffle=args.shuffle, seed=args.seed)
-        valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
-        test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
-    else:
-        logger.info("Preprocessing other datasets")
-        column_names = valid_ds.column_names
-        text_column_name = "text" if "text" in column_names else column_names[0]
-
-        def tokenize_function(examples):
-            return tokenizer(examples[text_column_name])
-
-        if args.task_name != 'suolyer/pile_arxiv':
-            train_ds_tok = train_ds.map(
+            logger.info(f"Tokenizing {split} dataset")
+            tokenized_dataset = dataset.map(
                 tokenize_function,
                 batched=True,
                 batch_size=4,
                 remove_columns=column_names,
-                desc="Running tokenizer on training dataset",
-                num_proc=8
+                desc=f"Running tokenizer on {split} dataset",
+                num_proc=8 if split == 'train' else 2
             )
+            logger.info(f"Saving tokenized {split} dataset to cache")
+            tokenized_dataset.save_to_disk(cache_path)
+            return tokenized_dataset
 
-        valid_ds_tok = valid_ds.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=column_names,
-            desc="Running tokenizer on valid dataset",
-            num_proc=2
-        )
+    # Load or create tokenized datasets
+    train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
+    valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
+    test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test")
 
-        test_ds_tok = test_ds.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=column_names,
-            desc="Running tokenizer on test dataset",
-            num_proc=2
-        )
+    logger.info(f"Creating dataloaders")
 
-        if args.task_name != 'suolyer/pile_arxiv':
-            train_dataset = train_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
-                                                                    batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = valid_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
-                                                                batched=True, desc=f"Grouping valid in chunks of {block_size}")
-        valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
-                                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-        if args.task_name != 'suolyer/pile_arxiv':
-            train_rnd_generator = torch.Generator()
-            train_rnd_generator.manual_seed(args.seed)
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                            shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
-        else:
-            train_dataloader = valid_dataloader
-        
-        if args.task_name != 'suolyer/pile_arxiv':
-            test_dataset = test_ds_tok.map(lambda x: group_texts(x, args.test_length, block_size),
-                                                                    batched=True, desc=f"Grouping test in chunks of {block_size}")
-        else:
-            test_dataset = test_ds_tok
+    # Define the cache directory for grouped datasets
+    grouped_datasets_dir = os.path.join(os.environ.get('HF_HOME', ''), "grouped")
+    if not os.path.exists(grouped_datasets_dir):
+        os.makedirs(grouped_datasets_dir)
+
+    # Function to load or create grouped dataset
+    def load_or_create_grouped_dataset(dataset, split, history_size, block_size, levels: List[int]=None):
+        if levels is not None:
+            grouped_datasets = []
+            for i,n_segs in enumerate(levels):
+                cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped_seg{n_segs}.hf")
+                if os.path.exists(cache_path):
+                    grouped_datasets.append(datasets.load_from_disk(cache_path))
+                else:
+                    num_data_per_level = len(dataset) // len(levels)
+                    data_subset = dataset.select(range(i * num_data_per_level, (i + 1) * num_data_per_level))
+                    curr_n_segments = n_segs
+                    curr_history_size = (curr_n_segments - 1) * block_size
+
+                    grouped_dataset = data_subset.map(
+                        lambda x: group_texts(x, curr_history_size, block_size),
+                        batched=True,
+                        desc=f"Grouping {split} in chunks of {block_size}, {n_segs} segments, " + (f" and history {history_size}" if split == 'train' else ""),
+                        num_proc=8 if split == 'train' else 4
+                    )
+                    grouped_dataset.save_to_disk(cache_path)
+                    grouped_datasets.append(grouped_dataset)
+            return grouped_datasets
+        else: 
+            cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped.hf")
+            
+            if os.path.exists(cache_path):
+                logger.info(f"Loading grouped {split} dataset from cache")
+                return datasets.load_from_disk(cache_path)
+            else:
+                logger.info(f"Grouping {split} dataset")
+                grouped_dataset = dataset.map(
+                    lambda x: group_texts(x, history_size, block_size),
+                    batched=True,
+                    desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                    num_proc=8 if split == 'train' else 4
+                )
+                logger.info(f"Saving grouped {split} dataset to cache")
+                grouped_dataset.save_to_disk(cache_path)
+                return grouped_dataset
+
+    # Load or create grouped datasets
+    if curriculum:
+        valid_datasets = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size, levels=levels)
+        train_datasets = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size, levels=levels)
+        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
+    else:
+        valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
+        train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
+        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
+
+    # Create dataloaders
+    if curriculum:
+        valid_dataloaders = [DataLoader(valid_dataset, batch_size=batch_size,
+                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True) for valid_dataset in valid_datasets]
+
+        train_rnd_generator = torch.Generator()
+        train_rnd_generator.manual_seed(args.seed)
+        train_dataloaders = [DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True) for train_dataset in train_datasets]
+
         test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+    else:
+        valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
+                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+
+        train_rnd_generator = torch.Generator()
+        train_rnd_generator.manual_seed(args.seed)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
+
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
+                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
 
     logger.info("Preparing memory cell")
+    # NOTE: the cell configurations here should uses the maximum segment config of the curriculum
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
                     num_mem_tokens=memory_size,
@@ -393,14 +439,14 @@ def main():
                 state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
                 ori_model.load_state_dict(state_dict)
                 cell = copy.deepcopy(ori_model.memory_cell)
-
+            logger.info(f'Creating model with max_n_segments: {max(levels)}')
             model = RecurrentWrapper(cell,
                                 emb=copy.deepcopy(model.get_input_embeddings()),
                                 word_emb_dim=word_emb_dim,
                                 hidden_dim=args.mem_recall_hidden_dim,
                                 ltm_context=args.mem_recall_context,
                                 segment_size=block_size,
-                                max_n_segments=n_segments,
+                                max_n_segments=max(levels) if curriculum else n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
                                 segment_alignment=args.segment_alignment
@@ -426,16 +472,27 @@ def main():
     train_steps = args.training_step
     eval_steps = args.eval_step
 
-
     logger.info("Preparing accelerator")
     # wrap with accelerate
-    model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
-        model, optim, train_dataloader, valid_dataloader, scheduler
-    )
+    if not curriculum:
+        model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
+            model, optim, train_dataloader, valid_dataloader, scheduler
+        )
+    else:
+        all_dataloaders = train_dataloaders + valid_dataloaders
+        model, optim, *all_dataloaders, scheduler = accelerator.prepare(
+            model, optim, *all_dataloaders, scheduler
+        )
+        train_dataloaders = all_dataloaders[:len(train_dataloaders)]
+        valid_dataloaders = all_dataloaders[len(train_dataloaders):]
 
     logger.info("Preparing generators")
-    train_gen = iter(train_dataloader)
-    valid_gen = iter(valid_dataloader)
+    if curriculum:
+        train_gens = [iter(train_dataloader) for train_dataloader in train_dataloaders]
+        valid_gens = [iter(valid_dataloader) for valid_dataloader in valid_dataloaders]
+    else:
+        train_gen = iter(train_dataloader)
+        valid_gen = iter(valid_dataloader)
 
     logger.info("Moving model to device")
     model.to(device)
@@ -457,15 +514,20 @@ def main():
     if not args.inference_only:
         logger.info("Starting training")
         losses = []
-        for step in tqdm.tqdm(range(train_steps)):
-            optim.zero_grad()
-
-            batch = next(train_gen)
-            for k, v in batch.items():
-                batch[k] = v.cpu()
-            for batch in train_dataloader:
-                if batch is None:
-                    raise ValueError("Batch is None")
+        level_cnt = 0
+        global_step = 0
+        if not curriculum:
+            train_gens = [train_gen]
+            valid_gens = [valid_gen]
+        for train_gen, valid_gen in zip(train_gens, valid_gens):
+            level_n_segs = levels[level_cnt]
+            logger.info(f'Training level {level_cnt}, {level_n_segs} segments')
+            for step in tqdm.tqdm(range(train_steps)):
+                optim.zero_grad()
+                
+                batch = next(train_gen)
+                # for k, v in batch.items():
+                #     batch[k] = v.cpu()
                 if args.dynamic:
                     # for i in range(2):
                     #     batch['segment_size'] = block_size_list[i]
@@ -494,7 +556,6 @@ def main():
                     # logger.debug(f'loss: {loss.item()}')
                     # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-
                 elif args.train_memory_map:
                     for i in range(args.bptt_depth-1):
                         optim.zero_grad()
@@ -526,14 +587,35 @@ def main():
                     optim.step()
                     if args.lr_decay:
                         scheduler.step()
-                    # logger.info(f'loss: {loss.item()}')
-                    # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-
+                
+                if step % args.save_interval == 0:
+                    torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{step}.pth')
+                
+                if step % args.validation_interval == 0:
+                    valid_losses = []
+                    valid_ppl = []
+                    model.eval()
+                    for _ in range(args.validation_steps):
+                        batch = next(valid_gen)
+                        for k, v in batch.items():
+                            batch[k] = v.cpu()
+                        batch['segment_size'] = block_size
+                        with torch.no_grad():
+                            out, _ = model(**batch)
+                        loss = out.loss
+                        ppl = out.ppl
+                        valid_losses.append(loss.detach().item())
+                        valid_ppl.append(ppl.detach().item())
+                    # Log to wandb by calling `accelerator.log`, `step` is optional
+                    accelerator.log({"CrossEntropy Loss": np.mean(valid_losses), "PPL": np.mean(valid_ppl), "n_segs": levels[level_cnt], }, step=global_step)
+                global_step += 1
+            level_cnt += 1
         accelerator.wait_for_everyone()
+        
         if args.save_ckpt is not None:
             model.save_checkpoint(args.save_ckpt)
-
+        
         plt.plot(losses)
         plt.xlabel('step')
         plt.ylabel('train loss')
@@ -614,6 +696,8 @@ def main():
             temperature = 0.6
         )
         print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+    
+    accelerator.end_training()
 
 if __name__ == "__main__":
     main()

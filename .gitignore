@@ -140,3 +140,8 @@ artifact/
 /datasets/
 *.out
 /hub/
+/tensorboard_logs/
+.deepspeed_env
+/wandb/
+huggingface_token.txt
+/.locks/
