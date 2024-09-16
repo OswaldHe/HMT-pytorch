@@ -13,8 +13,6 @@ else
     exit 1
 fi
 
-accelerate env
-
 cd /home/yingqi/repo/HMT-pytorch
 
 export NCCL_DEBUG=INFO
@@ -29,41 +27,19 @@ export NCCL_DEBUG=INFO
 # # Disable NCCL P2P communication
 # export NCCL_P2P_DISABLE=1
 
+export TORCH_DISTRIBUTED_DEBUG=INFO
 
-# # Training setup
-# export GPUS_PER_NODE=1
-# # so processes know who to talk to
-# export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-# export MASTER_PORT=6000
-# export NNODES=$SLURM_NNODES
-# export NODE_RANK=$SLURM_PROCID 
-# export WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-
-# echo $SLURM_PROCID
-
-# accelerate launch \
-#     --multi_gpu \
-#     --num_machines $NNODES \
-#     --num_processes $WORLD_SIZE \
-#     --main_process_ip "$MASTER_ADDR" \
-#     --main_process_port $MASTER_PORT \
-#     --num_processes $WORLD_SIZE \
-#     --machine_rank $SLURM_PROCID \
-#     --role $SLURMD_NODENAME: \
-#     --max_restarts 0 \
-#     --tee 3 \
-#     tests/test_accelerate.py
-
-export HF_HOME="/home/yingqi/scratch/c01/cache"
 echo "See Cache"
 ls -a $HF_HOME
 echo "find accelerate config"
 ls -a $HF_HOME/accelerate
 
-accelerate launch --debug --num_processes 1 --num_machines 1 /home/yingqi/repo/HMT-pytorch/hmt_src/main.py \
-    --task_subset=wikitext-103-raw-v1 \
+accelerate env
+
+accelerate launch /home/yingqi/repo/HMT-pytorch/hmt_src/main.py \
     --learning_rate=1e-4 \
     --model_name=facebook/opt-350m \
+    --task_subset=wikitext-103-raw-v1 \
     --use_lora \
     --lr_decay \
     --lr_decay_gamma=0.6 \
@@ -73,5 +49,5 @@ accelerate launch --debug --num_processes 1 --num_machines 1 /home/yingqi/repo/H
     --train_set_split=2 \
     --num_seg_save=8 \
     --batch_size=2 \
-    --test_length=30000
-
+    --test_length=30000 \
+    --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt 

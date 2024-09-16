@@ -54,12 +54,10 @@ echo $SLURM_PROCID
 #     --tee 3 \
 #     tests/test_accelerate.py
 
-export HF_HOME="/home/yingqi/scratch/c01/cache"
-
 echo "See Cache"
 ls $HF_HOME
 
-accelerate launch --debug --num_processes 2 --num_machines 1 --machine_rank 0 /home/yingqi/repo/HMT-pytorch/hmt_src/main.py \
+accelerate launch /home/yingqi/repo/HMT-pytorch/hmt_src/main.py \
     --task_subset=wikitext-103-raw-v1 \
     --use_lora \
     --learning_rate=1e-4 \
