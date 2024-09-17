@@ -47,7 +47,8 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/train_redpajama.py \
     --validation_interval=10 \
     --validation_steps=10 \
     --curriculum \
-    --wandb_entity=yic033-ucsd
+    --wandb_entity=yic033-ucsd \
+    --recache_splits=test
 
 # Available model names:
 # meta-llama/Llama-2-7b-hf

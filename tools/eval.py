@@ -29,10 +29,8 @@ from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoin
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
 from typing import List
-import logging
+import logging, shutil
 from accelerate.logging import get_logger
-logging.basicConfig(level=logging.INFO)
-logger = get_logger(__name__)
 
 parser = ArgumentParser()
 
@@ -86,31 +84,35 @@ parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoin
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
 parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
-parser.add_argument('--dir_logs', type=str, default='tensorboard_logs', help='Directory to save tensorboard logs')
 parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
-parser.add_argument('--logger_name', type=str, default='redpajama_curriculum', help='Name for the logger')
+parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-separated list of curriculum levels (number of segments for each level)')
+parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
+parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
     yield from iterable_ds
 
+logging.basicConfig(level=logging.INFO)
+logger = get_logger(__name__)
+
 
 def main():
     global torch
-
-    levels = [3, 4, 5, 6, 7, 8] # IMPORTANT: if curriculum is used, there should be a list specifying the number of segments for each level
 
     args = parser.parse_args()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with='wandb')
     device = accelerator.device
 
+    # Initialize WanDB Tracker
     accelerator.init_trackers(
-        project_name=args.logger_name, 
-        config={"dropout": 0.1, "learning_rate": 1e-4},
-        init_kwargs={"wandb": {"entity": args.wandb_entity}}
+        project_name=args.wandb_project, 
+        config={"dropout": 0.1, "learning_rate": 1e-5},
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": args.wandb_run}}
     )
 
     recache_splits = args.recache_splits.split(',') if args.recache_splits else None
@@ -121,26 +123,22 @@ def main():
         with open(args.token_file, 'r') as f:
             token = f.read()
 
-    """### Clearning CUDA Cache"""
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
-
     """### Load model"""
     cache_dir = os.environ.get('HF_HOME', '.')
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
-    # May train from scratch with the following config
-    # from transformers import AutoConfig, AutoModel
-    # config = AutoConfig.from_pretrained(args.model_name)
-    # model =  AutoModelForCausalLM.from_config(config)
 
     if isinstance(model.config, OPTConfig):
         word_emb_dim = model.config.word_embed_proj_dim
     else:
         word_emb_dim = model.config.hidden_size
 
+
     curriculum = args.curriculum
+    if curriculum and args.curriculum_segs is None:
+        raise ValueError("curriculum_segs must be provided if curriculum is True")
+
+    levels = [int(level) for level in args.curriculum_segs.split(',')]
 
     if args.inject_autoencoder:
         model = inject_eae(model, word_emb_dim, 16, 2)
@@ -273,7 +271,7 @@ def main():
     if args.train_set_split is not None:
         # remember to change the sizes
         # train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[:100]'], streaming=args.streaming, trust_remote_code=True)
+        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:94%]'], streaming=args.streaming, trust_remote_code=True)
     
         # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
         # valid_ds = valid_ds.take(int(args.train_set_split))
@@ -302,9 +300,14 @@ def main():
         os.makedirs(tokenized_datasets_dir)
 
     # Function to load or create tokenized dataset
-    def load_or_create_tokenized_dataset(dataset, split):
+    def load_or_create_tokenized_dataset(dataset, split, recache_splits: List[str]=None):
         cache_path = os.path.join(tokenized_datasets_dir, f"{args.task_name}_{split}.hf")
-        
+        print(recache_splits)
+        if recache_splits is not None and split in recache_splits:
+            if os.path.exists(cache_path):
+                logger.info(f"Deleting existing tokenized {split} dataset cache to recache")
+                shutil.rmtree(cache_path)
+
         if os.path.exists(cache_path):
             logger.info(f"Loading tokenized {split} dataset from cache")
             return datasets.load_from_disk(cache_path)
@@ -325,7 +328,7 @@ def main():
     # Load or create tokenized datasets
     train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
     valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
-    test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test")
+    test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test", recache_splits)
 
     logger.info(f"Creating dataloaders")
 
@@ -340,12 +343,10 @@ def main():
             grouped_datasets = []
             for i,n_segs in enumerate(levels):
                 cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped_seg{n_segs}.hf")
-
                 if recache_splits is not None and split in recache_splits:
                     if os.path.exists(cache_path):
                         logger.info(f"Deleting existing grouped {split} dataset cache to recache")
                         shutil.rmtree(cache_path)
-
                 if os.path.exists(cache_path):
                     grouped_datasets.append(datasets.load_from_disk(cache_path))
                 else:
@@ -363,14 +364,12 @@ def main():
                     grouped_dataset.save_to_disk(cache_path)
                     grouped_datasets.append(grouped_dataset)
             return grouped_datasets
-        else:
+        else: 
             cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped.hf")
-            
             if recache_splits is not None and split in recache_splits:
                 if os.path.exists(cache_path):
                     logger.info(f"Deleting existing grouped {split} dataset cache to recache")
                     shutil.rmtree(cache_path)
-
             if os.path.exists(cache_path):
                 logger.info(f"Loading grouped {split} dataset from cache")
                 return datasets.load_from_disk(cache_path)
@@ -390,11 +389,12 @@ def main():
     if curriculum:
         valid_datasets = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size, levels=levels)
         train_datasets = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size, levels=levels)
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
+        # FIXME: Can try test case of different lengths, 3k, 10k, 60k, 100k
+        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
     else:
         valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
         train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
+        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
 
     # Create dataloaders
     if curriculum:
@@ -421,7 +421,6 @@ def main():
                                     collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
 
     logger.info("Preparing memory cell")
-    # NOTE: the cell configurations here should uses the maximum segment config of the curriculum
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
                     num_mem_tokens=memory_size,
@@ -442,7 +441,7 @@ def main():
         if args.hmt_stage_1:
             model = RecurrentWrapper(cell,
                                 segment_size=block_size,
-                                max_n_segments=n_segments,
+                                max_n_segments=max(levels) if curriculum else n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
                                 segment_alignment=args.segment_alignment
@@ -451,14 +450,20 @@ def main():
             if args.load_from_ckpt is not None and args.hmt_stage_2:
                 ori_model = RecurrentWrapper(cell,
                                 segment_size=block_size,
-                                max_n_segments=n_segments,
+                                max_n_segments=max(levels) if curriculum else n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
                                 segment_alignment=args.segment_alignment
                                 )
-                state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # ori_model.load_state_dict(state_dict)
+                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
+                # Remove the 'module.' prefix from all state dict keys
+                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                state_dict = new_state_dict
                 ori_model.load_state_dict(state_dict)
                 cell = copy.deepcopy(ori_model.memory_cell)
+
             logger.info(f'Creating model with max_n_segments: {max(levels)}')
             model = RecurrentWrapper(cell,
                                 emb=copy.deepcopy(model.get_input_embeddings()),
@@ -473,8 +478,15 @@ def main():
                                 )
             
             if args.load_from_ckpt is not None and not args.hmt_stage_2:
-                state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # checkpoint_dir = os.path.dirname(args.load_from_ckpt)
+                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
+                # Remove the 'module.' prefix from all state dict keys
+                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}  # FIXME: while saving the state dicts while the model is wrapped, all the weights have a model. prefix and needed to be removed when loading. We should fix this by unwrapping before saving. 
+                state_dict = new_state_dict
                 model.load_state_dict(state_dict)
+                # tag = os.path.basename(args.load_from_ckpt)
+                # state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, 'opt-350m')
+                # model.load_state_dict(state_dict)
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
@@ -517,11 +529,6 @@ def main():
     logger.info("Moving model to device")
     model.to(device)
 
-    logger.info("Setting model to train mode")
-    model.train()
-
-    block_size_list = [block_size, block_size_2]
-
     if args.train_memory_map:
         # freeze all params
         for n, p in model.named_parameters():
@@ -530,141 +537,27 @@ def main():
             else:
                 p.requires_grad = True
 
-
-    if not args.inference_only:
-        logger.info("Starting training")
-        losses = []
-        level_cnt = 0
-        global_step = 0
-        if not curriculum:
-            train_gens = [train_gen]
-            valid_gens = [valid_gen]
-        for train_gen, valid_gen in zip(train_gens, valid_gens):
-            level_n_segs = levels[level_cnt]
-            logger.info(f'Training level {level_cnt}, {level_n_segs} segments')
-            for step in tqdm.tqdm(range(train_steps)):
-                optim.zero_grad()
-                
-                batch = next(train_gen)
-                # for k, v in batch.items():
-                #     batch[k] = v.cpu()
-                if args.dynamic:
-                    # for i in range(2):
-                    #     batch['segment_size'] = block_size_list[i]
-                    #     if i == 1:
-                    #         batch['mode'] = 'browse'
-                    #     out, _ = model(**batch)
-                    #     loss = out.loss
-
-                    #     accelerator.backward(loss)
-                    #     optim.step()
-                    #     if args.lr_decay:
-                    #         scheduler.step()
-                    #     logger.debug(f'loss: {loss.item()}')
-                    #     logger.debug(f'ppl: {out.ppl.item()}')
-                    #     losses.append(loss.detach().item())
-                    batch['segment_size'] = block_size
-                    batch['extra_size'] = args.num_sensory//2
-                    batch['mode'] = 'test'
-                    out, _ = model(**batch)
-                    loss = out.loss
-
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    # logger.debug(f'loss: {loss.item()}')
-                    # logger.debug(f'ppl: {out.ppl.item()}')
-                    losses.append(loss.detach().item())
-                elif args.train_memory_map:
-                    for i in range(args.bptt_depth-1):
-                        optim.zero_grad()
-                        batch['segment_size'] = block_size
-                        batch['extra_size'] = args.num_sensory//2
-                        batch['switch_at'] = i
-                        out, _ = model(**batch)
-                        loss = out.loss
-                        # need to use this for loss
-                        accelerator.backward(loss)
-                        optim.step()
-                        if args.lr_decay:
-                            scheduler.step()
-                        # logger.debug(f'loss: {loss.item()}')
-                        # logger.debug(f'ppl: {out.ppl.item()}')
-                        losses.append(loss.detach().item())
-                
-                else:
-                    batch['segment_size'] = block_size
-                    batch['sum_fraction'] = args.sum_fraction
-                    out, _ = model(**batch)
-                    loss = out.loss
-                    # logger.debug(f'crl: {loss.item()}')
-                    # if args.inject_autoencoder:
-                    #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
-                    #         loss += (layer.mlp[0].rec_loss)
-
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    losses.append(loss.detach().item())
-                
-                if step % args.save_interval == 0:
-                    torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{step}.pth')
-                
-                if step % args.validation_interval == 0:
-                    valid_losses = []
-                    valid_ppl = []
-                    model.eval()
-                    for _ in range(args.validation_steps):
-                        batch = next(valid_gen)
-                        for k, v in batch.items():
-                            batch[k] = v.cpu()
-                        batch['segment_size'] = block_size
-                        with torch.no_grad():
-                            out, _ = model(**batch)
-                        loss = out.loss
-                        ppl = out.ppl
-                        valid_losses.append(loss.detach().item())
-                        valid_ppl.append(ppl.detach().item())
-                    # Log to wandb by calling `accelerator.log`, `step` is optional
-                    accelerator.log({"CrossEntropy Loss": np.mean(valid_losses), "PPL": np.mean(valid_ppl), "n_segs": levels[level_cnt], }, step=global_step)
-                global_step += 1
-            level_cnt += 1
-        accelerator.wait_for_everyone()
-        
-        if args.save_ckpt is not None:
-            model.save_checkpoint(args.save_ckpt)
-        
-        plt.plot(losses)
-        plt.xlabel('step')
-        plt.ylabel('train loss')
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        plt.savefig('artifact/loss_' + date_str + '.png')
-        plt.show()
-        plt.close()
-
-    valid_losses = []
-    valid_ppl = []
+    # valid_losses = []
+    # valid_ppl = []
     model.eval()
-    for step in tqdm.tqdm(range(eval_steps)):
-        batch = next(valid_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
-        batch['segment_size'] = block_size
-        # if args.timing:
-        #     batch['prof'] = True
-        with torch.no_grad():
-            out, _ = model(**batch)
-        loss = out.loss
-        ppl = out.ppl
-        logger.debug(f'loss: {loss.item()}')
-        logger.debug(f'ppl: {ppl.item()}')
-        valid_losses.append(loss.detach().item())
-        valid_ppl.append(ppl.detach().item())
+    # for step in tqdm.tqdm(range(eval_steps)):
+    #     batch = next(valid_gen)
+    #     for k, v in batch.items():
+    #         batch[k] = v.cpu()
+    #     batch['segment_size'] = block_size
+    #     # if args.timing:
+    #     #     batch['prof'] = True
+    #     with torch.no_grad():
+    #         out, _ = model(**batch)
+    #     loss = out.loss
+    #     ppl = out.ppl
+    #     logger.debug(f'loss: {loss.item()}')
+    #     logger.debug(f'ppl: {ppl.item()}')
+    #     valid_losses.append(loss.detach().item())
+    #     valid_ppl.append(ppl.detach().item())
 
-    print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
-    print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
+    # print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
+    # print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
 
     test_losses = []
     test_ppl = []
@@ -686,12 +579,14 @@ def main():
             out, hist = model(**batch)
         loss = out.loss
         ppl = out.ppl
+        accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), }, step=step)
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
-        logger.info(f'loss: {loss.item()}')
+        # logger.info(f'loss: {loss.item()}')
         if hist is not None:
             total_hist.extend(hist)
-    
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
         max_d = np.max(total_hist)
         plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=50)
