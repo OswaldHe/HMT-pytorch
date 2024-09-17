@@ -46,7 +46,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/train_redpajama.py \
     --train_set_split=2 \
     --num_seg_save=8 \
     --batch_size=2 \
-    --test_length=30000 \
+    --test_length=10000 \
     --save_dir=/home/yingqi/scratch/c00/checkpoints/rp_opt-350m \
     --save_interval=10 \
     --dir_logs=/home/yingqi/repo/HMT-pytorch/tensorboard_logs \
