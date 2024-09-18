@@ -112,7 +112,7 @@ def main():
     accelerator.init_trackers(
         project_name=args.wandb_project, 
         config={"dropout": 0.1, "learning_rate": 1e-5},
-        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": args.wandb_run}}
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}  # FIXME: Remove the test length, since this will be automated with the script
     )
 
     recache_splits = args.recache_splits.split(',') if args.recache_splits else None
@@ -269,20 +269,14 @@ def main():
     logger.info("Loading datasets")
     task_name = args.task_subset
     if args.train_set_split is not None:
-        # remember to change the sizes
-        # train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:94%]'], streaming=args.streaming, trust_remote_code=True)
+        valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[80%:81%]', 'train[90%:95%]'], streaming=args.streaming, trust_remote_code=True)
     
         # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
         # valid_ds = valid_ds.take(int(args.train_set_split))
         # test_ds = test_ds.take(int(args.train_set_split))
-        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
-        valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
 
         # Print dataset sizes
-        print(f"Train dataset size: {len(train_ds)}")
-        print(f"Validation dataset size: {len(valid_ds)}")
         print(f"Test dataset size: {len(test_ds)}")
     else:
         train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
@@ -326,8 +320,6 @@ def main():
             return tokenized_dataset
 
     # Load or create tokenized datasets
-    train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
-    valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
     test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test", recache_splits)
 
     logger.info(f"Creating dataloaders")
@@ -386,40 +378,11 @@ def main():
                 return grouped_dataset
 
     # Load or create grouped datasets
-    if curriculum:
-        valid_datasets = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size, levels=levels)
-        train_datasets = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size, levels=levels)
-        # FIXME: Can try test case of different lengths, 3k, 10k, 60k, 100k
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
-    else:
-        valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
-        train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
+    test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
 
     # Create dataloaders
-    if curriculum:
-        valid_dataloaders = [DataLoader(valid_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True) for valid_dataset in valid_datasets]
-
-        train_rnd_generator = torch.Generator()
-        train_rnd_generator.manual_seed(args.seed)
-        train_dataloaders = [DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True) for train_dataset in train_datasets]
-
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-    else:
-        valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-
-        train_rnd_generator = torch.Generator()
-        train_rnd_generator.manual_seed(args.seed)
-        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
-
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
+                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
     logger.info("Preparing memory cell")
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
@@ -505,26 +468,9 @@ def main():
     eval_steps = args.eval_step
 
     logger.info("Preparing accelerator")
-    # wrap with accelerate
-    if not curriculum:
-        model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
-            model, optim, train_dataloader, valid_dataloader, scheduler
-        )
-    else:
-        all_dataloaders = train_dataloaders + valid_dataloaders
-        model, optim, *all_dataloaders, scheduler = accelerator.prepare(
-            model, optim, *all_dataloaders, scheduler
-        )
-        train_dataloaders = all_dataloaders[:len(train_dataloaders)]
-        valid_dataloaders = all_dataloaders[len(train_dataloaders):]
-
-    logger.info("Preparing generators")
-    if curriculum:
-        train_gens = [iter(train_dataloader) for train_dataloader in train_dataloaders]
-        valid_gens = [iter(valid_dataloader) for valid_dataloader in valid_dataloaders]
-    else:
-        train_gen = iter(train_dataloader)
-        valid_gen = iter(valid_dataloader)
+    model, optim, test_dataloader, scheduler = accelerator.prepare(
+        model, optim, test_dataloader, scheduler
+    )
 
     logger.info("Moving model to device")
     model.to(device)
@@ -537,27 +483,7 @@ def main():
             else:
                 p.requires_grad = True
 
-    # valid_losses = []
-    # valid_ppl = []
     model.eval()
-    # for step in tqdm.tqdm(range(eval_steps)):
-    #     batch = next(valid_gen)
-    #     for k, v in batch.items():
-    #         batch[k] = v.cpu()
-    #     batch['segment_size'] = block_size
-    #     # if args.timing:
-    #     #     batch['prof'] = True
-    #     with torch.no_grad():
-    #         out, _ = model(**batch)
-    #     loss = out.loss
-    #     ppl = out.ppl
-    #     logger.debug(f'loss: {loss.item()}')
-    #     logger.debug(f'ppl: {ppl.item()}')
-    #     valid_losses.append(loss.detach().item())
-    #     valid_ppl.append(ppl.detach().item())
-
-    # print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
-    # print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
 
     test_losses = []
     test_ppl = []

@@ -145,3 +145,6 @@ artifact/
 /wandb/
 huggingface_token.txt
 /.locks/
+hmt_pretrained
+/tmp_datasets/
+
