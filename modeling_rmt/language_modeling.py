@@ -194,6 +194,7 @@ class RecurrentWrapper(torch.nn.Module):
             labels_mask=None, 
             inputs_embeds=None, 
             attention_mask=None, 
+            mask_size=None,  # Size of the attention mask used to compute the loss, it should be the length of the labels. If it's None, then self.mask_size is used. 
             output_attentions=None, 
             output_hidden_states=None, 
             sum_fraction=0.5,
@@ -287,7 +288,8 @@ class RecurrentWrapper(torch.nn.Module):
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
-                                   output_hidden_states=output_hidden_states)
+                                   output_hidden_states=output_hidden_states,
+                                   mask_size=mask_size)
         return out, total_hist
     
     def generate(self, input_ids, attention_mask, segment_size, **generate_kwargs):
@@ -371,7 +373,7 @@ class RecurrentWrapper(torch.nn.Module):
         return segments
 
     def process_outputs(self, cell_outputs, **kwargs):
-        mask_size = self.rmt_config.get('mask_size')
+        mask_size = kwargs.get('mask_size', self.rmt_config.get('mask_size'))
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])

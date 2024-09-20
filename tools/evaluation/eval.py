@@ -11,8 +11,6 @@ import math
 import accelerate
 import datetime
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
 from argparse import ArgumentParser
@@ -32,7 +30,11 @@ from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
 
+from tools.data_processing.hmt_qa_datasets import load_qa_dataset
+
 parser = ArgumentParser()
+
+qa_tasks = {'deepmind/narrativeqa'}
 
 #cli arguments
 parser.add_argument('--task_name', type=str, default='wikitext', help='training/validation task name (e.g. wikitext, pg19, samsum, etc.)')
@@ -111,8 +113,8 @@ def main():
     # Initialize WanDB Tracker
     accelerator.init_trackers(
         project_name=args.wandb_project, 
-        config={"dropout": 0.1, "learning_rate": 1e-5},
-        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}  # FIXME: Remove the test length, since this will be automated with the script
+        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "test_length": args.test_length},
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
     recache_splits = args.recache_splits.split(',') if args.recache_splits else None
@@ -244,6 +246,7 @@ def main():
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
+        result["mask_size"] = [len(label) for label in result["labels"]]  # Group multiple segments and then shall the mask size being determined like this? 
         return result
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -255,9 +258,17 @@ def main():
         labels = pad_sequence(labels, padding_value=-100).T.flip(1)
         attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
 
-        collated = {'input_ids': input_ids,
-                    'labels': labels,
-                    'attention_mask': attention_mask}
+        assert args.task_name in qa_tasks and batch_size == 1, "QA Tasks currently only support batch_size = 1 and batches can't be collated"
+
+        if args.task_name in qa_tasks:
+            collated = {'input_ids': input_ids,
+                        'labels': labels,
+                        'attention_mask': attention_mask,
+                        'mask_size': torch.tensor(batch[0]['mask_size']) }
+        else:
+            collated = {'input_ids': input_ids,
+                        'labels': labels,
+                        'attention_mask': attention_mask}
 
         if input_ids.shape[1] != block_size:
             labels_mask = torch.ones_like(input_ids, dtype=bool)
@@ -265,25 +276,21 @@ def main():
             collated['labels_mask'] = labels_mask
 
         return collated
+    
     # Log the step
     logger.info("Loading datasets")
-    task_name = args.task_subset
-    if args.train_set_split is not None:
-        valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[80%:81%]', 'train[90%:95%]'], streaming=args.streaming, trust_remote_code=True)
-    
-        # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-        # valid_ds = valid_ds.take(int(args.train_set_split))
-        # test_ds = test_ds.take(int(args.train_set_split))
+    if args.task_name == 'deepmind/narrativeqa':
+        test_ds = load_qa_dataset('deepmind/narrativeqa', split='test[:100]', streaming=args.streaming, trust_remote_code=True)
+    else:
+        test_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train[80%:81%]'], streaming=args.streaming, trust_remote_code=True)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
 
-        # Print dataset sizes
-        print(f"Test dataset size: {len(test_ds)}")
-    else:
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
+    # Print dataset sizes
+    print(f"Test dataset size: {len(test_ds)}")
 
     logger.info(f"Tokenizing datasets")
-    column_names = valid_ds.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
+    column_names = test_ds.column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]  # Taking the text column as the input column
 
     def tokenize_function(examples):
         return tokenizer(examples[text_column_name])
@@ -296,7 +303,6 @@ def main():
     # Function to load or create tokenized dataset
     def load_or_create_tokenized_dataset(dataset, split, recache_splits: List[str]=None):
         cache_path = os.path.join(tokenized_datasets_dir, f"{args.task_name}_{split}.hf")
-        print(recache_splits)
         if recache_splits is not None and split in recache_splits:
             if os.path.exists(cache_path):
                 logger.info(f"Deleting existing tokenized {split} dataset cache to recache")
@@ -383,6 +389,7 @@ def main():
     # Create dataloaders
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                 collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+
     logger.info("Preparing memory cell")
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
@@ -464,8 +471,6 @@ def main():
     else:
         scheduler = StepLR(optim, step_size=100, gamma=1.0)
 
-    train_steps = args.training_step
-    eval_steps = args.eval_step
 
     logger.info("Preparing accelerator")
     model, optim, test_dataloader, scheduler = accelerator.prepare(
