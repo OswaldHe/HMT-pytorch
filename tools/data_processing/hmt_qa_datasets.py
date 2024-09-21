@@ -26,6 +26,7 @@ def prepare_narrativeqa_dataset(dataset: Union[datasets.Dataset, tuple[datasets.
     prompt = "Prompt: Answer the question based on the provided document."
     question_delimiter = "Question: "
     context_delimiter = "Document: "
+    answer_delimiter = "Answer: "
     prepared_data = []
 
     if isinstance(dataset, datasets.Dataset):
@@ -37,9 +38,9 @@ def prepare_narrativeqa_dataset(dataset: Union[datasets.Dataset, tuple[datasets.
         The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
         """
         return {
-            "text": [f"{prompt}\n{question_delimiter}{entry[0]['text']}\n{context_delimiter}{entry[1]['text']}" for entry in zip(dataset['question'], dataset['document'])],
-            "labels": [entry[0]['text'] for entry in dataset['answers']],
-            "labels_length": [len(entry[0]['text']) for entry in dataset['answers']]
+            "text": [f"{prompt}\n{question_delimiter}{entry[0]['text']}\n{context_delimiter}{entry[1]['text']}\n{answer_delimiter}{entry[2][0]['text']}" for entry in zip(dataset['question'], dataset['document'], dataset['answers'])],
+            "answers": [f""]
+            "answer_length": [len(entry[0]['text']) for entry in dataset['answers']]
         }
     
     prepared_data = ()

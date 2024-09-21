@@ -150,3 +150,5 @@ hmt_pretrained
 
 tools/data_preprocessing.ipynb
 debug.ipynb
+debug_dump/
+saved_datasets/

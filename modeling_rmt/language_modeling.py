@@ -9,6 +9,10 @@ from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
 from accelerate.logging import get_logger
 from torch.profiler import profile, record_function, ProfilerActivity
 import random
+import evaluate
+
+# from tools.debug.dump import DebugDumper
+# dumper = DebugDumper()
 
 class MemoryCell(torch.nn.Module):
     def __init__(self, base_model, num_mem_tokens, num_prepend):
@@ -187,6 +191,9 @@ class RecurrentWrapper(torch.nn.Module):
             self.cross_attn = CrossAttentionMemory(word_emb_dim, hidden_dim)
         else:
             self.cross_attn = None
+        
+        self.rouge = evaluate.load('rouge')
+        self.f1 = evaluate.load("f1")
 
     def forward(self, 
             input_ids, 
@@ -210,10 +217,11 @@ class RecurrentWrapper(torch.nn.Module):
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
-        if self.rmt_config.get('is_qa_task'):
-            n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
-        else:
-            n_cell_out = self.rmt_config.get('n_cell_out')
+        # if self.rmt_config.get('is_qa_task'):
+        #     n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
+        # else:
+        #     n_cell_out = self.rmt_config.get('n_cell_out')
+        n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
 
         total_hist = []
@@ -286,7 +294,7 @@ class RecurrentWrapper(torch.nn.Module):
             seg_num+=1
         
         
-        self.logger.info('read ' + str(browse_count * 16) + ' tokens faster.')
+        # self.logger.info('read ' + str(browse_count * 16) + ' tokens faster.')
 
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
@@ -381,6 +389,9 @@ class RecurrentWrapper(torch.nn.Module):
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
 
+        # dumper.store('labels', kwargs.get('labels'))
+        # dumper.store('labels_mask', kwargs.get('labels_mask'))
+
         labels = kwargs.get('labels')
         if labels.shape[1] <= mask_size:
             mask_size = labels.shape[1]-1
@@ -393,6 +404,7 @@ class RecurrentWrapper(torch.nn.Module):
             loss_fct = CrossEntropyLoss()
             out['loss'] = loss_fct(flat_logits.cuda(), flat_labels.cuda())
             out['ppl'] = torch.exp(out['loss'])
+            # out['f1'] = self.f1.compute(references=flat_labels, something)
         else:
             out['loss'] = 0
             out['ppl'] = 0
@@ -404,6 +416,10 @@ class RecurrentWrapper(torch.nn.Module):
         if kwargs.get('output_hidden_states'):
             segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states
+        
+        # dumper.store_no_step('full_logits', full_logits)
+        # dumper.store_no_step('flat_logits', flat_logits)
+        # dumper.store_no_step('flat_labels', flat_labels)
 
         for seg_num, o in enumerate(cell_outputs):
             for key, value in o.items():

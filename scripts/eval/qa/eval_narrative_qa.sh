@@ -60,7 +60,7 @@ for test_length in "${test_lengths[@]}"; do
             --segment_length=1024 \
             --bptt_depth=6 \
             --train_set_split=2 \
-            --num_seg_save=20 \
+            --num_seg_save=8 \
             --batch_size=1 \
             --test_length=${test_length} \
             --test_step=100 \
