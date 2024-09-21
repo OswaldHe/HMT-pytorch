@@ -113,7 +113,7 @@ def main():
     # Initialize WanDB Tracker
     accelerator.init_trackers(
         project_name=args.wandb_project, 
-        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "test_length": args.test_length},
+        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "test_length": args.test_length, "checkpoint": os.path.basename(args.load_from_ckpt)},
         init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
@@ -234,7 +234,6 @@ def main():
             examples = dilated_sample(examples, args.dilate_len, args.dilate_len, args.dilate_str)
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
-
         if history_size is None:
             result = {
                 k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
@@ -246,7 +245,13 @@ def main():
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
-        result["mask_size"] = [len(label) for label in result["labels"]]  # Group multiple segments and then shall the mask size being determined like this? 
+        result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
+        return result
+    
+    def group_texts_qa(examples):
+        result = {k: v for k, v in examples.items()}
+        result["labels"] = result["input_ids"].copy()
+        result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
         return result
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -258,7 +263,8 @@ def main():
         labels = pad_sequence(labels, padding_value=-100).T.flip(1)
         attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
 
-        assert args.task_name in qa_tasks and batch_size == 1, "QA Tasks currently only support batch_size = 1 and batches can't be collated"
+        if args.task_name in qa_tasks:
+            assert batch_size == 1, "QA Tasks currently only support batch_size = 1 and batches can't be collated"
 
         if args.task_name in qa_tasks:
             collated = {'input_ids': input_ids,
@@ -280,7 +286,7 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        test_ds = load_qa_dataset('deepmind/narrativeqa', split='test[:100]', streaming=args.streaming, trust_remote_code=True)
+        test_ds = load_qa_dataset('deepmind/narrativeqa', split='test[:' + str(args.test_step) + ']', streaming=args.streaming, trust_remote_code=True)
     else:
         test_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train[80%:81%]'], streaming=args.streaming, trust_remote_code=True)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
@@ -368,22 +374,29 @@ def main():
                 if os.path.exists(cache_path):
                     logger.info(f"Deleting existing grouped {split} dataset cache to recache")
                     shutil.rmtree(cache_path)
-            if os.path.exists(cache_path):
+            if os.path.exists(cache_path):  # if the grouped dataset is found cached, then skip re-grouping
                 logger.info(f"Loading grouped {split} dataset from cache")
                 return datasets.load_from_disk(cache_path)
             else:
                 logger.info(f"Grouping {split} dataset")
-                grouped_dataset = dataset.map(
-                    lambda x: group_texts(x, history_size, block_size),
-                    batched=True,
-                    desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
-                    num_proc=8
-                )
+                if args.task_name in qa_tasks:
+                    grouped_dataset = dataset.map(
+                        lambda x: group_texts_qa(x),
+                        batched=True,
+                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                        num_proc=8
+                    )
+                else:
+                    grouped_dataset = dataset.map(
+                        lambda x: group_texts(x, history_size, block_size),
+                        batched=True,
+                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                        num_proc=8
+                    )
                 logger.info(f"Saving grouped {split} dataset to cache")
                 grouped_dataset.save_to_disk(cache_path)
                 return grouped_dataset
 
-    # Load or create grouped datasets
     test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
 
     # Create dataloaders
@@ -444,7 +457,8 @@ def main():
                                 max_n_segments=max(levels) if curriculum else n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment
+                                segment_alignment=args.segment_alignment,
+                                is_qa_task=args.task_name in qa_tasks
                                 )
             
             if args.load_from_ckpt is not None and not args.hmt_stage_2:
@@ -495,7 +509,7 @@ def main():
     total_hist = []
 
     test_gen = iter(test_dataloader)
-
+    # Start Testing
     for step in tqdm.tqdm(range(args.test_step)):
         batch = next(test_gen)
         for k, v in batch.items():
