@@ -251,7 +251,7 @@ def main():
     def group_texts_qa(examples):
         result = {k: v for k, v in examples.items()}
         result["labels"] = result["input_ids"].copy()
-        result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
+        result["mask_size"] = result["answer_length"].copy()  # qa tasks should not be grouped
         return result
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -323,7 +323,7 @@ def main():
                 tokenize_function,
                 batched=True,
                 batch_size=4,
-                remove_columns=column_names,
+                remove_columns=[col for col in column_names if col != "answer_length"] if args.task_name in qa_tasks else column_names,
                 desc=f"Running tokenizer on {split} dataset",
                 num_proc=8
             )
@@ -333,6 +333,13 @@ def main():
 
     # Load or create tokenized datasets
     test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test", recache_splits)
+
+    # >>> DEBUG >>>
+    # Save the tokenized test dataset to a file
+    save_path = os.path.join("/home/yingqi/repo/HMT-pytorch/saved_datasets", f"{args.task_name}_test_tokenized.arrow")
+    logger.info(f"Saving tokenized test dataset to {save_path}")
+    test_ds_tok.save_to_disk(save_path)
+    # <<< DEBUG <<<
 
     logger.info(f"Creating dataloaders")
 
@@ -384,6 +391,7 @@ def main():
                         lambda x: group_texts_qa(x),
                         batched=True,
                         desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                        remove_columns=['answer_length'] if args.task_name in qa_tasks else None,
                         num_proc=8
                     )
                 else:
@@ -399,10 +407,17 @@ def main():
 
     test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size, recache_splits=recache_splits)
 
+    # >>> DEBUG >>>
+    # Save the grouped test dataset to a file
+    save_path = os.path.join("/home/yingqi/repo/HMT-pytorch/saved_datasets", f"{args.task_name}_test_grouped.arrow")
+    logger.info(f"Saving grouped test dataset to {save_path}")
+    test_dataset.save_to_disk(save_path)
+    # <<< DEBUG <<<
+
     # Create dataloaders
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
                                 collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-
+    
     logger.info("Preparing memory cell")
     if args.rmt_only or args.baseline_only:
         cell = MemoryCell(model, 
@@ -508,7 +523,25 @@ def main():
     test_ppl = []
     total_hist = []
 
+    from tools.debug import DebugDumper
+    dumper = DebugDumper(dump_dir='/home/yingqi/repo/HMT-pytorch/debug_dump')
+
+
+    # # >>> DEBUG >>>
+    # # Save the dataloader to a file
+    # test_gen = iter(test_dataloader)
+    # all_elements = []
+    # for batch in test_gen:
+    #     all_elements.append(batch)
+    
+    # import torch
+    # save_path = os.path.join("/home/yingqi/repo/HMT-pytorch/saved_datasets", f"{args.task_name}_test_dataloader.pt")
+    # logger.info(f"Saving dataloader elements to {save_path}")
+    # torch.save(all_elements, save_path)
+    # # <<< DEBUG <<<
+
     test_gen = iter(test_dataloader)
+
     # Start Testing
     for step in tqdm.tqdm(range(args.test_step)):
         batch = next(test_gen)
@@ -522,6 +555,8 @@ def main():
             batch['prof'] = True
         with torch.no_grad():
             out, hist = model(**batch)
+        # dumper.store('out', out, step=step)
+        # dumper.store('hist', hist, step=step)
         loss = out.loss
         ppl = out.ppl
         accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), }, step=step)
@@ -530,6 +565,8 @@ def main():
         # logger.info(f'loss: {loss.item()}')
         if hist is not None:
             total_hist.extend(hist)
+
+    dumper.dump_to_file()
 
     date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
