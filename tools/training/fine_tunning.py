@@ -11,8 +11,6 @@ import math
 import accelerate
 import datetime
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
 from argparse import ArgumentParser
@@ -29,14 +27,14 @@ from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoin
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
 from typing import List
-import logging
+import logging, shutil
 from accelerate.logging import get_logger
-logging.basicConfig(level=logging.INFO)
-logger = get_logger(__name__)
 
-# FIXME: This script doesn't have the functionality for fine tunning the QA dataset yet. 
+from tools.data_processing.hmt_qa_datasets import load_qa_dataset
 
 parser = ArgumentParser()
+
+qa_tasks = {'deepmind/narrativeqa'}
 
 #cli arguments
 parser.add_argument('--task_name', type=str, default='wikitext', help='training/validation task name (e.g. wikitext, pg19, samsum, etc.)')
@@ -88,31 +86,35 @@ parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoin
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
 parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
-parser.add_argument('--dir_logs', type=str, default='tensorboard_logs', help='Directory to save tensorboard logs')
-parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
-parser.add_argument('--logger_name', type=str, default='redpajama_curriculum', help='Name for the logger')
+# parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
+# parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-separated list of curriculum levels (number of segments for each level)')
+parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
+parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
     yield from iterable_ds
 
+logging.basicConfig(level=logging.INFO)
+logger = get_logger(__name__)
+
 
 def main():
     global torch
-
-    levels = [3, 4, 5, 6, 7, 8] # IMPORTANT: if curriculum is used, there should be a list specifying the number of segments for each level
 
     args = parser.parse_args()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with='wandb')
     device = accelerator.device
 
+    # Initialize WanDB Tracker
     accelerator.init_trackers(
-        project_name=args.logger_name, 
-        config={"dropout": 0.1, "learning_rate": 1e-4},
-        init_kwargs={"wandb": {"entity": args.wandb_entity}}
+        project_name=args.wandb_project, 
+        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "test_length": args.test_length, "checkpoint": os.path.basename(args.load_from_ckpt)},
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
     recache_splits = args.recache_splits.split(',') if args.recache_splits else None
@@ -123,26 +125,15 @@ def main():
         with open(args.token_file, 'r') as f:
             token = f.read()
 
-    """### Clearning CUDA Cache"""
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
-
     """### Load model"""
     cache_dir = os.environ.get('HF_HOME', '.')
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
-    # May train from scratch with the following config
-    # from transformers import AutoConfig, AutoModel
-    # config = AutoConfig.from_pretrained(args.model_name)
-    # model =  AutoModelForCausalLM.from_config(config)
 
     if isinstance(model.config, OPTConfig):
         word_emb_dim = model.config.word_embed_proj_dim
     else:
         word_emb_dim = model.config.hidden_size
-
-    curriculum = args.curriculum
 
     if args.inject_autoencoder:
         model = inject_eae(model, word_emb_dim, 16, 2)
@@ -236,7 +227,6 @@ def main():
             examples = dilated_sample(examples, args.dilate_len, args.dilate_len, args.dilate_str)
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
-
         if history_size is None:
             result = {
                 k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
@@ -248,6 +238,13 @@ def main():
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
+        result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
+        return result
+    
+    def group_texts_qa(examples):
+        result = {k: v for k, v in examples.items()}
+        result["labels"] = result["input_ids"].copy()
+        result["mask_size"] = result["answer_length"].copy()  # qa tasks should not be grouped
         return result
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -259,9 +256,18 @@ def main():
         labels = pad_sequence(labels, padding_value=-100).T.flip(1)
         attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
 
-        collated = {'input_ids': input_ids,
-                    'labels': labels,
-                    'attention_mask': attention_mask}
+        if args.task_name in qa_tasks:
+            assert batch_size == 1, "QA Tasks currently only support batch_size = 1 and batches can't be collated"
+
+        if args.task_name in qa_tasks:
+            collated = {'input_ids': input_ids,
+                        'labels': labels,
+                        'attention_mask': attention_mask,
+                        'mask_size': torch.tensor(batch[0]['mask_size']) }
+        else:
+            collated = {'input_ids': input_ids,
+                        'labels': labels,
+                        'attention_mask': attention_mask}
 
         if input_ids.shape[1] != block_size:
             labels_mask = torch.ones_like(input_ids, dtype=bool)
@@ -269,31 +275,21 @@ def main():
             collated['labels_mask'] = labels_mask
 
         return collated
+    
     # Log the step
     logger.info("Loading datasets")
-    task_name = args.task_subset
-    if args.train_set_split is not None:
-        # remember to change the sizes
-        # train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[:100]'], streaming=args.streaming, trust_remote_code=True)
-    
-        # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-        # valid_ds = valid_ds.take(int(args.train_set_split))
-        # test_ds = test_ds.take(int(args.train_set_split))
-        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
-        valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
-        test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
-
-        # Print dataset sizes
-        print(f"Train dataset size: {len(train_ds)}")
-        print(f"Validation dataset size: {len(valid_ds)}")
-        print(f"Test dataset size: {len(test_ds)}")
+    if args.task_name == 'deepmind/narrativeqa':
+        train_ds, valid_ds = load_qa_dataset('deepmind/narrativeqa', split=['train', 'validation'], streaming=args.streaming, trust_remote_code=True, max_context_length=75000)
+        # Print number of validation and train datapoints
+        logger.info(f"Number of training datapoints: {len(train_ds)}")
+        logger.info(f"Number of validation datapoints: {len(valid_ds)}")
     else:
-        train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
+        train_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train'], streaming=args.streaming, trust_remote_code=True)
+        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
 
     logger.info(f"Tokenizing datasets")
-    column_names = valid_ds.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
+    column_names = train_ds.column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]  # Taking the text column as the input column
 
     def tokenize_function(examples):
         return tokenizer(examples[text_column_name])
@@ -304,9 +300,13 @@ def main():
         os.makedirs(tokenized_datasets_dir)
 
     # Function to load or create tokenized dataset
-    def load_or_create_tokenized_dataset(dataset, split):
+    def load_or_create_tokenized_dataset(dataset, split, recache_splits: List[str]=None):
         cache_path = os.path.join(tokenized_datasets_dir, f"{args.task_name}_{split}.hf")
-        
+        if recache_splits is not None and split in recache_splits:
+            if os.path.exists(cache_path):
+                logger.info(f"Deleting existing tokenized {split} dataset cache to recache")
+                shutil.rmtree(cache_path)
+
         if os.path.exists(cache_path):
             logger.info(f"Loading tokenized {split} dataset from cache")
             return datasets.load_from_disk(cache_path)
@@ -316,9 +316,9 @@ def main():
                 tokenize_function,
                 batched=True,
                 batch_size=4,
-                remove_columns=column_names,
+                remove_columns=[col for col in column_names if col != "answer_length"] if args.task_name in qa_tasks else column_names,
                 desc=f"Running tokenizer on {split} dataset",
-                num_proc=8
+                num_proc=16
             )
             logger.info(f"Saving tokenized {split} dataset to cache")
             tokenized_dataset.save_to_disk(cache_path)
@@ -327,7 +327,6 @@ def main():
     # Load or create tokenized datasets
     train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
     valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
-    test_ds_tok = load_or_create_tokenized_dataset(test_ds, "test")
 
     logger.info(f"Creating dataloaders")
 
@@ -342,12 +341,10 @@ def main():
             grouped_datasets = []
             for i,n_segs in enumerate(levels):
                 cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped_seg{n_segs}.hf")
-
                 if recache_splits is not None and split in recache_splits:
                     if os.path.exists(cache_path):
                         logger.info(f"Deleting existing grouped {split} dataset cache to recache")
                         shutil.rmtree(cache_path)
-
                 if os.path.exists(cache_path):
                     grouped_datasets.append(datasets.load_from_disk(cache_path))
                 else:
@@ -365,62 +362,49 @@ def main():
                     grouped_dataset.save_to_disk(cache_path)
                     grouped_datasets.append(grouped_dataset)
             return grouped_datasets
-        else:
+        else: 
             cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped.hf")
-            
             if recache_splits is not None and split in recache_splits:
                 if os.path.exists(cache_path):
                     logger.info(f"Deleting existing grouped {split} dataset cache to recache")
                     shutil.rmtree(cache_path)
-
-            if os.path.exists(cache_path):
+            if os.path.exists(cache_path):  # if the grouped dataset is found cached, then skip re-grouping
                 logger.info(f"Loading grouped {split} dataset from cache")
                 return datasets.load_from_disk(cache_path)
             else:
                 logger.info(f"Grouping {split} dataset")
-                grouped_dataset = dataset.map(
-                    lambda x: group_texts(x, history_size, block_size),
-                    batched=True,
-                    desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
-                    num_proc=8
-                )
+                if args.task_name in qa_tasks:
+                    grouped_dataset = dataset.map(
+                        lambda x: group_texts_qa(x),
+                        batched=True,
+                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                        remove_columns=['answer_length'] if args.task_name in qa_tasks else None,
+                        num_proc=16
+                    )
+                else:
+                    grouped_dataset = dataset.map(
+                        lambda x: group_texts(x, history_size, block_size),
+                        batched=True,
+                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                        num_proc=16
+                    )
                 logger.info(f"Saving grouped {split} dataset to cache")
                 grouped_dataset.save_to_disk(cache_path)
                 return grouped_dataset
 
     # Load or create grouped datasets
-    if curriculum:
-        valid_datasets = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size, levels=levels)
-        train_datasets = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size, levels=levels)
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
-    else:
-        valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
-        train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
-        test_dataset = load_or_create_grouped_dataset(test_ds_tok, "test", args.test_length, block_size)
+    valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
+    train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
 
     # Create dataloaders
-    if curriculum:
-        valid_dataloaders = [DataLoader(valid_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True) for valid_dataset in valid_datasets]
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
+                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
 
-        train_rnd_generator = torch.Generator()
-        train_rnd_generator.manual_seed(args.seed)
-        train_dataloaders = [DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True) for train_dataset in train_datasets]
+    train_rnd_generator = torch.Generator()
+    train_rnd_generator.manual_seed(args.seed)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+                                shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
 
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-    else:
-        valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-
-        train_rnd_generator = torch.Generator()
-        train_rnd_generator.manual_seed(args.seed)
-        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
-
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                    collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
 
     logger.info("Preparing memory cell")
     # NOTE: the cell configurations here should uses the maximum segment config of the curriculum
@@ -458,25 +442,37 @@ def main():
                                 n_cell_out=args.num_seg_save,
                                 segment_alignment=args.segment_alignment
                                 )
-                state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # ori_model.load_state_dict(state_dict)
+                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
+                # Remove the 'module.' prefix from all state dict keys
+                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                state_dict = new_state_dict
                 ori_model.load_state_dict(state_dict)
                 cell = copy.deepcopy(ori_model.memory_cell)
-            logger.info(f'Creating model with max_n_segments: {max(levels)}')
             model = RecurrentWrapper(cell,
                                 emb=copy.deepcopy(model.get_input_embeddings()),
                                 word_emb_dim=word_emb_dim,
                                 hidden_dim=args.mem_recall_hidden_dim,
                                 ltm_context=args.mem_recall_context,
                                 segment_size=block_size,
-                                max_n_segments=max(levels) if curriculum else n_segments,
+                                max_n_segments=n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment
+                                segment_alignment=args.segment_alignment,
+                                is_qa_task=args.task_name in qa_tasks
                                 )
             
             if args.load_from_ckpt is not None and not args.hmt_stage_2:
-                state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+                # checkpoint_dir = os.path.dirname(args.load_from_ckpt)
+                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
+                # Remove the 'module.' prefix from all state dict keys
+                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}  # FIXME: while saving the state dicts while the model is wrapped, all the weights have a model. prefix and needed to be removed when loading. We should fix this by unwrapping before saving. 
+                state_dict = new_state_dict
                 model.load_state_dict(state_dict)
+                # tag = os.path.basename(args.load_from_ckpt)
+                # state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, 'opt-350m')
+                # model.load_state_dict(state_dict)
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
@@ -496,25 +492,13 @@ def main():
 
     logger.info("Preparing accelerator")
     # wrap with accelerate
-    if not curriculum:
-        model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
-            model, optim, train_dataloader, valid_dataloader, scheduler
-        )
-    else:
-        all_dataloaders = train_dataloaders + valid_dataloaders
-        model, optim, *all_dataloaders, scheduler = accelerator.prepare(
-            model, optim, *all_dataloaders, scheduler
-        )
-        train_dataloaders = all_dataloaders[:len(train_dataloaders)]
-        valid_dataloaders = all_dataloaders[len(train_dataloaders):]
+    model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
+        model, optim, train_dataloader, valid_dataloader, scheduler
+    )
+
 
     logger.info("Preparing generators")
-    if curriculum:
-        train_gens = [iter(train_dataloader) for train_dataloader in train_dataloaders]
-        valid_gens = [iter(valid_dataloader) for valid_dataloader in valid_dataloaders]
-    else:
-        train_gen = iter(train_dataloader)
-        valid_gen = iter(valid_dataloader)
+    train_gen = iter(train_dataloader)
 
     logger.info("Moving model to device")
     model.to(device)
@@ -536,41 +520,50 @@ def main():
     if not args.inference_only:
         logger.info("Starting training")
         losses = []
-        level_cnt = 0
-        global_step = 0
-        if not curriculum:
-            train_gens = [train_gen]
-            valid_gens = [valid_gen]
-        for train_gen, valid_gen in zip(train_gens, valid_gens):
-            level_n_segs = levels[level_cnt]
-            logger.info(f'Training level {level_cnt}, {level_n_segs} segments')
-            for step in tqdm.tqdm(range(train_steps)):
-                optim.zero_grad()
-                
-                batch = next(train_gen)
-                # for k, v in batch.items():
-                #     batch[k] = v.cpu()
-                if args.dynamic:
-                    # for i in range(2):
-                    #     batch['segment_size'] = block_size_list[i]
-                    #     if i == 1:
-                    #         batch['mode'] = 'browse'
-                    #     out, _ = model(**batch)
-                    #     loss = out.loss
 
-                    #     accelerator.backward(loss)
-                    #     optim.step()
-                    #     if args.lr_decay:
-                    #         scheduler.step()
-                    #     logger.debug(f'loss: {loss.item()}')
-                    #     logger.debug(f'ppl: {out.ppl.item()}')
-                    #     losses.append(loss.detach().item())
+        for step in tqdm.tqdm(range(train_steps)):
+            optim.zero_grad()
+            
+            batch = next(train_gen)
+            # for k, v in batch.items():
+            #     batch[k] = v.cpu()
+            if args.dynamic:
+                # for i in range(2):
+                #     batch['segment_size'] = block_size_list[i]
+                #     if i == 1:
+                #         batch['mode'] = 'browse'
+                #     out, _ = model(**batch)
+                #     loss = out.loss
+
+                #     accelerator.backward(loss)
+                #     optim.step()
+                #     if args.lr_decay:
+                #         scheduler.step()
+                #     logger.debug(f'loss: {loss.item()}')
+                #     logger.debug(f'ppl: {out.ppl.item()}')
+                #     losses.append(loss.detach().item())
+                batch['segment_size'] = block_size
+                batch['extra_size'] = args.num_sensory//2
+                batch['mode'] = 'test'
+                out, _ = model(**batch)
+                loss = out.loss
+
+                accelerator.backward(loss)
+                optim.step()
+                if args.lr_decay:
+                    scheduler.step()
+                # logger.debug(f'loss: {loss.item()}')
+                # logger.debug(f'ppl: {out.ppl.item()}')
+                losses.append(loss.detach().item())
+            elif args.train_memory_map:
+                for i in range(args.bptt_depth-1):
+                    optim.zero_grad()
                     batch['segment_size'] = block_size
                     batch['extra_size'] = args.num_sensory//2
-                    batch['mode'] = 'test'
+                    batch['switch_at'] = i
                     out, _ = model(**batch)
                     loss = out.loss
-
+                    # need to use this for loss
                     accelerator.backward(loss)
                     optim.step()
                     if args.lr_decay:
@@ -578,61 +571,47 @@ def main():
                     # logger.debug(f'loss: {loss.item()}')
                     # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-                elif args.train_memory_map:
-                    for i in range(args.bptt_depth-1):
-                        optim.zero_grad()
-                        batch['segment_size'] = block_size
-                        batch['extra_size'] = args.num_sensory//2
-                        batch['switch_at'] = i
-                        out, _ = model(**batch)
-                        loss = out.loss
-                        # need to use this for loss
-                        accelerator.backward(loss)
-                        optim.step()
-                        if args.lr_decay:
-                            scheduler.step()
-                        # logger.debug(f'loss: {loss.item()}')
-                        # logger.debug(f'ppl: {out.ppl.item()}')
-                        losses.append(loss.detach().item())
-                
-                else:
-                    batch['segment_size'] = block_size
-                    batch['sum_fraction'] = args.sum_fraction
-                    out, _ = model(**batch)
-                    loss = out.loss
-                    # logger.debug(f'crl: {loss.item()}')
-                    # if args.inject_autoencoder:
-                    #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
-                    #         loss += (layer.mlp[0].rec_loss)
+            
+            else:
+                batch['segment_size'] = block_size
+                batch['sum_fraction'] = args.sum_fraction
+                out, _ = model(**batch)
+                loss = out.loss
+                # logger.debug(f'crl: {loss.item()}')
+                # if args.inject_autoencoder:
+                #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
+                #         loss += (layer.mlp[0].rec_loss)
 
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    losses.append(loss.detach().item())
-                
-                if step % args.save_interval == 0:
-                    torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{step}.pth')
-                
-                if step % args.validation_interval == 0:
-                    valid_losses = []
-                    valid_ppl = []
-                    model.eval()
-                    for _ in range(args.validation_steps):
-                        batch = next(valid_gen)
-                        for k, v in batch.items():
-                            batch[k] = v.cpu()
-                        batch['segment_size'] = block_size
-                        with torch.no_grad():
-                            out, _ = model(**batch)
-                        loss = out.loss
-                        ppl = out.ppl
-                        valid_losses.append(loss.detach().item())
-                        valid_ppl.append(ppl.detach().item())
-                    # Log to wandb by calling `accelerator.log`, `step` is optional
-                    accelerator.log({"CrossEntropy Loss": np.mean(valid_losses), "PPL": np.mean(valid_ppl), "n_segs": levels[level_cnt], }, step=global_step)
-                global_step += 1
-            level_cnt += 1
+                accelerator.backward(loss)
+                optim.step()
+                if args.lr_decay:
+                    scheduler.step()
+                losses.append(loss.detach().item())
+                accelerator.log({"Train Loss": loss.detach().item()}, step=step)
+            
+            if step % args.save_interval == 0:
+                torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{step}.pth')
+            
+            if step % args.validation_interval == 0:
+                valid_losses = []
+                valid_ppl = []
+                valid_gen = iter(valid_dataloader)
+                model.eval()
+                for _ in range(args.validation_steps):
+                    batch = next(valid_gen)
+                    for k, v in batch.items():
+                        batch[k] = v.cpu()
+                    batch['segment_size'] = block_size
+                    with torch.no_grad():
+                        out, _ = model(**batch)
+                    loss = out.loss
+                    ppl = out.ppl
+                    valid_losses.append(loss.detach().item())
+                    valid_ppl.append(ppl.detach().item())
+                # Log to wandb by calling `accelerator.log`, `step` is optional
+                accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl)}, step=step)
+                model.train()
+
         accelerator.wait_for_everyone()
         
         if args.save_ckpt is not None:
@@ -671,28 +650,6 @@ def main():
     test_losses = []
     test_ppl = []
     total_hist = []
-
-    test_gen = iter(test_dataloader)
-
-    for step in tqdm.tqdm(range(args.test_step)):
-        batch = next(test_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
-        batch['segment_size'] = block_size
-        if args.dynamic:
-            batch['extra_size'] = args.num_sensory//2
-            batch['mode'] = 'test'
-        if args.timing:
-            batch['prof'] = True
-        with torch.no_grad():
-            out, hist = model(**batch)
-        loss = out.loss
-        ppl = out.ppl
-        test_losses.append(loss.detach().item())
-        test_ppl.append(ppl.detach().item())
-        logger.info(f'loss: {loss.item()}')
-        if hist is not None:
-            total_hist.extend(hist)
     
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
         max_d = np.max(total_hist)
