@@ -74,7 +74,7 @@ for test_length in "${test_lengths[@]}"; do
             --wandb_entity=yic033-ucsd \
             --wandb_run=evaluate_narrative_qa_baseline \
             --wandb_project=qa_fine_tuning \
-            --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
+            --load_from_ckpt="/home/yingqi/scratch/c00/checkpoints/fine_tuning/opt-350m/narrative_qa/model_weights_580.pth"        
     done
 done
 
