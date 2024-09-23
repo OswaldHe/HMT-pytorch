@@ -92,6 +92,7 @@ parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum',
 parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
+parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
 
 torch.manual_seed(3407)
 
@@ -113,7 +114,12 @@ def main():
     # Initialize WanDB Tracker
     accelerator.init_trackers(
         project_name=args.wandb_project, 
-        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "test_length": args.test_length, "checkpoint": os.path.basename(args.load_from_ckpt)},
+        config={"dropout": 0.1, 
+                "learning_rate": args.learning_rate, 
+                "task_name": args.task_name, 
+                "test_length": args.test_length, 
+                "checkpoint": os.path.basename(args.load_from_ckpt),
+                "max_context_length": args.max_context_length},
         init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
@@ -279,7 +285,8 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        train_ds, valid_ds = load_qa_dataset('deepmind/narrativeqa', split=['train', 'validation'], streaming=args.streaming, trust_remote_code=True, max_context_length=75000)
+        train_ds = load_qa_dataset('deepmind/narrativeqa', split=['train'], streaming=args.streaming, trust_remote_code=True)
+        valid_ds = load_qa_dataset('deepmind/narrativeqa', split=['validation'], streaming=args.streaming, trust_remote_code=True)
         # Print number of validation and train datapoints
         logger.info(f"Number of training datapoints: {len(train_ds)}")
         logger.info(f"Number of validation datapoints: {len(valid_ds)}")
@@ -328,8 +335,11 @@ def main():
     train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
     valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
 
-    logger.info(f"Creating dataloaders")
+    # Remove elements from the datasets that is longer than the max_context_length
+    if args.max_context_length is not None:
+        train_ds_tok = train_ds_tok.filter(lambda x: len(x['input_ids']) < args.max_context_length, num_proc=8)
 
+    logger.info(f"Creating dataloaders")
     # Define the cache directory for grouped datasets
     grouped_datasets_dir = os.path.join(os.environ.get('HF_HOME', ''), "grouped")
     if not os.path.exists(grouped_datasets_dir):
@@ -379,7 +389,7 @@ def main():
                         batched=True,
                         desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
                         remove_columns=['answer_length'] if args.task_name in qa_tasks else None,
-                        num_proc=16
+                        num_proc=8
                     )
                 else:
                     grouped_dataset = dataset.map(
@@ -521,7 +531,7 @@ def main():
         logger.info("Starting training")
         losses = []
 
-        for step in tqdm.tqdm(range(train_steps)):
+        for step in tqdm.tqdm(range(min(train_steps, len(train_dataloader)))):
             optim.zero_grad()
             
             batch = next(train_gen)
@@ -575,6 +585,10 @@ def main():
             else:
                 batch['segment_size'] = block_size
                 batch['sum_fraction'] = args.sum_fraction
+                accelerator.log({ "Input Length": batch['labels'].shape[1]}, step=step)
+                # if batch['labels'].shape[1] > args.max_context_length:
+                #     accelerator.log({"Train Loss": 0}, step=step)
+                #     continue
                 out, _ = model(**batch)
                 loss = out.loss
                 # logger.debug(f'crl: {loss.item()}')
