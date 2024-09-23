@@ -34,7 +34,7 @@ from tools.data_processing.hmt_qa_datasets import load_qa_dataset
 
 parser = ArgumentParser()
 
-qa_tasks = {'deepmind/narrativeqa'}
+qa_tasks = {'deepmind/narrativeqa', 'qmsum'}
 
 #cli arguments
 parser.add_argument('--task_name', type=str, default='wikitext', help='training/validation task name (e.g. wikitext, pg19, samsum, etc.)')
@@ -180,79 +180,6 @@ def main():
 
     """### Prepare dataset"""
 
-    def interleaving_sample(examples, context_len):
-        interleave = {}
-        for k in examples.keys():
-            interleave[k] = []
-            for i in range(0, len(examples[k]), 2):
-                first = examples[k][i]
-                if i+1 >= len(examples[k]):
-                    interleave[k].append(first)
-                    break
-                second = examples[k][i+1]
-
-                res = []
-                j = 0
-                while j < len(first) and j < len(second):
-                    res.extend(first[j:j+context_len]) 
-                    res.extend(second[j:j+context_len])
-                    j+=context_len
-                if j < len(first):
-                    res.extend(first[j:])
-                if j < len(second):
-                    res.extend(second[j:])
-                interleave[k].append(res)
-
-        return interleave
-
-    def dilated_sample(examples, insert_len, period, insert_str):
-        res = {}
-        tok = tokenizer(insert_str)['input_ids'][1]
-        attn_mask = tokenizer(insert_str)['attention_mask'][1]
-        for k in examples.keys():
-            res[k] = []
-            for sample in examples[k]:
-                ans = []
-                i = 0
-                while i < len(sample):
-                    ans.extend(sample[i:i+period])
-                    if k == 'input_ids':
-                        ans.extend(insert_len * [tok]) #padding token [double space]
-                    else:
-                        ans.extend(insert_len * [attn_mask])
-                    i+=period
-                res[k].append(ans)
-
-        return res
-
-
-    def group_texts(examples, block_size, history_size=None):
-        if args.interleave_dataset:
-            examples = interleaving_sample(examples, args.interleave_len)
-        elif args.dilate_dataset:
-            examples = dilated_sample(examples, args.dilate_len, args.dilate_len, args.dilate_str)
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        if history_size is None:
-            result = {
-                k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-                for k, t in concatenated_examples.items()
-            }
-        else:
-            result = {
-                k: [t[max({0, i - history_size}) : i + block_size] for i in range(0, total_length, history_size)]
-                for k, t in concatenated_examples.items()
-            }
-        result["labels"] = result["input_ids"].copy()
-        result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
-        return result
-    
-    def group_texts_qa(examples):
-        result = {k: v for k, v in examples.items()}
-        result["labels"] = result["input_ids"].copy()
-        result["mask_size"] = result["answer_length"].copy()  # qa tasks should not be grouped
-        return result
-
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     def collate_fn(batch):
         input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
@@ -290,129 +217,28 @@ def main():
         # Print number of validation and train datapoints
         logger.info(f"Number of training datapoints: {len(train_ds)}")
         logger.info(f"Number of validation datapoints: {len(valid_ds)}")
+    elif args.task_name == 'qmsum':
+        from tools.data_processing.qmsum import load_qmsum_train
+        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
+        splited_dict = total_ds.train_test_split(test_size=0.2)
+        train_ds = splited_dict['train']
+        valid_ds = splited_dict['test']
     else:
         train_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train'], streaming=args.streaming, trust_remote_code=True)
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
 
-    logger.info(f"Tokenizing datasets")
-    column_names = train_ds.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]  # Taking the text column as the input column
+    # Print the length of train and validation datasets
+    logger.info(f"Number of training datapoints: {len(train_ds)}")
+    logger.info(f"Number of validation datapoints: {len(valid_ds)}")
 
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name])
-
-    # Define the cache directory for tokenized datasets
-    tokenized_datasets_dir = os.path.join(cache_dir, "tokenized")
-    if not os.path.exists(tokenized_datasets_dir):
-        os.makedirs(tokenized_datasets_dir)
-
-    # Function to load or create tokenized dataset
-    def load_or_create_tokenized_dataset(dataset, split, recache_splits: List[str]=None):
-        cache_path = os.path.join(tokenized_datasets_dir, f"{args.task_name}_{split}.hf")
-        if recache_splits is not None and split in recache_splits:
-            if os.path.exists(cache_path):
-                logger.info(f"Deleting existing tokenized {split} dataset cache to recache")
-                shutil.rmtree(cache_path)
-
-        if os.path.exists(cache_path):
-            logger.info(f"Loading tokenized {split} dataset from cache")
-            return datasets.load_from_disk(cache_path)
-        else:
-            logger.info(f"Tokenizing {split} dataset")
-            tokenized_dataset = dataset.map(
-                tokenize_function,
-                batched=True,
-                batch_size=4,
-                remove_columns=[col for col in column_names if col != "answer_length"] if args.task_name in qa_tasks else column_names,
-                desc=f"Running tokenizer on {split} dataset",
-                num_proc=16
-            )
-            logger.info(f"Saving tokenized {split} dataset to cache")
-            tokenized_dataset.save_to_disk(cache_path)
-            return tokenized_dataset
-
-    # Load or create tokenized datasets
-    train_ds_tok = load_or_create_tokenized_dataset(train_ds, "train")
-    valid_ds_tok = load_or_create_tokenized_dataset(valid_ds, "valid")
-
-    # Remove elements from the datasets that is longer than the max_context_length
-    if args.max_context_length is not None:
-        train_ds_tok = train_ds_tok.filter(lambda x: len(x['input_ids']) < args.max_context_length, num_proc=8)
-
-    logger.info(f"Creating dataloaders")
-    # Define the cache directory for grouped datasets
-    grouped_datasets_dir = os.path.join(os.environ.get('HF_HOME', ''), "grouped")
-    if not os.path.exists(grouped_datasets_dir):
-        os.makedirs(grouped_datasets_dir)
-
-    # Function to load or create grouped dataset
-    def load_or_create_grouped_dataset(dataset, split, history_size, block_size, levels: List[int]=None, recache_splits: List[str]=None):
-        if levels is not None:
-            grouped_datasets = []
-            for i,n_segs in enumerate(levels):
-                cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped_seg{n_segs}.hf")
-                if recache_splits is not None and split in recache_splits:
-                    if os.path.exists(cache_path):
-                        logger.info(f"Deleting existing grouped {split} dataset cache to recache")
-                        shutil.rmtree(cache_path)
-                if os.path.exists(cache_path):
-                    grouped_datasets.append(datasets.load_from_disk(cache_path))
-                else:
-                    num_data_per_level = len(dataset) // len(levels)
-                    data_subset = dataset.select(range(i * num_data_per_level, (i + 1) * num_data_per_level))
-                    curr_n_segments = n_segs
-                    curr_history_size = (curr_n_segments - 1) * block_size
-
-                    grouped_dataset = data_subset.map(
-                        lambda x: group_texts(x, curr_history_size, block_size),
-                        batched=True,
-                        desc=f"Grouping {split} in chunks of {block_size}, {n_segs} segments, " + (f" and history {history_size}" if split == 'train' else ""),
-                        num_proc=8
-                    )
-                    grouped_dataset.save_to_disk(cache_path)
-                    grouped_datasets.append(grouped_dataset)
-            return grouped_datasets
-        else: 
-            cache_path = os.path.join(grouped_datasets_dir, f"{args.task_name}_{split}_grouped.hf")
-            if recache_splits is not None and split in recache_splits:
-                if os.path.exists(cache_path):
-                    logger.info(f"Deleting existing grouped {split} dataset cache to recache")
-                    shutil.rmtree(cache_path)
-            if os.path.exists(cache_path):  # if the grouped dataset is found cached, then skip re-grouping
-                logger.info(f"Loading grouped {split} dataset from cache")
-                return datasets.load_from_disk(cache_path)
-            else:
-                logger.info(f"Grouping {split} dataset")
-                if args.task_name in qa_tasks:
-                    grouped_dataset = dataset.map(
-                        lambda x: group_texts_qa(x),
-                        batched=True,
-                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
-                        remove_columns=['answer_length'] if args.task_name in qa_tasks else None,
-                        num_proc=8
-                    )
-                else:
-                    grouped_dataset = dataset.map(
-                        lambda x: group_texts(x, history_size, block_size),
-                        batched=True,
-                        desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
-                        num_proc=16
-                    )
-                logger.info(f"Saving grouped {split} dataset to cache")
-                grouped_dataset.save_to_disk(cache_path)
-                return grouped_dataset
-
-    # Load or create grouped datasets
-    valid_dataset = load_or_create_grouped_dataset(valid_ds_tok, "valid", history_size, block_size)
-    train_dataset = load_or_create_grouped_dataset(train_ds_tok, "train", history_size, block_size)
 
     # Create dataloaders
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
+    valid_dataloader = DataLoader(valid_ds, batch_size=batch_size,
                                 collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
 
     train_rnd_generator = torch.Generator()
     train_rnd_generator.manual_seed(args.seed)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+    train_dataloader = DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn,
                                 shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
 
 
