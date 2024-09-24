@@ -92,5 +92,33 @@ class TestLoadQADataset(unittest.TestCase):
         # Check if the lengths of tasks, meeting notes, and answers are consistent
         self.assertEqual(len(ds['text']), len(ds['answer_length']))
 
+class TestLoadRedPajama(unittest.TestCase):
+    def test_load_redpajama_test(self):
+        """Trying to load the redpajama test split, which is the last 10% of the dataset. Also testing dataloader creation from the dataset.
+        """
+        from tools.data_processing.red_pajamav2 import load_redpajama
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+        test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=10000, block_size=990, streaming=False, trust_remote_code=True)
+
+        print(type(test_ds))
+        print(test_ds)
+        print(len(test_ds))
+
+        print(test_ds[0])
+
+        batch_size = 2
+        from torch.utils.data import DataLoader
+        from tools.collate import collate_fn
+        from functools import partial
+        collate_fn = partial(collate_fn, id_pad_value=tokenizer.pad_token_id, is_qa_task=False, block_size=990, batch_size=batch_size)
+        dataloader = DataLoader(test_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
+        print(len(dataloader))
+        data_iter = iter(dataloader)
+        print(next(data_iter))
+
+
 if __name__ == '__main__':
     unittest.main()
