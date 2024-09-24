@@ -33,7 +33,10 @@ class TestLoadQADataset(unittest.TestCase):
         print(ds_test[0])
 
     def test_qmsum_test(self):
-        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024)
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+
+        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=tokenizer)
         print("QMSum test dataset:")
         print(ds)
         
@@ -60,8 +63,10 @@ class TestLoadQADataset(unittest.TestCase):
 
     def test_qmsum_train(self):
         from tools.data_processing.qmsum import load_qmsum_train
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
 
-        ds = load_qmsum_train("/home/yingqi/repo/QMSum/data/train.jsonl")
+        ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
         print("QMSum train dataset:")
         print(ds)
         
@@ -71,26 +76,57 @@ class TestLoadQADataset(unittest.TestCase):
         print("\nKeys of the first datapoint:")
         print(ds[0].keys())
         
-        print("\nFirst three data points:")
-        for i in range(3):
-            print(f"\nData point {i+1}:")
-            print("Text: ", ds['text'][i][:100] + "...")  # Print first 100 characters
-            print("Answer Length: ", str(ds['answer_length'][i]), "...")  # Print first 100 characters
 
         self.assertIsInstance(ds, Dataset)
-        self.assertTrue('text' in ds.column_names)
+        self.assertTrue('input_ids' in ds.column_names)
         self.assertTrue('answer_length' in ds.column_names)
 
         # Check if the dataset is not empty
         self.assertGreater(len(ds), 0)
 
-        # Check if all entries have the expected fields
-        for item in ds:
-            self.assertTrue('text' in item)
-            self.assertTrue('answer_length' in item)
 
-        # Check if the lengths of tasks, meeting notes, and answers are consistent
-        self.assertEqual(len(ds['text']), len(ds['answer_length']))
+    def test_musique_test(self):
+        from tools.data_processing.musique import load_musique_test
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+
+        ds = load_musique_test(test_length=10000, block_size=1024, tokenizer=tokenizer)
+        print("MuSiQue test dataset:")
+        print(ds)
+
+        print("\nColumns in the dataset:")
+        print(ds.column_names)
+
+        print("\nKeys of the first datapoint:")
+        print(ds[0].keys())
+
+        print("\nFirst three data points:")
+        for i in range(3):
+            print(f"\nData point {i+1}:")
+            print("input_ids: ", ds['input_ids'][i][:100], "...")  # Print first 100 characters
+
+    def test_musique_train(self):
+        from tools.data_processing.musique import load_musique_train
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+
+        ds = load_musique_train(max_token_num=12000, block_size=1024, tokenizer=tokenizer)
+        print("MuSiQue train dataset:")
+        print(ds)
+            
+        print("\nColumns in the dataset:")
+        print(ds.column_names)
+
+        print("\nKeys of the first datapoint:")
+        print(ds[0].keys())
+
+        print("\nFirst three data points:")
+        for i in range(3):
+            print(f"\nData point {i+1}:")
+            print("input_ids: ", ds['input_ids'][i][:100], "...")
+
 
 class TestLoadRedPajama(unittest.TestCase):
     def test_load_redpajama_test(self):

@@ -34,16 +34,15 @@ echo HF_HOME=$HF_HOME
 export WEIGHT_BASE=/home/yingqi/scratch/c00/hmt_pretrained/qwen2.5-0.5b
 
 # Uncomment to disable wandb tracking
-export WANDB_MODE=offline
+# export WANDB_MODE=offline
 
 checkpoints=(
     model_weights_0_lv_1.pth
-    # model_weights_0_lv_2.pth
-    # model_weights_0_lv_3.pth
+    model_weights_0_lv_2.pth
+    model_weights_0_lv_3.pth
 )
 
-# test_lengths=(3000 10000 60000)
-test_lengths=(3000)
+test_lengths=(3000 10000 60000)
  
 for test_length in "${test_lengths[@]}"; do
     # remove the dataset cache

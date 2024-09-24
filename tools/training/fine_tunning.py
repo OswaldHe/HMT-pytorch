@@ -116,6 +116,7 @@ def main():
         project_name=args.wandb_project, 
         config={"dropout": 0.1, 
                 "learning_rate": args.learning_rate, 
+                "model_name": args.model_name,
                 "task_name": args.task_name, 
                 "test_length": args.test_length, 
                 "checkpoint": os.path.basename(args.load_from_ckpt),
@@ -223,6 +224,10 @@ def main():
         splited_dict = total_ds.train_test_split(test_size=0.2)
         train_ds = splited_dict['train']
         valid_ds = splited_dict['test']
+    elif args.task_name == 'musique':
+        from tools.data_processing.musique import load_musique_train
+        train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
+        valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
     else:
         train_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train'], streaming=args.streaming, trust_remote_code=True)
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
@@ -296,8 +301,12 @@ def main():
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
                                 segment_alignment=args.segment_alignment,
-                                is_qa_task=args.task_name in qa_tasks
+                                is_qa_task=args.task_name in qa_tasks,
+                                k2=0,  # Added
                                 )
+            
+# OPT Could use 10 segments. 
+# LLAMA - 8
             
             if args.load_from_ckpt is not None and not args.hmt_stage_2:
                 # checkpoint_dir = os.path.dirname(args.load_from_ckpt)
@@ -388,8 +397,6 @@ def main():
                 optim.step()
                 if args.lr_decay:
                     scheduler.step()
-                # logger.debug(f'loss: {loss.item()}')
-                # logger.debug(f'ppl: {out.ppl.item()}')
                 losses.append(loss.detach().item())
             elif args.train_memory_map:
                 for i in range(args.bptt_depth-1):
@@ -404,19 +411,15 @@ def main():
                     optim.step()
                     if args.lr_decay:
                         scheduler.step()
-                    # logger.debug(f'loss: {loss.item()}')
-                    # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
             
             else:
                 batch['segment_size'] = block_size
                 batch['sum_fraction'] = args.sum_fraction
                 accelerator.log({ "Input Length": batch['labels'].shape[1]}, step=step)
-                # if batch['labels'].shape[1] > args.max_context_length:
-                #     accelerator.log({"Train Loss": 0}, step=step)
-                #     continue
                 out, _ = model(**batch)
                 loss = out.loss
+                f1 = out.f1['f1']
                 # logger.debug(f'crl: {loss.item()}')
                 # if args.inject_autoencoder:
                 #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
@@ -427,7 +430,7 @@ def main():
                 if args.lr_decay:
                     scheduler.step()
                 losses.append(loss.detach().item())
-                accelerator.log({"Train Loss": loss.detach().item()}, step=step)
+                accelerator.log({"Train Loss": loss.detach().item(), "Train F1": f1}, step=step)
             
             if step % args.save_interval == 0:
                 torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{step}.pth')
@@ -435,6 +438,7 @@ def main():
             if step % args.validation_interval == 0:
                 valid_losses = []
                 valid_ppl = []
+                valid_f1 = []
                 valid_gen = iter(valid_dataloader)
                 model.eval()
                 for _ in range(args.validation_steps):
@@ -446,10 +450,12 @@ def main():
                         out, _ = model(**batch)
                     loss = out.loss
                     ppl = out.ppl
+                    f1 = out.f1['f1']
                     valid_losses.append(loss.detach().item())
                     valid_ppl.append(ppl.detach().item())
+                    valid_f1.append(f1)
                 # Log to wandb by calling `accelerator.log`, `step` is optional
-                accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl)}, step=step)
+                accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl), "Validation F1": np.mean(valid_f1)}, step=step)
                 model.train()
 
         accelerator.wait_for_everyone()

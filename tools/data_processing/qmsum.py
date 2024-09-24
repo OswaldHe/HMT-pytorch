@@ -5,9 +5,7 @@ import os
 
 from .tokenize import tokenize_dataset, filter_by_length
 from .grouping import group_dataset
-from .misc import read_jsonl
-
-from transformers import AutoTokenizer
+from .io import read_jsonl
 
 HF_HOME = os.getenv('HF_HOME', None)
 

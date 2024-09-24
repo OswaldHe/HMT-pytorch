@@ -61,14 +61,14 @@ for test_length in "${test_lengths[@]}"; do
             --batch_size=2 \
             --test_length=${test_length} \
             --mem_recall_hidden_dim=1536 \
-            --training_scale=1.5 \
             --save_interval=10 \
             --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
             --validation_interval=10 \
-            --validation_steps=10 \
+            --validation_step=10 \
             --curriculum \
-            --curriculum_segs=2,3,4,6,8 \
+            --curriculum_segs=2,4,6,8 \
             --wandb_entity=yic033-ucsd \
+            --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
     done
