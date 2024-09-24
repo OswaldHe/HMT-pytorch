@@ -2,6 +2,7 @@ import datasets
 from datasets import load_dataset
 import os
 from typing import List, Union
+import warnings
 
 HF_HOME = os.environ["HF_HOME"]
 
@@ -106,7 +107,14 @@ def load_qa_dataset(name, subset:str=None, max_context_length: int=None, **kwarg
     :raises NotImplementedError: If the dataset is not implemented.
     :return: The HF dataset.
     :rtype: datasets.Dataset
+
+    .. deprecated:: [Version number]
+       This function is deprecated and will be removed in a future version.
+       Use [alternative function or method] instead.
     """
+    warnings.warn("The load_qa_dataset function is deprecated and will be removed in a future version. "
+                  "Use [alternative function or method] instead.", DeprecationWarning, stacklevel=2)
+
     if name == 'deepmind/narrativeqa':
         ds = load_narrativeqa_dataset(split=kwargs.get('split', 'test'), source='deepmind', streaming=kwargs.get('streaming', False))
         ds = prepare_narrativeqa_dataset(ds, source='deepmind')

@@ -71,7 +71,6 @@ def group_texts(examples, block_size, history_size=None, **kwargs):
             for k, t in concatenated_examples.items()
         }
     result["labels"] = result["input_ids"].copy()
-    result["mask_size"] = [len(label) for label in result["labels"]]  # qa tasks should not be grouped
     return result
 
 def group_texts_qa(examples):

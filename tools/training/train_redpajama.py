@@ -1,3 +1,7 @@
+"""
+This is the pretraining script
+"""
+
 import numpy as np
 import os
 import sys
