@@ -23,7 +23,6 @@ else
     exit 1
 fi
 
-cd /home/yingqi/repo/HMT-pytorch
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -34,22 +33,26 @@ echo HF_HOME=$HF_HOME
 
 export WEIGHT_BASE=/home/yingqi/scratch/c00/hmt_pretrained/qwen2.5-0.5b
 
+# Uncomment to disable wandb tracking
+export WANDB_MODE=offline
+
 checkpoints=(
     model_weights_0_lv_1.pth
-    model_weights_0_lv_2.pth
-    model_weights_0_lv_3.pth
+    # model_weights_0_lv_2.pth
+    # model_weights_0_lv_3.pth
 )
 
-test_lengths=(3000 10000 60000)
+# test_lengths=(3000 10000 60000)
+test_lengths=(3000)
  
 for test_length in "${test_lengths[@]}"; do
     # remove the dataset cache
     rm -rf /home/yingqi/scratch/c00/cache/grouped/togethercomputer
     rm -rf /home/yingqi/scratch/c00/cache/tokenized/togethercomputer
     for checkpoint in "${checkpoints[@]}"; do
-        accelerate launch /home/yingqi/repo/HMT-pytorch/tools/eval.py \
+        accelerate launch tools/evaluation/eval.py \
             --learning_rate=1e-4 \
-            --model_name=facebook/opt-350m \
+            --model_name=Qwen/Qwen2.5-0.5B \
             --task_name=togethercomputer/RedPajama-Data-V2 \
             --task_subset=sample \
             --training_step=100 \
@@ -64,7 +67,8 @@ for test_length in "${test_lengths[@]}"; do
             --save_interval=10 \
             --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
             --validation_interval=10 \
-            --validation_steps=10 \
+            --validation_step=10 \
+            --test_step=100 \
             --curriculum \
             --curriculum_segs=2,4,6,8 \
             --mem_recall_hidden_dim=4864 \

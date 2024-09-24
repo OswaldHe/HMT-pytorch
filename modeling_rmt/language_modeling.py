@@ -11,6 +11,8 @@ from torch.profiler import profile, record_function, ProfilerActivity
 import random
 import evaluate
 
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
 # from tools.debug.dump import DebugDumper
 # dumper = DebugDumper()
 
@@ -212,6 +214,8 @@ class RecurrentWrapper(torch.nn.Module):
             switch_at=-1,
         ):
 
+        mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
+
         memory_state = None
         prepend_state = None
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
@@ -384,13 +388,14 @@ class RecurrentWrapper(torch.nn.Module):
         return segments
 
     def process_outputs(self, cell_outputs, **kwargs):
-        mask_size = kwargs.get('mask_size', self.rmt_config.get('mask_size'))
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
 
         # dumper.store('labels', kwargs.get('labels'))
         # dumper.store('labels_mask', kwargs.get('labels_mask'))
+        
+        mask_size = kwargs.get('mask_size')
 
         labels = kwargs.get('labels')
         if labels.shape[1] <= mask_size:
@@ -404,7 +409,12 @@ class RecurrentWrapper(torch.nn.Module):
             loss_fct = CrossEntropyLoss()
             out['loss'] = loss_fct(flat_logits.cuda(), flat_labels.cuda())
             out['ppl'] = torch.exp(out['loss'])
-            # out['f1'] = self.f1.compute(references=flat_labels, something)
+
+            # Compute the F1 score
+            predictions = torch.argmax(torch.Tensor(flat_logits), dim=-1)
+            precision, recall, f1, _ = precision_recall_fscore_support(flat_labels, predictions, average='binary')
+            accuracy = accuracy_score(flat_labels, predictions)
+            out['f1'] = {'precision': precision, 'recall': recall, 'f1': f1, 'accuracy': accuracy}
         else:
             out['loss'] = 0
             out['ppl'] = 0

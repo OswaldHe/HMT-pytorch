@@ -27,7 +27,7 @@ echo HF_HOME=$HF_HOME
 
 # Manually remove the cache dir if necessary. It is used to force recaching. 
 # rm -rf /home/yingqi/scratch/c00/cache/tokenized
-rm -rf /home/yingqi/scratch/c00/cache/grouped
+# rm -rf /home/yingqi/scratch/c00/cache/grouped
 
 
 # Uncomment to disable wandb tracking
