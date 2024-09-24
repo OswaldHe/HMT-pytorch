@@ -65,7 +65,7 @@ for test_length in "${test_lengths[@]}"; do
     rm -rf /home/yingqi/scratch/c00/cache/grouped/togethercomputer
     rm -rf /home/yingqi/scratch/c00/cache/tokenized/togethercomputer
     for checkpoint in "${checkpoints[@]}"; do
-        accelerate launch /home/yingqi/repo/HMT-pytorch/tools/eval.py \
+        accelerate launch /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
             --learning_rate=1e-4 \
             --model_name=facebook/opt-350m \
             --task_name=togethercomputer/RedPajama-Data-V2 \
@@ -82,9 +82,10 @@ for test_length in "${test_lengths[@]}"; do
             --save_interval=10 \
             --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
             --validation_interval=10 \
-            --validation_steps=10 \
+            --validation_step=10 \
             --curriculum \
             --curriculum_segs=2,3,4,6,8 \
+            --wandb_project=wandb_pretrained_evaluation \
             --wandb_entity=yic033-ucsd \
             --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        

@@ -23,8 +23,6 @@ else
     exit 1
 fi
 
-cd /home/yingqi/repo/HMT-pytorch
-
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
@@ -32,19 +30,13 @@ accelerate env
 
 echo HF_HOME=$HF_HOME
 
-export WEIGHT_BASE=/home/yingqi/repo/hmt_pretrained/opt-350m
+export WEIGHT_BASE=/home/yingqi/scratch/c00/hmt_pretrained/smollm-135m
 
 checkpoints=(
-    model_weights_0_lv_0.pth
-    model_weights_0_lv_1.pth
-    model_weights_0_lv_2.pth
-    model_weights_0_lv_3.pth
-    model_weights_0_lv_4.pth
-    model_weights_700_lv_0.pth
-    model_weights_700_lv_1.pth
-    model_weights_700_lv_2.pth
-    model_weights_700_lv_3.pth
-    model_weights_700_lv_4.pth
+    model_weights_0_lv_1.pth  
+    model_weights_0_lv_2.pth 
+    model_weights_0_lv_3.pth 
+    model_weights_500_lv_3.pth
 )
 
 
@@ -55,7 +47,7 @@ for test_length in "${test_lengths[@]}"; do
     rm -rf /home/yingqi/scratch/c00/cache/grouped/togethercomputer
     rm -rf /home/yingqi/scratch/c00/cache/tokenized/togethercomputer
     for checkpoint in "${checkpoints[@]}"; do
-        accelerate launch /home/yingqi/repo/HMT-pytorch/tools/eval.py \
+        accelerate launch tools/evaluation/eval.py \
             --learning_rate=1e-4 \
             --model_name=HuggingFaceTB/SmolLM-135M \
             --task_name=togethercomputer/RedPajama-Data-V2 \
@@ -68,7 +60,8 @@ for test_length in "${test_lengths[@]}"; do
             --num_seg_save=8 \
             --batch_size=2 \
             --test_length=${test_length} \
-            --save_dir=/home/yingqi/scratch/c00/checkpoints/rp_opt-350m \
+            --mem_recall_hidden_dim=1536 \
+            --training_scale=1.5 \
             --save_interval=10 \
             --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
             --validation_interval=10 \

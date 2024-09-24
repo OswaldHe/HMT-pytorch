@@ -31,7 +31,7 @@ import logging, shutil
 from accelerate.logging import get_logger
 
 from tools.data_processing.hmt_qa_datasets import load_qa_dataset
-from tools.collate import collate_fn
+from tools.collate import hmt_collate_fn
 
 parser = ArgumentParser()
 
@@ -86,7 +86,7 @@ parser.add_argument('--shuffle', action='store_true', default=False, help='shuff
 parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
-parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
+parser.add_argument('--validation_step', type=int, default=10, help='Number of validation steps to perform at each validation interval')
 parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
 parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-separated list of curriculum levels (number of segments for each level)')
 parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
@@ -183,7 +183,7 @@ def main():
     """### Prepare dataset"""
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    collate_fn = partial(collate_fn, id_pad_value=id_pad_value, is_qa_task=args.task_name in qa_tasks, block_size=block_size, batch_size=batch_size)
+    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.task_name in qa_tasks, block_size=block_size, batch_size=batch_size)
     
     # Log the step
     logger.info("Loading datasets")
@@ -340,8 +340,10 @@ def main():
             batch['prof'] = True
         with torch.no_grad():
             out, hist = model(**batch)
-        # dumper.store('out', out, step=step)
-        # dumper.store('hist', hist, step=step)
+        dumper.store('out', out, step=step)
+        dumper.store('hist', hist, step=step)
+        dumper.dump_to_file()
+        quit()
         loss = out.loss
         ppl = out.ppl
         accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), }, step=step)
