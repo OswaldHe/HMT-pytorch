@@ -412,8 +412,9 @@ class RecurrentWrapper(torch.nn.Module):
 
             # Compute the F1 score
             predictions = torch.argmax(torch.Tensor(flat_logits), dim=-1)
-            precision, recall, f1, _ = precision_recall_fscore_support(flat_labels, predictions, average='binary')
-            accuracy = accuracy_score(flat_labels, predictions)
+            flat_labels_cpu, predictions_cpu = flat_labels.detach().cpu(), predictions.detach().cpu()
+            precision, recall, f1, _ = precision_recall_fscore_support(flat_labels_cpu, predictions_cpu, average='weighted')
+            accuracy = accuracy_score(flat_labels_cpu, predictions_cpu)
             out['f1'] = {'precision': precision, 'recall': recall, 'f1': f1, 'accuracy': accuracy}
         else:
             out['loss'] = 0

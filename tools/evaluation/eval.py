@@ -340,16 +340,14 @@ def main():
             batch['prof'] = True
         with torch.no_grad():
             out, hist = model(**batch)
-        dumper.store('out', out, step=step)
-        dumper.store('hist', hist, step=step)
-        dumper.dump_to_file()
-        quit()
+        # dumper.store('out', out, step=step)
+        # dumper.store('hist', hist, step=step)
         loss = out.loss
         ppl = out.ppl
-        accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), }, step=step)
+        f1 = out.f1['f1']
+        accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1.item()}, step=step)
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
-        # logger.info(f'loss: {loss.item()}')
         if hist is not None:
             total_hist.extend(hist)
 

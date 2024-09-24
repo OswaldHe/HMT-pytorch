@@ -1,0 +1,9 @@
+upload qmsum dataset to huggingface. 
+add rouge-L score. 
+Evaluate LLAMA-2
+
+QMSum, Narrative QA, Musique... For each dataset, find one datapoint and generate an text output. End to end text generateion function. 
+
+Annual review scraping???
+
+Wednesday 2pm-3pm. starting next week, bi-weekly. 
