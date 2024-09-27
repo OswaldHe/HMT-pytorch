@@ -153,3 +153,5 @@ debug.ipynb
 debug_dump/
 saved_datasets/
 run_jobs.sh
+TASKS.md
+/tmp/
