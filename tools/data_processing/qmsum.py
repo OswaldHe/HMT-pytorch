@@ -3,7 +3,7 @@ from datasets import load_dataset, Dataset
 from typing import Union, List
 import os
 
-from .tokenize import tokenize_dataset, filter_by_length
+from .tokenize import filter_by_length, tokenize_dataset, tokenize_column
 from .grouping import group_dataset
 from .io import read_jsonl
 
@@ -36,7 +36,7 @@ def prepare_qmsum_test_ppl(dataset: datasets.Dataset):
         """
         return {
             "text": [f"{prompt}\n{question_delimiter}{entry[0]}\n{context_delimiter}{entry[1]}\n{answer_delimiter}{entry[2][0]}" for entry in zip(dataset['input'], dataset['context'], dataset['answers'])],
-            "answer_length": [len(entry[0]) for entry in dataset['answers']]
+            "answer": [entry[0] for entry in dataset['answers']],
         }
 
     dataset = dataset.map(qmsum_entry_to_text, batched=True, 
@@ -122,11 +122,23 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/re
     ds = group_dataset(ds, split='train', history_size=None, block_size=block_size, is_qa_task=True)
     return ds
 
+def determine_answer_length(dataset, answer_ids):
+    return {
+        "mask_size": [len(answer_id) for answer_id in answer_ids],
+        "text": [entry for entry in dataset['text']]
+    }
 
-def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, **kwargs):
-    ds = load_qmsum_test_dataset(split='test', **kwargs)  # Load the dataset from Hugging Face
+def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', **kwargs):
+    ds = load_qmsum_test_dataset(split=split, **kwargs)  # Load the dataset from Hugging Face
     ds = prepare_qmsum_test_ppl(ds)  # Prepare the dataset in PPL Testing format. 
-    ds = tokenize_dataset(ds, tokenizer=tokenizer, is_qa_task=True, text_column_name='text', **kwargs)
+    print(ds.column_names)
+    quit()
+    ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
+    answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
+    for answer_id in answer_ids:
+        print(len(answer_id))
+    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
+    ds = ds.map(lambda ds: determine_answer_length(ds, answer_ids), batched=True, desc=f"Determining answer length", num_proc=8).remove_columns(column_to_remove)
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
     ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True)
     return ds

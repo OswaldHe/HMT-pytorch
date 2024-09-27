@@ -36,6 +36,8 @@ class TestLoadQADataset(unittest.TestCase):
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
 
+        print("tokenizer: ", type(tokenizer))
+
         ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=tokenizer)
         print("QMSum test dataset:")
         print(ds)

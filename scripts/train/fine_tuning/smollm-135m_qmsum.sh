@@ -55,6 +55,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --wandb_run=qmsum_fine_tuning \
     --wandb_project=qa_fine_tuning \
     --max_context_length=16000 \
+    --is_qa_task \
     --load_from_ckpt=/home/yingqi/scratch/c00/hmt_pretrained/smollm-135m/model_weights_500_lv_3.pth 
 
 # Available model names:
