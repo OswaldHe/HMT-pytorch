@@ -237,8 +237,8 @@ def main():
                                 max_n_segments=max(levels) if curriculum else n_segments,
                                 mask_size=mask_size,
                                 n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment
-                                )
+                                segment_alignment=args.segment_alignment)
+                
                 # state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
                 # ori_model.load_state_dict(state_dict)
                 state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
@@ -267,6 +267,8 @@ def main():
                 state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
                 # Remove the 'module.' prefix from all state dict keys
                 new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}  # FIXME: while saving the state dicts while the model is wrapped, all the weights have a model. prefix and needed to be removed when loading. We should fix this by unwrapping before saving. 
+                # if args.model_name == 'openlm-research/open_llama_3b_v2':
+                #     new_state_dict = {k.replace('base_model.model.', ''): v for k, v in new_state_dict.items()}
                 state_dict = new_state_dict
                 model.load_state_dict(state_dict)
                 # tag = os.path.basename(args.load_from_ckpt)
@@ -309,22 +311,6 @@ def main():
     test_ppl = []
     total_hist = []
 
-    from tools.debug import DebugDumper
-    dumper = DebugDumper(dump_dir='/home/yingqi/repo/HMT-pytorch/debug_dump')
-
-    # # >>> DEBUG >>>
-    # # Save the dataloader to a file
-    # test_gen = iter(test_dataloader)
-    # all_elements = []
-    # for batch in test_gen:
-    #     all_elements.append(batch)
-    
-    # import torch
-    # save_path = os.path.join("/home/yingqi/repo/HMT-pytorch/saved_datasets", f"{args.task_name}_test_dataloader.pt")
-    # logger.info(f"Saving dataloader elements to {save_path}")
-    # torch.save(all_elements, save_path)
-    # # <<< DEBUG <<<
-
     test_gen = iter(test_dataloader)
 
     # Start Testing
@@ -340,8 +326,6 @@ def main():
             batch['prof'] = True
         with torch.no_grad():
             out, hist = model(**batch)
-        # dumper.store('out', out, step=step)
-        # dumper.store('hist', hist, step=step)
         loss = out.loss
         ppl = out.ppl
         f1 = out.f1['f1']
@@ -351,7 +335,6 @@ def main():
         if hist is not None:
             total_hist.extend(hist)
 
-    # dumper.dump_to_file()
 
     date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:

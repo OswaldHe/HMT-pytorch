@@ -1,3 +1,7 @@
+"""
+This script is used to demonstrate the text generation of models trained with HMT. 
+"""
+
 import numpy as np
 import os
 import sys
@@ -29,9 +33,9 @@ from modeling_rmt.compression import inject_eae
 from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
-from tools.collate import hmt_collate_fn
 
 from tools.data_processing.hmt_qa_datasets import load_qa_dataset
+from tools.collate import hmt_collate_fn
 from tools.models import load_model
 
 parser = ArgumentParser()
@@ -85,16 +89,15 @@ parser.add_argument('--shuffle', action='store_true', default=False, help='shuff
 parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
-parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
-# parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
-# parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-separated list of curriculum levels (number of segments for each level)')
+parser.add_argument('--validation_step', type=int, default=10, help='Number of validation steps to perform at each validation interval')
+parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
+parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-separated list of curriculum levels (number of segments for each level)')
 parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
 parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
+parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a QA task')
 parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
-parser.add_argument('--is_qa_task', action='store_true', default=False, help='Whether the task is a QA task')
-parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train for')
 
 torch.manual_seed(3407)
 
@@ -112,22 +115,6 @@ def main():
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with='wandb')
     device = accelerator.device
-
-    # Initialize WanDB Tracker
-    accelerator.init_trackers(
-        project_name=args.wandb_project, 
-        config={"dropout": 0.1, 
-                "learning_rate": args.learning_rate, 
-                "model_name": args.model_name,
-                "task_name": args.task_name, 
-                "test_length": args.test_length, 
-                "checkpoint": os.path.basename(args.load_from_ckpt),
-                "max_context_length": args.max_context_length},
-        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
-    )
-
-    recache_splits = args.recache_splits.split(',') if args.recache_splits else None
-    print("recache splits: ", recache_splits)
 
     token=None
     if args.token_file is not None:
@@ -184,51 +171,30 @@ def main():
     """### Prepare dataset"""
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-
     collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size)
     
-
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        train_ds = load_qa_dataset('deepmind/narrativeqa', split=['train'], streaming=args.streaming, trust_remote_code=True)
-        valid_ds = load_qa_dataset('deepmind/narrativeqa', split=['validation'], streaming=args.streaming, trust_remote_code=True)
-        # Print number of validation and train datapoints
-        logger.info(f"Number of training datapoints: {len(train_ds)}")
-        logger.info(f"Number of validation datapoints: {len(valid_ds)}")
+        demo_points = load_qa_dataset('deepmind/narrativeqa', split='test[:' + str(args.test_step) + ']', streaming=args.streaming, trust_remote_code=True)
     elif args.task_name == 'qmsum':
-        from tools.data_processing.qmsum import load_qmsum_train
-        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
-        splited_dict = total_ds.train_test_split(test_size=0.2)
-        train_ds = splited_dict['train']
-        valid_ds = splited_dict['test']
-    elif args.task_name == 'musique':
-        from tools.data_processing.musique import load_musique_train
-        train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
-        valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
+        from tools.data_processing.qmsum import load_qmsum_test
+        demo_points = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
+    elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
+        from tools.data_processing.red_pajamav2 import load_redpajama
+        demo_points = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
     else:
-        train_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train'], streaming=args.streaming, trust_remote_code=True)
-        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
-
-    # Print the length of train and validation datasets
-    logger.info(f"Number of training datapoints: {len(train_ds)}")
-    logger.info(f"Number of validation datapoints: {len(valid_ds)}")
+        raise NotImplementedError(f"Task {args.task_name} not implemented")
 
 
+    logger.info(f"Creating dataloaders")
     # Create dataloaders
-    valid_dataloader = DataLoader(valid_ds, batch_size=batch_size,
+    demo_dataloader = DataLoader(demo_points, batch_size=batch_size,
                                 collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
-
-    train_rnd_generator = torch.Generator()
-    train_rnd_generator.manual_seed(args.seed)
-    train_dataloader = DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn,
-                                shuffle=args.shuffle, drop_last=False, generator=train_rnd_generator, pin_memory=True)
-
-
-    logger.info("Wrapping Model with HMT")
+    
+    logger.info("Preparing memory cell")
     model = load_model(args, model=model, memory_size=memory_size, block_size=block_size, n_segments=n_segments, mask_size=mask_size, word_emb_dim=word_emb_dim)
 
-    
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
     optim = AdamW(params=model.parameters(), lr=args.learning_rate)
@@ -242,22 +208,9 @@ def main():
     else:
         scheduler = StepLR(optim, step_size=100, gamma=1.0)
 
-    train_steps = args.training_step
-    eval_steps = args.eval_step
-
-    logger.info("Preparing accelerator")
-    # wrap with accelerate
-    model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
-        model, optim, train_dataloader, valid_dataloader, scheduler
-    )
 
     logger.info("Moving model to device")
     model.to(device)
-
-    logger.info("Setting model to train mode")
-    model.train()
-
-    block_size_list = [block_size, block_size_2]
 
     if args.train_memory_map:
         # freeze all params
@@ -267,144 +220,51 @@ def main():
             else:
                 p.requires_grad = True
 
-
-    if not args.inference_only:
-        logger.info("Starting training")
-        losses = []
-        global_step = 0
-        for epoch in range(args.epochs):
-            train_gen = iter(train_dataloader)
-            for step in tqdm.tqdm(range(min(train_steps, len(train_dataloader)))):
-                optim.zero_grad()
-                global_step += 1
-                batch = next(train_gen)
-                # for k, v in batch.items():
-                #     batch[k] = v.cpu()
-                if args.dynamic:
-                    # for i in range(2):
-                    #     batch['segment_size'] = block_size_list[i]
-                    #     if i == 1:
-                    #         batch['mode'] = 'browse'
-                    #     out, _ = model(**batch)
-                    #     loss = out.loss
-
-                    #     accelerator.backward(loss)
-                    #     optim.step()
-                    #     if args.lr_decay:
-                    #         scheduler.step()
-                    #     logger.debug(f'loss: {loss.item()}')
-                    #     logger.debug(f'ppl: {out.ppl.item()}')
-                    #     losses.append(loss.detach().item())
-                    batch['segment_size'] = block_size
-                    batch['extra_size'] = args.num_sensory//2
-                    batch['mode'] = 'test'
-                    out, _ = model(**batch)
-                    loss = out.loss
-
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    losses.append(loss.detach().item())
-                elif args.train_memory_map:
-                    for i in range(args.bptt_depth-1):
-                        optim.zero_grad()
-                        batch['segment_size'] = block_size
-                        batch['extra_size'] = args.num_sensory//2
-                        batch['switch_at'] = i
-                        out, _ = model(**batch)
-                        loss = out.loss
-                        # need to use this for loss
-                        accelerator.backward(loss)
-                        optim.step()
-                        if args.lr_decay:
-                            scheduler.step()
-                        losses.append(loss.detach().item())
-                
-                else:
-                    batch['segment_size'] = block_size
-                    batch['sum_fraction'] = args.sum_fraction
-                    accelerator.log({ "Input Length": batch['labels'].shape[1]}, step=global_step)
-                    out, _ = model(**batch)
-                    loss = out.loss
-                    f1 = out.f1['f1']
-                    # logger.debug(f'crl: {loss.item()}')
-                    # if args.inject_autoencoder:
-                    #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
-                    #         loss += (layer.mlp[0].rec_loss)
-
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    losses.append(loss.detach().item())
-                    accelerator.log({"Train Loss": loss.detach().item(), "Train F1": f1, "Epoch": epoch}, step=global_step)
-                
-                if step % args.save_interval == 0:
-                    torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{global_step}.pth')
-                
-                if step % args.validation_interval == 0:
-                    valid_losses = []
-                    valid_ppl = []
-                    valid_f1 = []
-                    valid_gen = iter(valid_dataloader)
-                    model.eval()
-                    for _ in range(args.validation_steps):
-                        batch = next(valid_gen)
-                        for k, v in batch.items():
-                            batch[k] = v.cpu()
-                        batch['segment_size'] = block_size
-                        with torch.no_grad():
-                            out, _ = model(**batch)
-                        loss = out.loss
-                        ppl = out.ppl
-                        f1 = out.f1['f1']
-                        valid_losses.append(loss.detach().item())
-                        valid_ppl.append(ppl.detach().item())
-                        valid_f1.append(f1)
-                    # Log to wandb by calling `accelerator.log`, `step` is optional
-                    accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl), "Validation F1": np.mean(valid_f1), "Epoch": epoch}, step=global_step)
-                    model.train()
-
-            accelerator.wait_for_everyone()
-        
-        if args.save_ckpt is not None:
-            model.save_checkpoint(args.save_ckpt)
-        
-        plt.plot(losses)
-        plt.xlabel('step')
-        plt.ylabel('train loss')
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        plt.savefig('artifact/loss_' + date_str + '.png')
-        plt.show()
-        plt.close()
-
-    valid_losses = []
-    valid_ppl = []
     model.eval()
-    for step in tqdm.tqdm(range(eval_steps)):
-        batch = next(valid_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
-        batch['segment_size'] = block_size
-        # if args.timing:
-        #     batch['prof'] = True
-        with torch.no_grad():
-            out, _ = model(**batch)
-        loss = out.loss
-        ppl = out.ppl
-        logger.debug(f'loss: {loss.item()}')
-        logger.debug(f'ppl: {ppl.item()}')
-        valid_losses.append(loss.detach().item())
-        valid_ppl.append(ppl.detach().item())
-
-    print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
-    print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
 
     test_losses = []
     test_ppl = []
     total_hist = []
-    
+    test_generated = []
+
+    demo_gen = iter(demo_dataloader)
+
+    batch = next(demo_gen)
+    batch['segment_size'] = block_size
+    del batch['labels_mask']
+    # print(batch.keys())
+    out = model.generate(**batch)
+    # print(out.keys())
+    print(out)
+    quit()
+
+    # Start Testing
+    # for step in tqdm.tqdm(range(args.test_step)):
+    #     batch = next(test_gen)
+    #     for k, v in batch.items():
+    #         batch[k] = v.cpu()
+    #     batch['segment_size'] = block_size
+    #     if args.dynamic:
+    #         batch['extra_size'] = args.num_sensory//2
+    #         batch['mode'] = 'test'
+    #     if args.timing:
+    #         batch['prof'] = True
+    #     with torch.no_grad():
+    #         out, hist = model(**batch)
+    #         test_generated.append(model.generate(
+    #             # ? Batch Information
+    #         ))
+    #     loss = out.loss
+    #     ppl = out.ppl
+    #     f1 = out.f1['f1']
+    #     accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1.item()}, step=step)
+    #     test_losses.append(loss.detach().item())
+    #     test_ppl.append(ppl.detach().item())
+    #     if hist is not None:
+    #         total_hist.extend(hist)
+
+
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
         max_d = np.max(total_hist)
         plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=50)

@@ -76,7 +76,7 @@ def group_texts(examples, block_size, history_size=None, **kwargs):
 def group_texts_qa(examples):
     result = {k: v for k, v in examples.items()}
     result["labels"] = result["input_ids"].copy()
-    result["mask_size"] = result["answer_length"].copy()  # qa tasks should not be grouped
+    result["mask_size"] = result["mask_size"].copy()  # qa tasks should not be grouped
     return result
 
 # Function to load or create grouped dataset

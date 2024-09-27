@@ -38,7 +38,8 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --model_name=facebook/opt-350m \
     --task_name=qmsum \
     --task_subset=sample \
-    --training_step=1000 \
+    --training_step=80 \
+    --epochs=10 \
     --num_sensory=32 \
     --segment_length=1024 \
     --bptt_depth=6 \
@@ -48,12 +49,13 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --save_dir=/home/yingqi/scratch/c00/checkpoints/fine_tuning/opt-350m/qmsum \
     --save_interval=20 \
     --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
-    --validation_interval=40 \
-    --validation_steps=30 \
+    --validation_interval=20 \
+    --validation_steps=20 \
     --wandb_entity=yic033-ucsd \
     --wandb_run=qmsum_fine_tuning \
     --wandb_project=qa_fine_tuning \
-    --max_context_length=16000 \
+    --max_context_length=8000 \
+    --is_qa_task \
     --load_from_ckpt="/home/yingqi/scratch/c00/hmt_pretrained/opt-350m/model_weights_0_lv_2.pth"
 
 # Available model names:
