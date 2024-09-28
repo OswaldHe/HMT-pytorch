@@ -92,6 +92,7 @@ parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-sep
 parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
 parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 
 torch.manual_seed(3407)
@@ -192,9 +193,11 @@ def main():
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
         from tools.data_processing.red_pajamav2 import load_redpajama
         test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
+    elif args.task_name == 'qmsum':
+        from tools.data_processing.qmsum import load_qmsum_test
+        test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test')
     else:
-        test_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train[80%:81%]'], streaming=args.streaming, trust_remote_code=True)
-        test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
+        raise NotImplementedError(f"Task {args.task_name} is not supported")
 
     # Print dataset sizes
     print(f"Test dataset size: {len(test_ds)}")
