@@ -137,7 +137,7 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/re
     return ds
 
 
-def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', source=None, **kwargs):
+def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', source=None, with_answer=False, **kwargs):
     if source == 'huggingface':
         ds = load_dataset('ioeddk/qmsum', split=split, cache_dir=HF_HOME, streaming=kwargs.get('streaming', False))
     else:
