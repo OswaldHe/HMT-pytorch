@@ -132,7 +132,7 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/re
     return ds
 
 
-def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', **kwargs):
+def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', with_answer=False, **kwargs):
     ds = load_qmsum_test_dataset(split=split, **kwargs)  # Load the dataset from Hugging Face
     ds = prepare_qmsum_test_ppl(ds)  # Prepare the dataset in PPL Testing format. 
     ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
@@ -141,8 +141,11 @@ def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='te
     answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
     ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
 
+    keep_columns = {'input_ids', 'attention_mask', 'labels', 'mask_size'}
+    if with_answer: keep_columns.add('answer')
+
     # Remove unnecessary columns
-    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
+    column_to_remove = [name for name in ds.column_names if name not in keep_columns]
     ds = ds.remove_columns(column_to_remove)
 
     # Filter the dataset by lenght
