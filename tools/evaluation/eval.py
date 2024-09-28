@@ -22,6 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from pathlib import Path
 from peft import get_peft_model, LoraConfig, TaskType
+import modeling_rmt
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
@@ -92,7 +93,7 @@ parser.add_argument('--curriculum_segs', type=str, default=None, help='Comma-sep
 parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
 parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
-parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
+parser.add_argument('--max_context_length', type=int, default=10000, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 
 torch.manual_seed(3407)
