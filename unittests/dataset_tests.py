@@ -42,9 +42,6 @@ class TestLoadQADataset(unittest.TestCase):
         print("QMSum test dataset:")
         print(ds)
         
-        print("\nColumns in the dataset:")
-        print(ds.column_names)
-
         print("\nKeys of the first datapoint:")
         print(ds[0].keys())
         
@@ -60,6 +57,7 @@ class TestLoadQADataset(unittest.TestCase):
         self.assertIsInstance(ds, Dataset)
         self.assertTrue('labels' in ds.column_names)
         self.assertTrue('input_ids' in ds.column_names)
+        self.assertTrue('attention_mask' in ds.column_names)
         self.assertTrue('mask_size' in ds.column_names)
 
     def test_qmsum_train(self):
@@ -84,6 +82,37 @@ class TestLoadQADataset(unittest.TestCase):
 
         # Check if the dataset is not empty
         self.assertGreater(len(ds), 0)
+    
+    def test_qmsum_with_answer(self):
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+
+        print("tokenizer: ", type(tokenizer))
+
+        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=tokenizer)
+        print("QMSum test dataset:")
+        print(ds)
+        
+        print("\nKeys of the first datapoint:")
+        print(ds[0].keys())
+        
+        
+        print("\nFirst three data points:")
+        for i in range(3):
+            print(f"\nData point {i+1}:")
+            print("Length of input_ids: ", len(ds[i]['input_ids']))
+            print("Length of attention_mask: ", len(ds[i]['attention_mask']))
+            print("Length of labels", len(ds[i]['labels']))
+            print("mask_size", ds[i]['mask_size'])
+            print("answer", ds[i]['answer'])
+
+        self.assertIsInstance(ds, Dataset)
+        self.assertTrue('labels' in ds.column_names)
+        self.assertTrue('input_ids' in ds.column_names)
+        self.assertTrue('attention_mask' in ds.column_names)
+        self.assertTrue('mask_size' in ds.column_names)
+        self.assertTrue('answer' in ds.column_names)
+
     
     def test_qmsum_train_huggingface(self):
         from tools.data_processing.qmsum import load_qmsum_train

@@ -151,8 +151,11 @@ def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='te
     answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
     ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
 
+    keep_columns = {'input_ids', 'attention_mask', 'labels', 'mask_size'}
+    if with_answer: keep_columns.add('answer')
+
     # Remove unnecessary columns
-    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
+    column_to_remove = [name for name in ds.column_names if name not in keep_columns]
     ds = ds.remove_columns(column_to_remove)
 
     # Filter the dataset by lenght
