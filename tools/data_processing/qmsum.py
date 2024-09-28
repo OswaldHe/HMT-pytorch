@@ -114,9 +114,14 @@ def prepare_qmsum_train(dataset: List):
 
 
 
-def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl", **kwargs):
-    ds = load_qmsum_train_dataset(path=path)
-    ds = prepare_qmsum_train(ds)
+def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl", source=None, **kwargs):
+    if source == 'huggingface':
+        ds = load_dataset('ioeddk/qmsum', split='train', cache_dir=HF_HOME, streaming=kwargs.get('streaming', False))
+    else:
+        ds = load_qmsum_train_dataset(path=path)
+        ds = prepare_qmsum_train(ds)
+
+    # Tokenize the dataset
     ds = tokenize_dataset(ds, tokenizer=tokenizer, is_qa_task=True, text_column_name='text', **kwargs)
 
     # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 
@@ -132,9 +137,14 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/re
     return ds
 
 
-def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', **kwargs):
-    ds = load_qmsum_test_dataset(split=split, **kwargs)  # Load the dataset from Hugging Face
-    ds = prepare_qmsum_test_ppl(ds)  # Prepare the dataset in PPL Testing format. 
+def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', source=None, **kwargs):
+    if source == 'huggingface':
+        ds = load_dataset('ioeddk/qmsum', split=split, cache_dir=HF_HOME, streaming=kwargs.get('streaming', False))
+    else:
+        ds = load_qmsum_test_dataset(split=split, **kwargs)  # Load the dataset from Hugging Face
+        ds = prepare_qmsum_test_ppl(ds)  # Prepare the dataset in PPL Testing format. 
+
+    # Tokenize the text column
     ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
 
     # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 

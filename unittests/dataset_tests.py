@@ -84,7 +84,31 @@ class TestLoadQADataset(unittest.TestCase):
 
         # Check if the dataset is not empty
         self.assertGreater(len(ds), 0)
+    
+    def test_qmsum_train_huggingface(self):
+        from tools.data_processing.qmsum import load_qmsum_train
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
 
+        total_ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=tokenizer, source='huggingface')
+        splited_dict = total_ds.train_test_split(test_size=0.2)
+        train_ds = splited_dict['train']
+        valid_ds = splited_dict['test']
+
+        print("QMSum train dataset:")
+        print(train_ds)
+        
+        print("QMSum valid dataset:")
+        print(valid_ds)
+
+    def test_qmsum_test_huggingface(self):
+        from tools.data_processing.qmsum import load_qmsum_test
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+
+        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=tokenizer, source='huggingface')
+        print("QMSum test dataset:")
+        print(ds)
 
     def test_musique_test(self):
         from tools.data_processing.musique import load_musique_test
