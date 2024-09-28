@@ -197,8 +197,12 @@ def main():
     elif args.task_name == 'qmsum':
         from tools.data_processing.qmsum import load_qmsum_test
         test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test')
+    elif args.task_name == 'ioeddk/qmsum':
+        from tools.data_processing.qmsum import load_qmsum_test
+        test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
     else:
-        raise NotImplementedError(f"Task {args.task_name} is not supported")
+        from tools.registry import VALID_TASK_NAMES
+        raise NotImplementedError(f"Task {args.task_name} is not supported, please choose from {VALID_TASK_NAMES}")
 
     # Print dataset sizes
     print(f"Test dataset size: {len(test_ds)}")

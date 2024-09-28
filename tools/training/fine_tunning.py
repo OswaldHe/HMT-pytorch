@@ -202,13 +202,19 @@ def main():
         splited_dict = total_ds.train_test_split(test_size=0.2)
         train_ds = splited_dict['train']
         valid_ds = splited_dict['test']
+    elif args.task_name == 'ioeddk/qmsum':
+        from tools.data_processing.qmsum import load_qmsum_train
+        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
+        splited_dict = total_ds.train_test_split(test_size=0.2)
+        train_ds = splited_dict['train']
+        valid_ds = splited_dict['test']
     elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
         valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
     else:
-        train_ds = datasets.load_dataset(args.task_name, args.task_subset, split=['train'], streaming=args.streaming, trust_remote_code=True)
-        train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
+        from tools.registry import VALID_TASK_NAMES
+        raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
 
     # Print the length of train and validation datasets
     logger.info(f"Number of training datapoints: {len(train_ds)}")
