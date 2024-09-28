@@ -52,7 +52,6 @@ class TestLoadQADataset(unittest.TestCase):
         print("\nFirst three data points:")
         for i in range(3):
             print(f"\nData point {i+1}:")
-            print("Answer Length: ", ds[i]['answer_length'])
             print("Length of input_ids: ", len(ds[i]['input_ids']))
             print("Length of attention_mask: ", len(ds[i]['attention_mask']))
             print("Length of labels", len(ds[i]['labels']))

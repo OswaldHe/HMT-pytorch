@@ -103,7 +103,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
                 lambda x: group_texts_qa(x),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
-                remove_columns=['answer_length'] if is_qa_task else None,
+                remove_columns=None,
                 num_proc=8
             )
         else:

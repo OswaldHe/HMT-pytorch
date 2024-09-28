@@ -29,7 +29,7 @@ def prepare_qmsum_test_ppl(dataset: datasets.Dataset):
     context_delimiter = "Document: "
     answer_delimiter = "Answer: "
 
-    def qmsum_entry_to_text(dataset):
+    def qmsum_entry_to_text_longbench(dataset):
         """
         Convert a QMSum dataset entry to a text entry. 
         The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
@@ -39,7 +39,7 @@ def prepare_qmsum_test_ppl(dataset: datasets.Dataset):
             "answer": [entry[0] for entry in dataset['answers']],
         }
 
-    dataset = dataset.map(qmsum_entry_to_text, batched=True, 
+    dataset = dataset.map(qmsum_entry_to_text_longbench, batched=True, 
                                                     desc=f"Concatenating QA Input Questions and Contexts",
                                                     num_proc=8).remove_columns(['input', 'context', 'answers', 'length', 
                                                                                 'dataset', 'language', 'all_classes', '_id'])
@@ -103,7 +103,7 @@ def prepare_qmsum_train(dataset: List):
         """
         return {
             "text": [f"{prompt}\n{question_delimiter}{entry[0]}\n{context_delimiter}{entry[1]}\n{answer_delimiter}{entry[2]}" for entry in zip(dataset['task'], dataset['meeting_notes'], dataset['answers'])],
-            "answer_length": [len(answer) for answer in dataset['answers']]
+            "answer": dataset['answers']
         }
 
     dataset = dataset.map(qmsum_entry_to_text, batched=True,
@@ -118,27 +118,34 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/re
     ds = load_qmsum_train_dataset(path=path)
     ds = prepare_qmsum_train(ds)
     ds = tokenize_dataset(ds, tokenizer=tokenizer, is_qa_task=True, text_column_name='text', **kwargs)
+
+    # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 
+    answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
+    ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
+
+    # Remove unnecessary columns
+    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
+    ds = ds.remove_columns(column_to_remove)
+
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
     ds = group_dataset(ds, split='train', history_size=None, block_size=block_size, is_qa_task=True)
     return ds
 
-def determine_answer_length(dataset, answer_ids):
-    return {
-        "mask_size": [len(answer_id) for answer_id in answer_ids],
-        "text": [entry for entry in dataset['text']]
-    }
 
 def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='test', **kwargs):
     ds = load_qmsum_test_dataset(split=split, **kwargs)  # Load the dataset from Hugging Face
     ds = prepare_qmsum_test_ppl(ds)  # Prepare the dataset in PPL Testing format. 
-    print(ds.column_names)
-    quit()
     ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
+
+    # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 
     answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
-    for answer_id in answer_ids:
-        print(len(answer_id))
+    ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
+
+    # Remove unnecessary columns
     column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
-    ds = ds.map(lambda ds: determine_answer_length(ds, answer_ids), batched=True, desc=f"Determining answer length", num_proc=8).remove_columns(column_to_remove)
+    ds = ds.remove_columns(column_to_remove)
+
+    # Filter the dataset by lenght
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
     ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True)
     return ds
