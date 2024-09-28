@@ -4,7 +4,7 @@ import os
 from typing import List, Union
 import warnings
 
-HF_HOME = os.environ["HF_HOME"]
+HF_HOME = os.environ.get("HF_HOME", None)
 
 """
 Load the NarrativeQA dataset from Hugging Face.
