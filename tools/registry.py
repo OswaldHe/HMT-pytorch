@@ -1,3 +1,3 @@
 VALID_TASK_NAMES = {
-    'ioeddk/qmsum', 'qmsum', 'musique', 'narrative_qa'
+    'ioeddk/qmsum', 'musique', 'narrative_qa'
 }

@@ -75,10 +75,12 @@ class MemoryCell(torch.nn.Module):
         return out, new_memory_state, self.prepend_list
     
     def generate(self, input_ids, memory_state, prepend_state, attention_mask, **generate_kwargs):
+
+
         if memory_state is None and self.num_mem_tokens > 0:
             memory_state = self.set_memory(input_ids.shape)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)
+        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)        
         out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
         return out
 
@@ -315,7 +317,6 @@ class RecurrentWrapper(torch.nn.Module):
         memory_seq = None
 
         print('start parsing')
-        print(input_ids.shape)
         for seg_num, segment in enumerate(segmented[:-1]):
             for k, v in segment.items():
                 segment[k] = v.cuda()

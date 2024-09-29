@@ -94,6 +94,7 @@ parser.add_argument('--recache_splits', type=str, default=None, help='Provide a 
 parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='Whether the task is a QA task')
 parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train for')
+parser.add_argument('--rouge', action='store_true', default=False, help='Whether to evaluate Rouge-L')
 
 torch.manual_seed(3407)
 
@@ -192,12 +193,6 @@ def main():
     if args.task_name == 'deepmind/narrativeqa':
         from tools.data_processing.narrativeqa import load_narrativeqa_train_valid
         train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
-    elif args.task_name == 'qmsum':
-        from tools.data_processing.qmsum import load_qmsum_train
-        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
-        splited_dict = total_ds.train_test_split(test_size=0.2)
-        train_ds = splited_dict['train']
-        valid_ds = splited_dict['test']
     elif args.task_name == 'ioeddk/qmsum':
         from tools.data_processing.qmsum import load_qmsum_train
         total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
@@ -348,6 +343,7 @@ def main():
                     valid_losses = []
                     valid_ppl = []
                     valid_f1 = []
+                    valid_rouge = []
                     valid_gen = iter(valid_dataloader)
                     model.eval()
                     for _ in range(args.validation_steps):
@@ -357,14 +353,22 @@ def main():
                         batch['segment_size'] = block_size
                         with torch.no_grad():
                             out, _ = model(**batch)
+                        if args.rouge:
+                            text_out = tokenizer.decode(model.generate(**batch), skip_special_tokens=True)
+                            rouge = model.rouge(text_out, batch['answer'])
+                            valid_rouge.append(rouge['rouge1'].detach().item())
                         loss = out.loss
                         ppl = out.ppl
                         f1 = out.f1['f1']
+
                         valid_losses.append(loss.detach().item())
                         valid_ppl.append(ppl.detach().item())
                         valid_f1.append(f1)
+
                     # Log to wandb by calling `accelerator.log`, `step` is optional
                     accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl), "Validation F1": np.mean(valid_f1), "Epoch": epoch}, step=global_step)
+                    if args.rouge:
+                        accelerator.log({"Validation Rouge": np.mean(valid_rouge), "Epoch": epoch}, step=global_step)
                     model.train()
 
             accelerator.wait_for_everyone()
