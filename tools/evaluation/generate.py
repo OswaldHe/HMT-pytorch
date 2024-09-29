@@ -27,14 +27,13 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from pathlib import Path
 from peft import get_peft_model, LoraConfig, TaskType
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
-from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+# from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
 from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
 
-from tools.data_processing.hmt_qa_datasets import load_qa_dataset
 from tools.collate import hmt_collate_fn
 from tools.models import load_model
 
@@ -175,9 +174,7 @@ def main():
     
     # Log the step
     logger.info("Loading datasets")
-    if args.task_name == 'deepmind/narrativeqa':
-        demo_points = load_qa_dataset('deepmind/narrativeqa', split='test[:' + str(args.test_step) + ']', streaming=args.streaming, trust_remote_code=True)
-    elif args.task_name == 'qmsum':
+    if args.task_name == 'qmsum':
         from tools.data_processing.qmsum import load_qmsum_test
         demo_points = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
@@ -235,7 +232,9 @@ def main():
     # print(batch.keys())
     out = model.generate(**batch)
     # print(out.keys())
-    print(out)
+    print('start decoding')
+    decoded_text = tokenizer.decode(out[0], skip_special_tokens=True)
+    print(decoded_text)
     quit()
 
     # Start Testing
