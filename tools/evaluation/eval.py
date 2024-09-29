@@ -190,7 +190,8 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        test_ds = load_qa_dataset('deepmind/narrativeqa', split='test[:' + str(args.test_step) + ']', streaming=args.streaming, trust_remote_code=True)
+        from tools.data_processing.narrativeqa import load_narrativeqa_test
+        test_ds = load_narrativeqa_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test')
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
         from tools.data_processing.red_pajamav2 import load_redpajama
         test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)

@@ -2,7 +2,7 @@ from typing import List
 import datasets
 
 def filter_by_length(dataset: datasets.Dataset, max_token_num: int, tokens_column_name: str='text'):
-    dataset = dataset.filter(lambda x: len(x[tokens_column_name]) < max_token_num)
+    dataset = dataset.filter(lambda x: len(x[tokens_column_name]) < max_token_num, num_proc=8)
     assert len(dataset) != 0, f"The number of samples with length < {max_token_num} is 0!"
     return dataset
 
