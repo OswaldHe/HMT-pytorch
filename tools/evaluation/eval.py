@@ -31,7 +31,6 @@ from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
 
-from tools.data_processing.hmt_qa_datasets import load_qa_dataset
 from tools.collate import hmt_collate_fn
 
 parser = ArgumentParser()
