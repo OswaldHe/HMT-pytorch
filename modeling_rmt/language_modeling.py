@@ -221,10 +221,6 @@ class RecurrentWrapper(torch.nn.Module):
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
-        # if self.rmt_config.get('is_qa_task'):
-        #     n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
-        # else:
-        #     n_cell_out = self.rmt_config.get('n_cell_out')
         n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
 
