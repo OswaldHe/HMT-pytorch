@@ -36,9 +36,10 @@ echo HF_HOME=$HF_HOME
 accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --learning_rate=1e-5 \
     --model_name=HuggingFaceTB/SmolLM-135M \
-    --task_name=qmsum \
+    --task_name=ioeddk/qmsum \
     --task_subset=sample \
     --training_step=1000 \
+    --epochs=5 \
     --num_sensory=32 \
     --segment_length=1024 \
     --bptt_depth=6 \
@@ -54,7 +55,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --wandb_entity=yic033-ucsd \
     --wandb_run=qmsum_fine_tuning \
     --wandb_project=qa_fine_tuning \
-    --max_context_length=16000 \
+    --max_context_length=20000 \
     --is_qa_task \
     --load_from_ckpt=/home/yingqi/scratch/c00/hmt_pretrained/smollm-135m/model_weights_500_lv_3.pth 
 
