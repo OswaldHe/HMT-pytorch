@@ -191,11 +191,8 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        train_ds = load_qa_dataset('deepmind/narrativeqa', split=['train'], streaming=args.streaming, trust_remote_code=True)
-        valid_ds = load_qa_dataset('deepmind/narrativeqa', split=['validation'], streaming=args.streaming, trust_remote_code=True)
-        # Print number of validation and train datapoints
-        logger.info(f"Number of training datapoints: {len(train_ds)}")
-        logger.info(f"Number of validation datapoints: {len(valid_ds)}")
+        from tools.data_processing.narrativeqa import load_narrativeqa_train_valid
+        train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
     elif args.task_name == 'qmsum':
         from tools.data_processing.qmsum import load_qmsum_train
         total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
@@ -219,7 +216,6 @@ def main():
     # Print the length of train and validation datasets
     logger.info(f"Number of training datapoints: {len(train_ds)}")
     logger.info(f"Number of validation datapoints: {len(valid_ds)}")
-
 
     # Create dataloaders
     valid_dataloader = DataLoader(valid_ds, batch_size=batch_size,
