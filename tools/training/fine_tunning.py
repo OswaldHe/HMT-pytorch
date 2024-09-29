@@ -31,7 +31,6 @@ import logging, shutil
 from accelerate.logging import get_logger
 from tools.collate import hmt_collate_fn
 
-from tools.data_processing.hmt_qa_datasets import load_qa_dataset
 from tools.models import load_model
 
 parser = ArgumentParser()
