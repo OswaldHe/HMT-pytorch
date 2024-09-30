@@ -30,7 +30,7 @@ from modeling_rmt.compression import inject_eae
 from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
-
+from tools.models import load_model
 from tools.collate import hmt_collate_fn
 
 parser = ArgumentParser()
@@ -94,7 +94,8 @@ parser.add_argument('--wandb_run', type=str, default=None, help='Name for the Wa
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
 parser.add_argument('--max_context_length', type=int, default=10000, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
-
+parser.add_argument('--rouge', action='store_true', default=False, help='compute rouge-l score')
+parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a qa task')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -136,7 +137,6 @@ def main():
         word_emb_dim = model.config.word_embed_proj_dim
     else:
         word_emb_dim = model.config.hidden_size
-
 
     curriculum = args.curriculum
     if curriculum and args.curriculum_segs is None:
@@ -184,7 +184,7 @@ def main():
     """### Prepare dataset"""
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.task_name in qa_tasks, block_size=block_size, batch_size=batch_size)
+    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size)
     
     # Log the step
     logger.info("Loading datasets")
@@ -213,75 +213,7 @@ def main():
                                 collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
     
     logger.info("Preparing memory cell")
-    if args.rmt_only or args.baseline_only:
-        cell = MemoryCell(model, 
-                    num_mem_tokens=memory_size,
-                    num_prepend=0)
-
-        model = RecurrentWrapper(cell,
-                                segment_size=block_size,
-                                max_n_segments=n_segments,
-                                mask_size=mask_size,
-                                n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment
-                                )
-    else:
-        cell = MemoryCell(model, 
-                        num_mem_tokens=memory_size,
-                        num_prepend=args.num_sensory)
-
-        if args.hmt_stage_1:
-            model = RecurrentWrapper(cell,
-                                segment_size=block_size,
-                                max_n_segments=max(levels) if curriculum else n_segments,
-                                mask_size=mask_size,
-                                n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment
-                                )
-        else:
-            if args.load_from_ckpt is not None and args.hmt_stage_2:
-                ori_model = RecurrentWrapper(cell,
-                                segment_size=block_size,
-                                max_n_segments=max(levels) if curriculum else n_segments,
-                                mask_size=mask_size,
-                                n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment)
-                
-                # state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
-                # ori_model.load_state_dict(state_dict)
-                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
-                # Remove the 'module.' prefix from all state dict keys
-                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                state_dict = new_state_dict
-                ori_model.load_state_dict(state_dict)
-                cell = copy.deepcopy(ori_model.memory_cell)
-
-            logger.info(f'Creating model with max_n_segments: {max(levels)}')
-            model = RecurrentWrapper(cell,
-                                emb=copy.deepcopy(model.get_input_embeddings()),
-                                word_emb_dim=word_emb_dim,
-                                hidden_dim=args.mem_recall_hidden_dim,
-                                ltm_context=args.mem_recall_context,
-                                segment_size=block_size,
-                                max_n_segments=max(levels) if curriculum else n_segments,
-                                mask_size=mask_size,
-                                n_cell_out=args.num_seg_save,
-                                segment_alignment=args.segment_alignment,
-                                is_qa_task=args.task_name in qa_tasks
-                                )
-            
-            if args.load_from_ckpt is not None and not args.hmt_stage_2:
-                # checkpoint_dir = os.path.dirname(args.load_from_ckpt)
-                state_dict = torch.load(args.load_from_ckpt,map_location='cuda:0')
-                # Remove the 'module.' prefix from all state dict keys
-                new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}  # FIXME: while saving the state dicts while the model is wrapped, all the weights have a model. prefix and needed to be removed when loading. We should fix this by unwrapping before saving. 
-                # if args.model_name == 'openlm-research/open_llama_3b_v2':
-                #     new_state_dict = {k.replace('base_model.model.', ''): v for k, v in new_state_dict.items()}
-                state_dict = new_state_dict
-                model.load_state_dict(state_dict)
-                # tag = os.path.basename(args.load_from_ckpt)
-                # state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, 'opt-350m')
-                # model.load_state_dict(state_dict)
+    model = load_model(args, model=model, memory_size=memory_size, block_size=block_size, n_segments=n_segments, mask_size=mask_size, word_emb_dim=word_emb_dim)
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
@@ -318,6 +250,7 @@ def main():
     test_losses = []
     test_ppl = []
     total_hist = []
+    test_rouge = []
 
     test_gen = iter(test_dataloader)
 
@@ -334,12 +267,25 @@ def main():
             batch['prof'] = True
         with torch.no_grad():
             out, hist = model(**batch)
+
+        if args.rouge:
+            # text_out = tokenizer.decode(out.input_ids, skip_special_tokens=True)
+            del batch['labels_mask']
+            text_labels = model.generate(**batch)
+            text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
+            rouge = model.rouge(text_out, batch['answer'])
+
+        
         loss = out.loss
         ppl = out.ppl
         f1 = out.f1['f1']
         accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1.item()}, step=step)
+        if args.rouge:
+            accelerator.log({"Test Rouge1": rouge['rouge1'].item()}, step=step)
+            test_rouge.append(rouge['rouge1'].detach().item())
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
+
         if hist is not None:
             total_hist.extend(hist)
 
