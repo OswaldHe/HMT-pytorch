@@ -81,15 +81,7 @@ class MemoryCell(torch.nn.Module):
         if memory_state is None and self.num_mem_tokens > 0:
             memory_state = self.set_memory(input_ids.shape)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)
-
-        # Remove 'mask_size' and 'label_mask' from generate_kwargs if present
-        generate_kwargs.pop('mask_size', None)
-        generate_kwargs.pop('labels_mask', None)
-
-        print(seg_kwargs)
-        print(generate_kwargs)
-        
+        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)        
         out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
         return out
 

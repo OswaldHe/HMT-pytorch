@@ -10,7 +10,7 @@ else
 fi
 
 if [ "$(hostname)" = "vastlab" ]; then export HF_HOME="/home/yingqi/scratch/head";
-elif [ "$(hostname)" = "c00" ]; then export HF_HOME="/home/yingqi/scratch/c00/cache";
+elif [ "$(hostname)" = "c00" ]; then export HF_HOME="/home/yingqi/scratch/hf_home";
 elif [ "$(hostname)" = "c01" ]; then export HF_HOME="/home/yingqi/scratch/c01/cache";
 elif [ "$(hostname)" = "c02" ]; then export HF_HOME="/home/yingqi/scratch/c02/cache"; 
 elif [ "$(hostname)" = "c03" ]; then export HF_HOME="/home/yingqi/scratch/c03/cache"; fi
@@ -71,10 +71,12 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum \
             --curriculum_segs=2,3,4,6,8 \
             --wandb_entity=yic033-ucsd \
-            --wandb_run=evaluate_qmsum_baseline \
+            --wandb_run=evaluate_qmsum_trained \
             --wandb_project=qa_fine_tuning \
+            --rouge \
+            --is_qa_task \
             --max_context_length=16000 \
-            --load_from_ckpt="/home/yingqi/scratch/c00/checkpoints/fine_tuning/opt-350m/narrative_qa/model_weights_580.pth"
+            --load_from_ckpt="/home/yingqi/scratch/c00/checkpoints/fine_tuning/opt-350m/qmsum/model_weights_181.pth"
     done
 done
 

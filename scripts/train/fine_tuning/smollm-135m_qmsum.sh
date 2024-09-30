@@ -4,7 +4,7 @@ eval "$(conda shell.bash hook)"
 conda activate llm
 
 if [ "$(hostname)" = "vastlab" ]; then export HF_HOME="/home/yingqi/scratch/head";
-elif [ "$(hostname)" = "c00" ]; then export HF_HOME="/home/yingqi/scratch/c00/cache";
+elif [ "$(hostname)" = "c00" ]; then export HF_HOME="/home/yingqi/scratch/hf_home";
 elif [ "$(hostname)" = "c01" ]; then export HF_HOME="/home/yingqi/scratch/c01/cache";
 elif [ "$(hostname)" = "c02" ]; then export HF_HOME="/home/yingqi/scratch/c02/cache"; fi
 
@@ -31,7 +31,7 @@ echo HF_HOME=$HF_HOME
 
 
 # Uncomment to disable wandb tracking
-# export WANDB_MODE=offline
+export WANDB_MODE=offline
 
 accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --learning_rate=1e-5 \
@@ -57,6 +57,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --wandb_project=qa_fine_tuning \
     --max_context_length=20000 \
     --is_qa_task \
+    --rouge \
     --load_from_ckpt=/home/yingqi/scratch/c00/hmt_pretrained/smollm-135m/model_weights_500_lv_3.pth 
 
 # Available model names:
