@@ -10,6 +10,7 @@ from accelerate.logging import get_logger
 from torch.profiler import profile, record_function, ProfilerActivity
 import random
 import evaluate
+from huggingface_hub import PyTorchModelHubMixin
 
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
@@ -80,7 +81,15 @@ class MemoryCell(torch.nn.Module):
         if memory_state is None and self.num_mem_tokens > 0:
             memory_state = self.set_memory(input_ids.shape)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)        
+        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)
+
+        # Remove 'mask_size' and 'label_mask' from generate_kwargs if present
+        generate_kwargs.pop('mask_size', None)
+        generate_kwargs.pop('labels_mask', None)
+
+        print(seg_kwargs)
+        print(generate_kwargs)
+        
         out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
         return out
 
@@ -182,7 +191,7 @@ class MemoryMap(torch.nn.Module):
         else:
             return self.inv_linear(inputs)
 
-class RecurrentWrapper(torch.nn.Module):
+class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
     def __init__(self, memory_cell, emb=None, word_emb_dim=4096, hidden_dim=4096, ltm_context=100, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
@@ -223,6 +232,10 @@ class RecurrentWrapper(torch.nn.Module):
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
+        # if self.rmt_config.get('is_qa_task'):
+        #     n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
+        # else:
+        #     n_cell_out = self.rmt_config.get('n_cell_out')
         n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
 
