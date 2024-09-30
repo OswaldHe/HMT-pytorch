@@ -177,7 +177,7 @@ def main():
     if args.task_name == 'qmsum':
         from tools.data_processing.qmsum import load_qmsum_test
         demo_points = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
-    if args.task_name == 'musique':
+    elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_test
         demo_points = load_musique_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
