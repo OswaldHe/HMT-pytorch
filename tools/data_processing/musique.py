@@ -87,6 +87,6 @@ def load_musique_test(test_length, block_size, tokenizer, with_answer=False, **k
     column_to_remove = [name for name in ds.column_names if name not in keep_columns]
     ds = ds.remove_columns(column_to_remove)
     
-    ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True)
+    ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True, with_answer=with_answer)
     return ds
 

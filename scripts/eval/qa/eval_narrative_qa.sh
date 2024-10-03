@@ -63,7 +63,7 @@ for test_length in "${test_lengths[@]}"; do
             --num_seg_save=8 \
             --batch_size=1 \
             --test_length=${test_length} \
-            --test_step=100 \
+            --test_step=200 \
             --save_dir=/home/yingqi/scratch/c00/checkpoints/rp_opt-350m \
             --save_interval=10 \
             --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
