@@ -96,6 +96,8 @@ parser.add_argument('--max_context_length', type=int, default=10000, help='Maxim
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 parser.add_argument('--rouge', action='store_true', default=False, help='compute rouge-l score')
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a qa task')
+parser.add_argument('--temperature', type=float, default=1.0, help='temperature for sampling')
+parser.add_argument('--max_new_tokens', type=int, default=100, help='maximum number of new tokens generated')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -116,7 +118,9 @@ def main():
     # Initialize WanDB Tracker
     accelerator.init_trackers(
         project_name=args.wandb_project, 
-        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, "model_name": args.model_name, "test_length": args.test_length, "checkpoint": os.path.basename(args.load_from_ckpt)},
+        config={"dropout": 0.1, "learning_rate": 1e-5, "task_name": args.task_name, 
+                "model_name": args.model_name, "test_length": args.test_length, "checkpoint": os.path.basename(args.load_from_ckpt),
+                "temperature": args.temperature},
         init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
@@ -196,10 +200,13 @@ def main():
         test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
     elif args.task_name == 'qmsum':
         from tools.data_processing.qmsum import load_qmsum_test
-        test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test')
+        test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test', with_answer=True)
     elif args.task_name == 'ioeddk/qmsum':
         from tools.data_processing.qmsum import load_qmsum_test
         test_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
+    elif args.task_name == 'musique':
+        from tools.data_processing.musique import load_musique_test
+        test_ds = load_musique_test(test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     else:
         from tools.registry import VALID_TASK_NAMES
         raise NotImplementedError(f"Task {args.task_name} is not supported, please choose from {VALID_TASK_NAMES}")
@@ -257,8 +264,9 @@ def main():
     # Start Testing
     for step in tqdm.tqdm(range(args.test_step)):
         batch = next(test_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
+        # for k, v in batch.items():
+        #     batch[k] = v.cpu()
+        answer_ = batch.pop('answer')
         batch['segment_size'] = block_size
         if args.dynamic:
             batch['extra_size'] = args.num_sensory//2
@@ -268,21 +276,21 @@ def main():
         with torch.no_grad():
             out, hist = model(**batch)
 
-        if args.rouge:
-            # text_out = tokenizer.decode(out.input_ids, skip_special_tokens=True)
-            del batch['labels_mask']
-            text_labels = model.generate(**batch)
-            text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
-            rouge = model.rouge(text_out, batch['answer'])
-
+        if args.rouge:  # Set max new tokens according to LongBench
+            generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature)
+            text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
+            # print(text_out)
+            # print(answer_)
+            # print(type(answer_))
+            rouge = model.rouge.compute(predictions=[text_out], references=[answer_])
         
         loss = out.loss
         ppl = out.ppl
         f1 = out.f1['f1']
         accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1.item()}, step=step)
         if args.rouge:
-            accelerator.log({"Test Rouge1": rouge['rouge1'].item()}, step=step)
-            test_rouge.append(rouge['rouge1'].detach().item())
+            accelerator.log({"Test RougeL": rouge['rougeL'].item()}, step=step)
+            test_rouge.append(rouge['rougeL'].item())
         test_losses.append(loss.detach().item())
         test_ppl.append(ppl.detach().item())
 
@@ -302,19 +310,19 @@ def main():
 
     print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
-    if args.generate is not None and device == torch.device('cuda:0'):
-        with open(args.generate, 'r') as f:
-            prompt_text = f.read()
+    # if args.generate is not None and device == torch.device('cuda:0'):
+    #     with open(args.generate, 'r') as f:
+    #         prompt_text = f.read()
 
-        encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
-        output_seq = model.generate(
-            input_ids = encoded_prompt.input_ids.cpu(),
-            attention_mask = encoded_prompt.attention_mask.cpu(),
-            segment_size = block_size,
-            max_new_tokens = 100,
-            temperature = 0.6
-        )
-        print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+    #     encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
+    #     output_seq = model.generate(
+    #         input_ids = encoded_prompt.input_ids.cpu(),
+    #         attention_mask = encoded_prompt.attention_mask.cpu(),
+    #         segment_size = block_size,
+    #         max_new_tokens = 100,
+    #         temperature = 0.6
+    #     )
+    #     print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
     
     accelerator.end_training()
 

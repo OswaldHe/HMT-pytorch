@@ -352,20 +352,14 @@ def main():
                         batch = next(valid_gen)
                         # for k, v in batch.items():
                         #     batch[k] = v.cpu()
-                        batch['segment_size'] = block_size
-                        batch_cpy = copy.deepcopy(batch)
                         with torch.no_grad():
                             out, _ = model(**batch)
 
-                            # if args.rouge:
-                            #     print(batch)
-
-                            #     # text_out = tokenizer.decode(out.input_ids, skip_special_tokens=True)
-                            #     del batch_cpy['labels_mask']
-                            #     text_labels = model.generate(**batch_cpy)
-                            #     text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
-                            #     rouge = model.rouge(text_out, batch['answer'])
-                            #     valid_rouge.append(rouge['rouge1'].detach().item())
+                            if args.rouge:
+                                text_labels = model.generate(input_ids=batch[0]['input_ids'], attention_mask=batch[0]['attention_mask'], segment_size=block_size)
+                                text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
+                                rouge = model.rouge(text_out, batch['answer'])
+                                valid_rouge.append(rouge['rouge1'].detach().item())
 
                         loss = out.loss
                         ppl = out.ppl

@@ -29,7 +29,6 @@ echo HF_HOME=$HF_HOME
 # rm -rf /home/yingqi/scratch/c00/cache/tokenized
 # rm -rf /home/yingqi/scratch/c00/cache/grouped
 
-
 # Uncomment to disable wandb tracking
 export WANDB_MODE=offline
 
@@ -46,7 +45,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --num_seg_save=8 \
     --batch_size=1 \
     --mem_recall_hidden_dim=1536 \
-    --save_dir=/home/yingqi/scratch/c00/checkpoints/fine_tuning/smollm-135m/musique \
+    --save_dir=/home/yingqi/scratch/checkpoints/smollm-135m/musique \
     --save_interval=20 \
     --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
     --validation_interval=40 \
@@ -57,7 +56,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --max_context_length=16000 \
     --is_qa_task \
     --rouge \
-    --load_from_ckpt=/home/yingqi/scratch/c00/hmt_pretrained/smollm-135m/smollm-musique/model_weights_901.pth
+    --load_from_ckpt=/home/yingqi/scratch/hmt_pretrained/smollm-135m/smollm-musique/model_weights_901.pth
 
 # Available model names:
 # meta-llama/Llama-2-7b-hf

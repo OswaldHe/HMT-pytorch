@@ -16,7 +16,8 @@ def hmt_collate_fn(batch, id_pad_value, is_qa_task, block_size, batch_size):
         collated = {'input_ids': input_ids,
                     'labels': labels,
                     'attention_mask': attention_mask,
-                    'mask_size': torch.tensor(batch[0]['mask_size']) }
+                    'mask_size': torch.tensor(batch[0]['mask_size']),
+                    'answer': batch[0]['answer'] }
     else:
         collated = {'input_ids': input_ids,
                     'labels': labels,

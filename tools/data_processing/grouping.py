@@ -46,7 +46,7 @@ def dilated_sample(examples, insert_len, period, insert_str, tokenizer):
 
     return res
 
-def group_texts(examples, block_size, history_size=None, **kwargs):
+def group_texts(examples, block_size, history_size=None, with_answer=False, **kwargs):
     if kwargs.get('interleave_dataset', False):
         interleave_len = kwargs.get('interleave_len', None)
         assert interleave_len is not None, "Interleave Length must be provided if interleave dataset. "
@@ -71,16 +71,18 @@ def group_texts(examples, block_size, history_size=None, **kwargs):
             for k, t in concatenated_examples.items()
         }
     result["labels"] = result["input_ids"].copy()
+    if with_answer: result["answer"] = result["answer"].copy()
     return result
 
-def group_texts_qa(examples):
+def group_texts_qa(examples, with_answer=False):
     result = {k: v for k, v in examples.items()}
     result["labels"] = result["input_ids"].copy()
     result["mask_size"] = result["mask_size"].copy()  # qa tasks should not be grouped
+    if with_answer: result["answer"] = result["answer"].copy()
     return result
 
 # Function to load or create grouped dataset
-def group_dataset(dataset, split, history_size, block_size, levels: List[int]=None, is_qa_task=False):
+def group_dataset(dataset, split, history_size, block_size, levels: List[int]=None, is_qa_task=False, with_answer=False):
     if levels is not None:
         grouped_datasets = []
         for i,n_segs in enumerate(levels):
@@ -90,7 +92,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
             curr_history_size = (curr_n_segments - 1) * block_size
 
             grouped_dataset = data_subset.map(
-                lambda x: group_texts(x, curr_history_size, block_size),
+                lambda x: group_texts(x, curr_history_size, block_size, with_answer=with_answer),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}, {n_segs} segments, " + (f" and history {history_size}" if split == 'train' else ""),
                 num_proc=8
@@ -100,7 +102,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
     else:
         if is_qa_task:
             grouped_dataset = dataset.map(
-                lambda x: group_texts_qa(x),
+                lambda x: group_texts_qa(x, with_answer=with_answer),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
                 remove_columns=None,
@@ -108,7 +110,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
             )
         else:
             grouped_dataset = dataset.map(
-                lambda x: group_texts(x, history_size, block_size),
+                lambda x: group_texts(x, history_size, block_size, with_answer=with_answer),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
                 num_proc=16
