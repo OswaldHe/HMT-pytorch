@@ -63,7 +63,7 @@ accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/openllama_3b_v2/model_weights_0_lv_2.pth"
 
 accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
@@ -93,7 +93,7 @@ accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/openllama_3b_v2/openllama-musique/model_weights_1301.pth"
 
 # Available model names:

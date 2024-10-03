@@ -63,7 +63,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/smollm-135m/model_weights_0_lv_2.pth"
 
 
@@ -94,7 +94,7 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/smollm-135m/smollm-qmsum/model_weights_1245.pth"
 
 # Available model names:

@@ -63,7 +63,7 @@ accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/opt-350m/model_weights_0_lv_2_step2.pth"
 
 
@@ -93,7 +93,7 @@ accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
     --is_qa_task \
-    --max_context_length=16000 \
+    --max_context_length=16000000 \
     --load_from_ckpt="/home/yingqi/scratch/hmt_pretrained/opt-350m/opt-350m-musique/model_weights_201.pth"
 
 # Available model names:
