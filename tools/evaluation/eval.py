@@ -35,8 +35,6 @@ from tools.collate import hmt_collate_fn
 
 parser = ArgumentParser()
 
-qa_tasks = {'deepmind/narrativeqa'}
-
 #cli arguments
 parser.add_argument('--task_name', type=str, default='wikitext', help='training/validation task name (e.g. wikitext, pg19, samsum, etc.)')
 parser.add_argument('--task_subset', type=str, default=None, help='subset of dataset (e.g., wikitext-2-v1)')

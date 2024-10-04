@@ -104,7 +104,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
             grouped_dataset = dataset.map(
                 lambda x: group_texts_qa(x, with_answer=with_answer),
                 batched=True,
-                desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
+                desc=f"Grouping {split} in chunks of {block_size}" + (f" and no history size for this QA task" if split == 'train' else ""),
                 remove_columns=None,
                 num_proc=8
             )
