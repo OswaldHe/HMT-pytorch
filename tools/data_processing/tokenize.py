@@ -10,7 +10,6 @@ def tokenization(dataset, tokenizer, text_column_name):
     return tokenizer(dataset[text_column_name])
 
 def tokenize_column(dataset, tokenizer, column_name):
-    print(dataset['answer'])
     return tokenizer(dataset[column_name])['input_ids']
 
 def tokenize_dataset(dataset, tokenizer, text_column_name='text', **kwargs):

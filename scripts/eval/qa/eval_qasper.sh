@@ -29,16 +29,16 @@ cd /home/yingqi/repo/HMT-pytorch
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
-# export WANDB_MODE=offline
+
 
 accelerate env
 
 # Configure the task. Define the task specific parameters here, and the configuration of the models remain the change when evaluating different tasks. 
-export TASK_NAME=narrativeqa
+export TASK_NAME=qasper
 export MAX_NEW_TOKENS=128
 
 # >>> SmolLM-135M >>>
-accelerate launch --main_process_port=29501 /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
+accelerate launch /home/yingqi/repo/HMT-pytorch/tools/evaluation/eval.py \
     --learning_rate=1e-4 \
     --model_name=HuggingFaceTB/SmolLM-135M \
     --task_name=${TASK_NAME} \
