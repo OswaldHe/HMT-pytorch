@@ -161,5 +161,4 @@ def load_qmsum_test(max_token_num, test_length, block_size, tokenizer, split='te
     # Filter the dataset by lenght
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
     ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True, with_answer=with_answer)
-    print(ds)
     return ds

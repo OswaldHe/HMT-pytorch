@@ -38,7 +38,6 @@ checkpoints=(
     model_weights_0_lv_2.pth
 )
 
-test_lengths=(3000)
 
 # FIXME: We need to modify the num_seg_save so that num_seg_save * 990 is at least as long as 
 # the length of the lables, or the number of tokens in the labels will be capped at this length. 
