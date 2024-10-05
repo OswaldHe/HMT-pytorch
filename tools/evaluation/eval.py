@@ -33,6 +33,9 @@ from accelerate.logging import get_logger
 from tools.models import load_model
 from tools.collate import hmt_collate_fn
 
+from datasets import load_dataset
+from tools.data_processing.generic import prepare_test
+
 parser = ArgumentParser()
 
 #cli arguments
@@ -193,6 +196,10 @@ def main():
     if args.task_name == 'deepmind/narrativeqa':
         from tools.data_processing.narrativeqa import load_narrativeqa_test
         test_ds = load_narrativeqa_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test')
+    elif args.task_name == 'narrativeqa':
+        from tools.data_processing.narrativeqa import prepare_narrativeqa
+        test_ds = load_dataset('THUDM/LongBench', 'narrativeqa', split='test', trust_remote_code=True)
+        test_ds = prepare_test(test_ds, prepare_narrativeqa, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
         from tools.data_processing.red_pajamav2 import load_redpajama
         test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)

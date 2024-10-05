@@ -10,13 +10,9 @@ def prepare_test(ds: Dataset, prep_func: Callable, max_token_num, test_length, b
 
     ds = prep_func(ds)
 
-    print(ds)
-
     # Tokenize the text column
     ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
 
-    print(ds)
-    print(ds['answer'])
     # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 
     answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
     ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
