@@ -8,6 +8,7 @@ from .grouping import group_dataset
 from .io import read_jsonl
 
 HF_HOME = os.getenv('HF_HOME', None)
+HMT_PYTORCH_PATH = os.getenv('HMT_PYTORCH_PATH', None)
 
 """
 Load the QMSum dataset from Hugging Face.
@@ -114,7 +115,7 @@ def prepare_qmsum_train(dataset: List):
 
 
 
-def load_qmsum_train(max_token_num, block_size, tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl", source=None, **kwargs):
+def load_qmsum_train(max_token_num, block_size, tokenizer, path=f"{HMT_PYTORCH_PATH}/data/qmsum/train.jsonl", source=None, **kwargs):
     if source == 'huggingface':
         ds = load_dataset('ioeddk/qmsum', split='train', cache_dir=HF_HOME, streaming=kwargs.get('streaming', False))
     else:

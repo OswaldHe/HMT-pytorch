@@ -1,39 +1,36 @@
 #!/bin/bash
 
-eval "$(conda shell.bash hook)"
-conda activate llm
-
-if [ "$(hostname)" = "vastlab" ]; then export HF_HOME="/home/yingqi/scratch/head";
-elif [ "$(hostname)" = "c00" ]; then export HF_HOME="/home/yingqi/scratch/hf_home";
-elif [ "$(hostname)" = "c01" ]; then export HF_HOME="/home/yingqi/scratch/c01/cache";
-elif [ "$(hostname)" = "c02" ]; then export HF_HOME="/home/yingqi/scratch/c02/cache"; fi
-
-# Verify the environment is activated
-if [ $? -eq 0 ]; then
-    echo "Conda environment 'llm' activated successfully."
-else
-    echo "Failed to activate Conda environment 'llm'. Please check if it exists."
+# Check if the first argument is provided
+if [ -z "$1" ]; then
+    echo "Error: HMT-pytorch path is not provided."
+    echo "Usage: $0 <path_to_HMT-pytorch>"
+    echo "Example: $0 /home/user/repo/HMT-pytorch"
     exit 1
 fi
 
-cd /home/yingqi/repo/HMT-pytorch
+# Assign the first argument to a variable
+HMT_PYTORCH_PATH="$1"
+
+# Check if the directory exists
+if [ ! -d "$HMT_PYTORCH_PATH" ]; then
+    echo "Error: The provided path '$HMT_PYTORCH_PATH' does not exist or is not a directory."
+    exit 1
+fi
+
+# Change to the HMT-pytorch directory
+cd "$HMT_PYTORCH_PATH"
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate env
+accelerate env# Manually remove the cache dir if necessary. It is used to force recaching. 
 
-echo HF_HOME=$HF_HOME
-
-# Manually remove the cache dir if necessary. It is used to force recaching. 
-# rm -rf /home/yingqi/scratch/c00/cache/tokenized
-# rm -rf /home/yingqi/scratch/c00/cache/grouped
 
 
 # Uncomment to disable wandb tracking
 # export WANDB_MODE=offline
 
-accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
+accelerate launch $HMT_PYTORCH_PATH/tools/training/fine_tunning.py \
     --learning_rate=1e-5 \
     --model_name=openlm-research/open_llama_3b_v2 \
     --task_name=qmsum \
@@ -46,9 +43,9 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --train_set_split=2 \
     --num_seg_save=8 \
     --batch_size=1 \
-    --save_dir=/home/yingqi/scratch/c00/checkpoints/fine_tuning/openllama_3b_v2/qmsum \
+    --save_dir=checkpoints/fine_tuning/openllama_3b_v2/qmsum \
     --save_interval=20 \
-    --token_file=/home/yingqi/repo/HMT-pytorch/huggingface_token.txt \
+    --token_file=huggingface_token.txt \
     --validation_interval=40 \
     --validation_steps=30 \
     --wandb_entity=yic033-ucsd \
@@ -56,10 +53,4 @@ accelerate launch /home/yingqi/repo/HMT-pytorch/tools/training/fine_tunning.py \
     --wandb_project=qa_fine_tuning \
     --max_context_length=4000 \
     --is_qa_task \
-    --load_from_ckpt="/home/yingqi/scratch/c00/hmt_pretrained/openllama_3b_v2/model_weights_0_lv_2.pth"
-
-# Available model names:
-# meta-llama/Llama-2-7b-hf
-# facebook/opt-350m
-
-# Valid task_subset: sample, sample-10B, sample-100B, sample-1T
+    --load_from_ckpt="hmt_pretrained/openllama_3b_v2/model_weights_0_lv_2.pth"
