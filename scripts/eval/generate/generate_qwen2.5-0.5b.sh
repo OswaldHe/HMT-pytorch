@@ -32,8 +32,7 @@ python tools/evaluation/generate.py \
             --curriculum \
             --curriculum_segs=2,4,6,8 \
             --mem_recall_hidden_dim=4864 \
-            --wandb_entity=yic033-ucsd \
-            --wandb_project=wandb_pretrained_evaluation \
+                        --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="generate_${checkpoint}_testlen${test_length}" \
             --max_context_length=40000 \
             --load_from_ckpt="hmt_pretrained/qwen2.5-0.5b/model_weights_0_lv_2.pth"       

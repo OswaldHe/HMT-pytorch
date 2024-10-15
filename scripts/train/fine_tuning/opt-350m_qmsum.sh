@@ -48,7 +48,6 @@ accelerate launch $HMT_PYTORCH_PATH/tools/training/fine_tunning.py \
     --token_file=huggingface_token.txt \
     --validation_interval=20 \
     --validation_steps=20 \
-    --wandb_entity=yic033-ucsd \
     --wandb_run=qmsum_fine_tuning \
     --wandb_project=qa_fine_tuning \
     --max_context_length=8000 \

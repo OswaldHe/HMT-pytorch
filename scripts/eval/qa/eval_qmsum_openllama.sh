@@ -55,7 +55,6 @@ accelerate launch ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --curriculum \
     --max_new_tokens=512 \
     --curriculum_segs=2,3,4,6,8 \
-    --wandb_entity=yic033-ucsd \
     --wandb_run=baseline \
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
@@ -85,7 +84,6 @@ accelerate launch ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --validation_interval=10 \
     --curriculum \
     --curriculum_segs=2,3,4,6,8 \
-    --wandb_entity=yic033-ucsd \
     --wandb_run=fine_tuned \
     --wandb_project=qa_fine_tuning_evaluation \
     --rouge \
