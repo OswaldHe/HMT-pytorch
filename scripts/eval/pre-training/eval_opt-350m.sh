@@ -79,8 +79,7 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum \
             --curriculum_segs=2,3,4,6,8 \
             --wandb_project=wandb_pretrained_evaluation \
-            --wandb_entity=yic033-ucsd \
-            --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
+                        --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
     done
 done
@@ -109,8 +108,7 @@ for test_length in "${test_lengths[@]}"; do
             --validation_steps=10 \
             --curriculum \
             --curriculum_segs=4,6,8,10 \
-            --wandb_entity=yic033-ucsd \
-            --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
+                        --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
     done
 done

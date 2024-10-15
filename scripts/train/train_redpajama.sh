@@ -45,5 +45,4 @@ accelerate envaccelerate launch $HMT_PYTORCH_PATH/train_redpajama.py \
     --validation_interval=10 \
     --validation_steps=10 \
     --curriculum \
-    --wandb_entity=yic033-ucsd \
     --recache_splits=test

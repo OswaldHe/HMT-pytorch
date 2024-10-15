@@ -42,8 +42,7 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum \
             --curriculum_segs=2,4,6,8 \
             --mem_recall_hidden_dim=4864 \
-            --wandb_entity=yic033-ucsd \
-            --wandb_project=wandb_pretrained_evaluation \
+                        --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
     done

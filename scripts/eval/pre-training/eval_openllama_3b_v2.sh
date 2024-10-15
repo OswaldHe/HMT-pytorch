@@ -42,8 +42,7 @@ for test_length in "${test_lengths[@]}"; do
             --validation_step=10 \
             --curriculum \
             --curriculum_segs=2,4,6,8 \
-            --wandb_entity=yic033-ucsd \
-            --wandb_project=wandb_pretrained_evaluation \
+                        --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="evaluate_openllama_3b_v2" \
             --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
     done
