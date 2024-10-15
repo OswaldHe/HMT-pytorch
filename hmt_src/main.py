@@ -110,6 +110,7 @@ parser.add_argument('--inject_autoencoder', action='store_true', default=False, 
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
+parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 
 torch.manual_seed(3407)
 
@@ -137,7 +138,7 @@ def main():
     torch.cuda.empty_cache()
 
     """### Load model"""
-    cache_dir = os.environ.get('HF_HOME', '.')
+    cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     
