@@ -95,6 +95,7 @@ parser.add_argument('--max_context_length', type=int, default=None, help='Maximu
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='Whether the task is a QA task')
 parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train for')
 parser.add_argument('--rouge', action='store_true', default=False, help='Whether to evaluate Rouge-L')
+parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 
 torch.manual_seed(3407)
 
@@ -135,7 +136,7 @@ def main():
             token = f.read()
 
     """### Load model"""
-    cache_dir = os.environ.get('HF_HOME', '.')
+    cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
 

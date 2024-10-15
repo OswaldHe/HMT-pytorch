@@ -94,6 +94,7 @@ parser.add_argument('--dir_logs', type=str, default='tensorboard_logs', help='Di
 parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
 parser.add_argument('--logger_name', type=str, default='redpajama_curriculum', help='Name for the logger')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 
 torch.manual_seed(3407)
 
@@ -131,7 +132,7 @@ def main():
     torch.cuda.empty_cache()
 
     """### Load model"""
-    cache_dir = os.environ.get('HF_HOME', '.')
+    cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     # May train from scratch with the following config

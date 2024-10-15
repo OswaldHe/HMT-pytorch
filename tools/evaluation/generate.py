@@ -97,6 +97,7 @@ parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Bi
 parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a QA task')
 parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
+parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 
 torch.manual_seed(3407)
 
@@ -121,7 +122,7 @@ def main():
             token = f.read()
 
     """### Load model"""
-    cache_dir = os.environ.get('HF_HOME', '.')
+    cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
 

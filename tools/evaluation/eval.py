@@ -99,6 +99,8 @@ parser.add_argument('--rouge', action='store_true', default=False, help='compute
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a qa task')
 parser.add_argument('--temperature', type=float, default=1.0, help='temperature for sampling')
 parser.add_argument('--max_new_tokens', type=int, default=100, help='maximum number of new tokens generated')
+parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
+
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -134,7 +136,7 @@ def main():
             token = f.read()
 
     """### Load model"""
-    cache_dir = os.environ.get('HF_HOME', '.')
+    cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
 
