@@ -59,7 +59,7 @@ class TestLoadQADataset(unittest.TestCase):
     def test_qmsum_train(self):
         from tools.data_processing.qmsum import load_qmsum_train
 
-        ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=self.tokenizer, path="/home/yingqi/repo/QMSum/data/train.jsonl")
+        ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=self.tokenizer, path="./repo/QMSum/data/train.jsonl")
         print("QMSum train dataset:")
         print(ds)
         
