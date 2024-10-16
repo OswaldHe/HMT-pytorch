@@ -86,6 +86,7 @@ parser.add_argument('--inject_autoencoder', action='store_true', default=False, 
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
+parser.add_argument('--shuffle_train', action='store_true', default=True, help='shuffle the training dataset')
 parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
@@ -280,9 +281,17 @@ def main():
         # train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'], streaming=args.streaming, trust_remote_code=True)
         train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[:100]'], streaming=args.streaming, trust_remote_code=True)
     
-        # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-        # valid_ds = valid_ds.take(int(args.train_set_split))
-        # test_ds = test_ds.take(int(args.train_set_split))
+        if args.shuffle_train:
+            train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000)
+        else:
+            train_ds = train_ds.take(int(args.train_set_split))
+
+        if args.shuffle:
+            valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000)
+            test_ds = test_ds.shuffle(seed=args.seed, buffer_size=20000)
+        else:
+            valid_ds = valid_ds.take(int(args.train_set_split))
+            test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)

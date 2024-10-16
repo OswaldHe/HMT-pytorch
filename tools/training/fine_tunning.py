@@ -81,6 +81,7 @@ parser.add_argument('--inject_autoencoder', action='store_true', default=False, 
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
+parser.add_argument('--shuffle_train', action='store_true', default=True, help='shuffle the training dataset')
 parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
 parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
@@ -209,6 +210,16 @@ def main():
     else:
         from tools.registry import VALID_TASK_NAMES
         raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
+
+    if args.shuffle_train:
+        train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000)
+    else:
+        train_ds = train_ds.take(int(args.train_set_split))
+
+    if args.shuffle:
+        valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000)
+    else:
+        valid_ds = valid_ds.take(int(args.train_set_split))
 
     # Print the length of train and validation datasets
     logger.info(f"Number of training datapoints: {len(train_ds)}")

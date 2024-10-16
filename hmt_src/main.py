@@ -110,6 +110,7 @@ parser.add_argument('--inject_autoencoder', action='store_true', default=False, 
 parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
 parser.add_argument('--streaming', action='store_true', default=False, help='generate text in streaming mode')
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
+parser.add_argument('--shuffle_train', action='store_true', default=True, help='shuffle the training dataset')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 
 torch.manual_seed(3407)
@@ -278,9 +279,16 @@ def main():
         train_ds = datasets.load_dataset(args.task_name, task_name, split='train', streaming=args.streaming, trust_remote_code=True)
         valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=args.streaming)
         test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=args.streaming)
-        # train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-        valid_ds = valid_ds.take(int(args.train_set_split))
-        test_ds = test_ds.take(int(args.train_set_split))
+        if args.shuffle_train:
+            train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+        else:
+            train_ds = train_ds.take(int(args.train_set_split))
+        if args.shuffle:
+            valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+            test_ds = test_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+        else:
+            valid_ds = valid_ds.take(int(args.train_set_split))
+            test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
