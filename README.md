@@ -74,10 +74,11 @@ You can use `--inference_only` flag to only perform inferencing for GPU profilin
 
 For more functionalities of HMT, please check `accelerate launch hmt_src/main.py --help`.
 
+# Examples on Training and Evaluating
+The [scripts](./scripts/README.md) folder contains the some examples to to train and evaluate the models on pretrained dataset and downstream tasks. 
+
 ## Author's Note
 
 This work is developed and experimented on AMD GPUs, which is a relatively new attempt considering that a majority of deep learning/natural language processing works use NVIDIA GPUs. It is possible that we can utilize tools that currently do not support ROCm (e.g., FlashAttention, bitsandbytes, etc.) to further optimize memory utilization, inference speed, and effectiveness. If you have any new ideas in improving the HMT framework on AMD/NVIDIA GPUs or new evaluation results using these tools, please don't hesitate creating a Github issue and we will look into it.
 
 If you encounter bugs or have any questions, you can send an email to Zifan (`zifanhe1202@g.ucla.edu`) or submit a Github issue.
-
-[How to evaluate](./scripts/README.md)
