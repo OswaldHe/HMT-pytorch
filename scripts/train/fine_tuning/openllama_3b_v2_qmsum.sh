@@ -1,15 +1,14 @@
 #!/bin/bash
 
-# Check if the first argument is provided
-if [ -z "$1" ]; then
-    echo "Error: HMT-pytorch path is not provided."
-    echo "Usage: $0 <path_to_HMT-pytorch>"
-    echo "Example: $0 /home/user/repo/HMT-pytorch"
+# IMPORTANT: Please set the CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
+export CHECKPOINT=
+export HMT_PYTORCH_PATH=
+
+# Check if CHECKPOINT is set
+if [ -z "$CHECKPOINT" ]; then
+    echo "Error: Please provide a path to the checkpoint. "
     exit 1
 fi
-
-# Assign the first argument to a variable
-HMT_PYTORCH_PATH="$1"
 
 # Check if the directory exists
 if [ ! -d "$HMT_PYTORCH_PATH" ]; then
@@ -23,7 +22,7 @@ cd "$HMT_PYTORCH_PATH"
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate env# Manually remove the cache dir if necessary. It is used to force recaching. 
+accelerate env # Manually remove the cache dir if necessary. It is used to force recaching. 
 
 
 
@@ -52,4 +51,4 @@ accelerate launch $HMT_PYTORCH_PATH/tools/training/fine_tunning.py \
     --wandb_project=qa_fine_tuning \
     --max_context_length=4000 \
     --is_qa_task \
-    --load_from_ckpt="hmt_pretrained/openllama_3b_v2/model_weights_0_lv_2.pth"
+    --load_from_ckpt="${CHECKPOINT}"

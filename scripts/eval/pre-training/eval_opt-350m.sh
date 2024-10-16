@@ -1,18 +1,18 @@
 #!/bin/bash
 
 
+# IMPORTANT: Please set the CHECKPOINT_BASE and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
+export CHECKPOINT_BASE=
+export HMT_PYTORCH_PATH=
 
-
-# Check if the first argument is provided
-if [ -z "$1" ]; then
-    echo "Error: HMT-pytorch path is not provided."
-    echo "Usage: $0 <path_to_HMT-pytorch>"
-    echo "Example: $0 /home/user/repo/HMT-pytorch"
+# Check if CHECKPOINT_BASE is set
+if [ -z "$CHECKPOINT_BASE" ]; then
+    echo "Error: Please provide a path to the checkpoint base. "
     exit 1
 fi
 
-# Assign the first argument to a variable
-HMT_PYTORCH_PATH="$1"
+# Optionally, you can print the checkpoint path for verification
+echo "Using checkpoint base: $CHECKPOINT_BASE"
 
 # Check if the directory exists
 if [ ! -d "$HMT_PYTORCH_PATH" ]; then
@@ -22,6 +22,7 @@ fi
 
 # Change to the HMT-pytorch directory
 cd "$HMT_PYTORCH_PATH"
+
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -80,7 +81,7 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum_segs=2,3,4,6,8 \
             --wandb_project=wandb_pretrained_evaluation \
                         --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
-            --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
+            --load_from_ckpt="${CHECKPOINT_BASE}/${checkpoint}"        
     done
 done
 
@@ -109,6 +110,6 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum \
             --curriculum_segs=4,6,8,10 \
                         --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
-            --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
+            --load_from_ckpt="${CHECKPOINT_BASE}/${checkpoint}"        
     done
 done

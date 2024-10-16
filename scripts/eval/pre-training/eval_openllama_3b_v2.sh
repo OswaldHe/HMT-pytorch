@@ -1,12 +1,31 @@
 #!/bin/bash
 
 
+# IMPORTANT: Please set the CHECKPOINT_BASE and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
+export CHECKPOINT_BASE=
+export HMT_PYTORCH_PATH=
 
+# Check if CHECKPOINT_BASE is set
+if [ -z "$CHECKPOINT_BASE" ]; then
+    echo "Error: Please provide a path to the checkpoint base. "
+    exit 1
+fi
+
+# Optionally, you can print the checkpoint path for verification
+echo "Using checkpoint base: $CHECKPOINT_BASE"
+
+# Check if the directory exists
+if [ ! -d "$HMT_PYTORCH_PATH" ]; then
+    echo "Error: The provided path '$HMT_PYTORCH_PATH' does not exist or is not a directory."
+    exit 1
+fi
+
+# Change to the HMT-pytorch directory
+cd "$HMT_PYTORCH_PATH"
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate envexport WEIGHT_BASE=hmt_pretrained/openllama_3b_v2
 
 checkpoints=(
     model_weights_0_lv_1.pth
@@ -44,6 +63,6 @@ for test_length in "${test_lengths[@]}"; do
             --curriculum_segs=2,4,6,8 \
                         --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="evaluate_openllama_3b_v2" \
-            --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
+            --load_from_ckpt="${CHECKPOINT_BASE}/${checkpoint}"        
     done
 done

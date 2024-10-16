@@ -23,7 +23,9 @@ cd "$HMT_PYTORCH_PATH"
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate envaccelerate launch $HMT_PYTORCH_PATH/train_redpajama.py \
+accelerate env
+
+accelerate launch $HMT_PYTORCH_PATH/train_redpajama.py \
     --learning_rate=1e-4 \
     --model_name=facebook/opt-350m \
     --task_name=togethercomputer/RedPajama-Data-V2 \

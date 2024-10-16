@@ -1,9 +1,30 @@
 #!/bin/bash
 
+# IMPORTANT: Please set the CHECKPOINT_BASE and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
+export CHECKPOINT_BASE=
+export HMT_PYTORCH_PATH=
+
+# Check if CHECKPOINT_BASE is set
+if [ -z "$CHECKPOINT_BASE" ]; then
+    echo "Error: Please provide a path to the checkpoint base. "
+    exit 1
+fi
+
+# Optionally, you can print the checkpoint path for verification
+echo "Using checkpoint base: $CHECKPOINT_BASE"
+
+# Check if the directory exists
+if [ ! -d "$HMT_PYTORCH_PATH" ]; then
+    echo "Error: The provided path '$HMT_PYTORCH_PATH' does not exist or is not a directory."
+    exit 1
+fi
+
+# Change to the HMT-pytorch directory
+cd "$HMT_PYTORCH_PATH"
+
+
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
-
-accelerate envexport WEIGHT_BASE=hmt_pretrained/qwen2.5-0.5b
 
 # Uncomment to disable wandb tracking
 # export WANDB_MODE=offline
@@ -20,7 +41,7 @@ for test_length in "${test_lengths[@]}"; do
     # remove the dataset cache
 
     for checkpoint in "${checkpoints[@]}"; do
-        accelerate launch tools/evaluation/eval.py \
+        accelerate launch $HMT_PYTORCH_PATH/tools/evaluation/eval.py \
             --learning_rate=1e-4 \
             --model_name=Qwen/Qwen2.5-0.5B \
             --task_name=togethercomputer/RedPajama-Data-V2 \
@@ -44,6 +65,6 @@ for test_length in "${test_lengths[@]}"; do
             --mem_recall_hidden_dim=4864 \
                         --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="evaluate_${checkpoint}_testlen${test_length}" \
-            --load_from_ckpt="${WEIGHT_BASE}/${checkpoint}"        
+            --load_from_ckpt="${CHECKPOINT_BASE}/${checkpoint}"        
     done
 done
