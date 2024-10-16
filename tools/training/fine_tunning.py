@@ -208,19 +208,22 @@ def main():
         train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
     elif args.task_name == 'ioeddk/qmsum':
         from tools.data_processing.qmsum import load_qmsum_train
-        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
-        splited_dict = total_ds.train_test_split(test_size=0.2)
-        train_ds = splited_dict['train']
+        total_ds = load_qmsum_train(max_token_num=1000000, block_size=block_size, tokenizer=tokenizer, source='huggingface')
+        ind_to_keep = []
+        for i in range(len(total_ds)):
+            if len(total_ds[i]['labels']) <= args.max_context_length:
+                ind_to_keep.append(i)
+        train_ds = total_ds.select(ind_to_keep)
         # valid_ds = splited_dict['test']
         from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
         from datasets import load_dataset
         from tools.data_processing.generic import prepare_test
-        test_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
-        test_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+        valid_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
+        valid_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
-        valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
+        valid_ds = load_musique_train(max_token_num=1000000, block_size=block_size, tokenizer=tokenizer, split='validation')
     else:
         from tools.registry import VALID_TASK_NAMES
         raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
@@ -405,14 +408,6 @@ def main():
         
         if args.save_ckpt is not None:
             model.save_checkpoint(args.save_ckpt)
-        
-        plt.plot(losses)
-        plt.xlabel('step')
-        plt.ylabel('train loss')
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        plt.savefig('artifact/loss_' + date_str + '.png')
-        plt.show()
-        plt.close()
 
     valid_losses = []
     valid_ppl = []
