@@ -80,3 +80,4 @@ This work is developed and experimented on AMD GPUs, which is a relatively new a
 
 If you encounter bugs or have any questions, you can send an email to Zifan (`zifanhe1202@g.ucla.edu`) or submit a Github issue.
 
+[How to evaluate](./scripts/README.md)

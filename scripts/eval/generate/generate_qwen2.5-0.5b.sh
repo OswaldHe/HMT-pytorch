@@ -10,6 +10,7 @@ accelerate envexport WEIGHT_BASE=hmt_pretrained/qwen2.5-0.5b
 # Uncomment to disable wandb tracking
 export WANDB_MODE=offline
 
+
 python tools/evaluation/generate.py \
             --learning_rate=1e-4 \
             --model_name=Qwen/Qwen2.5-0.5B \
