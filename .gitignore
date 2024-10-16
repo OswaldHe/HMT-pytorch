@@ -136,3 +136,27 @@ data/*.tsv
 tests/runs/
 
 artifact/
+
+/datasets/
+*.out
+/hub/
+/tensorboard_logs/
+.deepspeed_env
+/wandb/
+huggingface_token.txt
+/.locks/
+hmt_pretrained
+/tmp_datasets/
+
+tools/data_preprocessing.ipynb
+debug.ipynb
+debug_dump/
+saved_datasets/
+run_jobs.sh
+TASKS.md
+/tmp/
+generate.ipynb
+/workspace/
+test__.py
+wandb_data/
+wandb_processing.ipynb

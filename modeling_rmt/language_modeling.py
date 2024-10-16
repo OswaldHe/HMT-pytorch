@@ -9,6 +9,13 @@ from modeling_rmt.long_mem_cross_attn import CrossAttentionMemory
 from accelerate.logging import get_logger
 from torch.profiler import profile, record_function, ProfilerActivity
 import random
+import evaluate
+from huggingface_hub import PyTorchModelHubMixin
+
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+# from tools.debug.dump import DebugDumper
+# dumper = DebugDumper()
 
 class MemoryCell(torch.nn.Module):
     def __init__(self, base_model, num_mem_tokens, num_prepend):
@@ -69,10 +76,12 @@ class MemoryCell(torch.nn.Module):
         return out, new_memory_state, self.prepend_list
     
     def generate(self, input_ids, memory_state, prepend_state, attention_mask, **generate_kwargs):
+
+
         if memory_state is None and self.num_mem_tokens > 0:
             memory_state = self.set_memory(input_ids.shape)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)
+        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, generate=True, attention_mask=attention_mask)        
         out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
         return out
 
@@ -174,7 +183,7 @@ class MemoryMap(torch.nn.Module):
         else:
             return self.inv_linear(inputs)
 
-class RecurrentWrapper(torch.nn.Module):
+class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
     def __init__(self, memory_cell, emb=None, word_emb_dim=4096, hidden_dim=4096, ltm_context=100, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
@@ -187,6 +196,9 @@ class RecurrentWrapper(torch.nn.Module):
             self.cross_attn = CrossAttentionMemory(word_emb_dim, hidden_dim)
         else:
             self.cross_attn = None
+        
+        self.rouge = evaluate.load('rouge')
+        self.f1 = evaluate.load("f1")
 
     def forward(self, 
             input_ids, 
@@ -194,6 +206,7 @@ class RecurrentWrapper(torch.nn.Module):
             labels_mask=None, 
             inputs_embeds=None, 
             attention_mask=None, 
+            mask_size=None,  # Size of the attention mask used to compute the loss, it should be the length of the labels. If it's None, then self.mask_size is used. 
             output_attentions=None, 
             output_hidden_states=None, 
             sum_fraction=0.5,
@@ -204,11 +217,17 @@ class RecurrentWrapper(torch.nn.Module):
             switch_at=-1,
         ):
 
+        mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
+
         memory_state = None
         prepend_state = None
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
+        # if self.rmt_config.get('is_qa_task'):
+        #     n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
+        # else:
+        #     n_cell_out = self.rmt_config.get('n_cell_out')
         n_cell_out = self.rmt_config.get('n_cell_out')
         memory_seq = None
 
@@ -282,12 +301,13 @@ class RecurrentWrapper(torch.nn.Module):
             seg_num+=1
         
         
-        self.logger.info('read ' + str(browse_count * 16) + ' tokens faster.')
+        # self.logger.info('read ' + str(browse_count * 16) + ' tokens faster.')
 
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
-                                   output_hidden_states=output_hidden_states)
+                                   output_hidden_states=output_hidden_states,
+                                   mask_size=mask_size)
         return out, total_hist
     
     def generate(self, input_ids, attention_mask, segment_size, **generate_kwargs):
@@ -298,7 +318,6 @@ class RecurrentWrapper(torch.nn.Module):
         memory_seq = None
 
         print('start parsing')
-        print(input_ids.shape)
         for seg_num, segment in enumerate(segmented[:-1]):
             for k, v in segment.items():
                 segment[k] = v.cuda()
@@ -371,10 +390,14 @@ class RecurrentWrapper(torch.nn.Module):
         return segments
 
     def process_outputs(self, cell_outputs, **kwargs):
-        mask_size = self.rmt_config.get('mask_size')
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
+
+        # dumper.store('labels', kwargs.get('labels'))
+        # dumper.store('labels_mask', kwargs.get('labels_mask'))
+        
+        mask_size = kwargs.get('mask_size')
 
         labels = kwargs.get('labels')
         if labels.shape[1] <= mask_size:
@@ -388,6 +411,13 @@ class RecurrentWrapper(torch.nn.Module):
             loss_fct = CrossEntropyLoss()
             out['loss'] = loss_fct(flat_logits.cuda(), flat_labels.cuda())
             out['ppl'] = torch.exp(out['loss'])
+
+            # Compute the F1 score
+            predictions = torch.argmax(torch.Tensor(flat_logits), dim=-1)
+            flat_labels_cpu, predictions_cpu = flat_labels.detach().cpu(), predictions.detach().cpu()
+            precision, recall, f1, _ = precision_recall_fscore_support(flat_labels_cpu, predictions_cpu, average='weighted')
+            accuracy = accuracy_score(flat_labels_cpu, predictions_cpu)
+            out['f1'] = {'precision': precision, 'recall': recall, 'f1': f1, 'accuracy': accuracy}
         else:
             out['loss'] = 0
             out['ppl'] = 0
@@ -399,6 +429,10 @@ class RecurrentWrapper(torch.nn.Module):
         if kwargs.get('output_hidden_states'):
             segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states
+        
+        # dumper.store_no_step('full_logits', full_logits)
+        # dumper.store_no_step('flat_logits', flat_logits)
+        # dumper.store_no_step('flat_labels', flat_labels)
 
         for seg_num, o in enumerate(cell_outputs):
             for key, value in o.items():
