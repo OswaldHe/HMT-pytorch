@@ -1,5 +1,4 @@
 import unittest
-from tools.data_processing.qmsum import load_qmsum_test
 from tools.data_processing.narrativeqa import load_narrativeqa_test, load_narrativeqa_train_valid
 from datasets import Dataset
 
@@ -33,29 +32,6 @@ class TestLoadQADataset(unittest.TestCase):
         print("First entry of validation split:")
         print(ds_valid[0])
 
-    def test_qmsum_test(self):
-        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=self.tokenizer, split='test[:5%]')
-        print("QMSum test dataset:")
-        print(ds)
-        
-        print("\nKeys of the first datapoint:")
-        print(ds[0].keys())
-        
-        
-        print("\nFirst three data points:")
-        for i in range(3):
-            print(f"\nData point {i+1}:")
-            print("Length of input_ids: ", len(ds[i]['input_ids']))
-            print("Length of attention_mask: ", len(ds[i]['attention_mask']))
-            print("Length of labels", len(ds[i]['labels']))
-            print("mask_size", ds[i]['mask_size'])
-
-        self.assertIsInstance(ds, Dataset)
-        self.assertTrue('labels' in ds.column_names)
-        self.assertTrue('input_ids' in ds.column_names)
-        self.assertTrue('attention_mask' in ds.column_names)
-        self.assertTrue('mask_size' in ds.column_names)
-
     def test_qmsum_train(self):
         from tools.data_processing.qmsum import load_qmsum_train
 
@@ -77,33 +53,6 @@ class TestLoadQADataset(unittest.TestCase):
         # Check if the dataset is not empty
         self.assertGreater(len(ds), 0)
     
-    def test_qmsum_with_answer(self):
-        print("tokenizer: ", type(self.tokenizer))
-
-        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=self.tokenizer)
-        print("QMSum test dataset:")
-        print(ds)
-        
-        print("\nKeys of the first datapoint:")
-        print(ds[0].keys())
-        
-        
-        print("\nFirst three data points:")
-        for i in range(3):
-            print(f"\nData point {i+1}:")
-            print("Length of input_ids: ", len(ds[i]['input_ids']))
-            print("Length of attention_mask: ", len(ds[i]['attention_mask']))
-            print("Length of labels", len(ds[i]['labels']))
-            print("mask_size", ds[i]['mask_size'])
-            print("answer", ds[i]['answer'])
-
-        self.assertIsInstance(ds, Dataset)
-        self.assertTrue('labels' in ds.column_names)
-        self.assertTrue('input_ids' in ds.column_names)
-        self.assertTrue('attention_mask' in ds.column_names)
-        self.assertTrue('mask_size' in ds.column_names)
-        self.assertTrue('answer' in ds.column_names)
-
     
     def test_qmsum_train_huggingface(self):
         from tools.data_processing.qmsum import load_qmsum_train
@@ -119,17 +68,13 @@ class TestLoadQADataset(unittest.TestCase):
         print("QMSum valid dataset:")
         print(valid_ds)
 
-    def test_qmsum_test_huggingface(self):
-        from tools.data_processing.qmsum import load_qmsum_test
-
-        ds = load_qmsum_test(max_token_num=12800, test_length=10000, block_size=1024, tokenizer=self.tokenizer, source='huggingface')
-        print("QMSum test dataset:")
-        print(ds)
-
     def test_musique_test(self):
-        from tools.data_processing.musique import load_musique_test
+        from tools.data_processing.prep_funcs import prepare_musique_test_ppl
+        from tools.data_processing.generic import prepare_test
+        from datasets import load_dataset
+        ds = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=False, trust_remote_code=True)
+        ds = prepare_test(ds, prepare_musique_test_ppl, max_token_num=12800, test_length=10000, block_size=1024, tokenizer=self.tokenizer, with_answer=True)
 
-        ds = load_musique_test(test_length=10000, block_size=1024, tokenizer=self.tokenizer)
         print("MuSiQue test dataset:")
         print(ds)
 

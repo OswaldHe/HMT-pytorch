@@ -30,7 +30,6 @@ from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
 from tools.collate import hmt_collate_fn
-
 from tools.models import load_model
 
 parser = ArgumentParser()
@@ -141,7 +140,7 @@ def main():
         save_dir = f'./checkpoints/{args.model_name}'
     else:
         save_dir = args.save_dir
-        
+
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         logger.info(f"Created directory: {save_dir}")
@@ -213,8 +212,11 @@ def main():
         splited_dict = total_ds.train_test_split(test_size=0.2)
         train_ds = splited_dict['train']
         # valid_ds = splited_dict['test']
-        from tools.data_processing.qmsum import load_qmsum_test
-        valid_ds = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
+        from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
+        from datasets import load_dataset
+        from tools.data_processing.generic import prepare_test
+        test_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
+        test_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
