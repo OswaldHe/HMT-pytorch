@@ -176,11 +176,15 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'qmsum':
-        from tools.data_processing.qmsum import load_qmsum_test
-        demo_points = load_qmsum_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
+        from datasets import load_dataset
+        from tools.data_processing.generic import prepare_test
+        from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
+        demo_points = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
+        demo_points = prepare_test(demo_points, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
-        from tools.data_processing.musique import load_musique_test
-        demo_points = load_musique_test(max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, split='test[:2]')
+        from tools.data_processing.prep_funcs import prepare_musique_test_ppl
+        demo_points = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=args.streaming, trust_remote_code=True)
+        demo_points = prepare_test(demo_points, prepare_musique_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
         from tools.data_processing.red_pajamav2 import load_redpajama
         demo_points = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
