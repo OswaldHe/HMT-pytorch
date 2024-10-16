@@ -83,7 +83,7 @@ parser.add_argument('--streaming', action='store_true', default=False, help='gen
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
 parser.add_argument('--shuffle_train', action='store_true', default=True, help='shuffle the training dataset')
 parser.add_argument('--save_interval', type=int, default=0, help='Save checkpoint every N steps. 0 means no intermediate saving.')
-parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+parser.add_argument('--save_dir', type=str, default=None, help='Directory to save checkpoints')
 parser.add_argument('--validation_interval', type=int, default=100, help='Perform validation every N steps')
 parser.add_argument('--validation_steps', type=int, default=10, help='Number of validation steps to perform at each validation interval')
 # parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
@@ -135,6 +135,18 @@ def main():
     if args.token_file is not None:
         with open(args.token_file, 'r') as f:
             token = f.read()
+
+
+    if args.save_dir is None:
+        save_dir = f'./checkpoints/{args.model_name}'
+    else:
+        save_dir = args.save_dir
+        
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        logger.info(f"Created directory: {save_dir}")
+    else:
+        logger.info(f"Directory already exists: {save_dir}")
 
     """### Load model"""
     cache_dir = os.environ.get('HF_HOME', args.cache_dir)
@@ -351,7 +363,7 @@ def main():
                     accelerator.log({"Train Loss": loss.detach().item(), "Train F1": f1, "Epoch": epoch}, step=global_step)
                 
                 if step % args.save_interval == 0:
-                    torch.save(model.state_dict(), f'{args.save_dir}/model_weights_{global_step}.pth')
+                    torch.save(model.state_dict(), f'{save_dir}/model_weights_{global_step}.pth')
                 
                 if step % args.validation_interval == 0:
                     valid_losses = []
