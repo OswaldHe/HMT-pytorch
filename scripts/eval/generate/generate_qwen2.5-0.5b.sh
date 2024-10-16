@@ -1,11 +1,30 @@
 #!/bin/bash
 
+# IMPORTANT: Please set the CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint and HMT-pytorch repository you want to use.
+export CHECKPOINT=
+export HMT_PYTORCH_PATH=
 
+# Check if CHECKPOINT is set
+if [ -z "$CHECKPOINT" ]; then
+    echo "Error: Please provide a path to the checkpoint. "
+    exit 1
+fi
+
+# Optionally, you can print the checkpoint path for verification
+echo "Using checkpoint: $CHECKPOINT"
+
+# Check if the directory exists
+if [ ! -d "$HMT_PYTORCH_PATH" ]; then
+    echo "Error: The provided path '$HMT_PYTORCH_PATH' does not exist or is not a directory."
+    exit 1
+fi
+
+# Change to the HMT-pytorch directory
+cd "$HMT_PYTORCH_PATH"
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate envexport WEIGHT_BASE=hmt_pretrained/qwen2.5-0.5b
 
 # Uncomment to disable wandb tracking
 export WANDB_MODE=offline
@@ -36,4 +55,4 @@ python tools/evaluation/generate.py \
                         --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="generate_${checkpoint}_testlen${test_length}" \
             --max_context_length=40000 \
-            --load_from_ckpt="hmt_pretrained/qwen2.5-0.5b/model_weights_0_lv_2.pth"       
+            --load_from_ckpt=${CHECKPOINT}      

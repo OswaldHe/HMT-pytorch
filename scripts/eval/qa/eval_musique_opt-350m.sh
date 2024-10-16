@@ -1,18 +1,25 @@
 #!/bin/bash
 
+# IMPORTANT: Please set the ZEROSHOT_CHECKPOINT and FINETUNED_CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
+export ZEROSHOT_CHECKPOINT=
+export FINETUNED_CHECKPOINT=
+export HMT_PYTORCH_PATH=
 
-
-
-# Check if the first argument is provided
-if [ -z "$1" ]; then
-    echo "Error: HMT-pytorch path is not provided."
-    echo "Usage: $0 <path_to_HMT-pytorch>"
-    echo "Example: $0 /home/user/repo/HMT-pytorch"
+# Check if ZEROSHOT_CHECKPOINT is set
+if [ -z "$ZEROSHOT_CHECKPOINT" ]; then
+    echo "Error: Please provide a path to the zeroshot checkpoint. "
     exit 1
 fi
 
-# Assign the first argument to a variable
-HMT_PYTORCH_PATH="$1"
+# Check if FINETUNED_CHECKPOINT is set
+if [ -z "$FINETUNED_CHECKPOINT" ]; then
+    echo "Error: Please provide a path to the finetuned checkpoint. "
+    exit 1
+fi
+
+# Optionally, you can print the checkpoint path for verification
+echo "Using zeroshot checkpoint: $ZEROSHOT_CHECKPOINT"
+echo "Using finetuned checkpoint: $FINETUNED_CHECKPOINT"
 
 # Check if the directory exists
 if [ ! -d "$HMT_PYTORCH_PATH" ]; then
@@ -22,6 +29,7 @@ fi
 
 # Change to the HMT-pytorch directory
 cd "$HMT_PYTORCH_PATH"
+
 
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -55,7 +63,7 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --rouge \
     --is_qa_task \
     --max_context_length=16000000 \
-    --load_from_ckpt="hmt_pretrained/opt-350m/model_weights_0_lv_2_step2.pth"
+    --load_from_ckpt="${ZEROSHOT_CHECKPOINT}"
 
 
 accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
@@ -84,4 +92,4 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --rouge \
     --is_qa_task \
     --max_context_length=16000000 \
-    --load_from_ckpt="hmt_pretrained/opt-350m/opt-350m-musique/model_weights_201.pth"
+    --load_from_ckpt="${FINETUNED_CHECKPOINT}"
