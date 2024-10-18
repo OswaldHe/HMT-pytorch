@@ -95,7 +95,10 @@ parser.add_argument('--dir_logs', type=str, default='tensorboard_logs', help='Di
 parser.add_argument('--curriculum', action='store_true', default=False, help='use curriculum learning')
 parser.add_argument('--logger_name', type=str, default='redpajama_curriculum', help='Name for the logger')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
+parser.add_argument('--wandb_project', type=str, default='redpajama_curriculum', help='Name for the WanDB Project')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
+parser.add_argument('--recache_splits', type=str, default=None, help='Provide a list of dataset splits that to rebuild the tokenization and grouping cache')
 
 torch.manual_seed(3407)
 
@@ -106,7 +109,7 @@ def gen_from_iterable_dataset(iterable_ds):
 def main():
     global torch
 
-    levels = [3, 4, 5, 6, 7, 8] # IMPORTANT: if curriculum is used, there should be a list specifying the number of segments for each level
+    levels = [2, 4, 8] # IMPORTANT: if curriculum is used, there should be a list specifying the number of segments for each level
 
     args = parser.parse_args()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -114,9 +117,9 @@ def main():
     device = accelerator.device
 
     accelerator.init_trackers(
-        project_name=args.logger_name, 
+        project_name=args.wandb_project, 
         config={"dropout": 0.1, "learning_rate": 1e-4},
-        init_kwargs={"wandb": {"entity": args.wandb_entity}}
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
     )
 
     recache_splits = args.recache_splits.split(',') if args.recache_splits else None
@@ -293,16 +296,16 @@ def main():
         train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[:100]'], streaming=args.streaming, trust_remote_code=True)
     
         if args.shuffle_train:
-            train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000)
+            train_ds = train_ds.shuffle(seed=args.seed)
         else:
             train_ds = train_ds.take(int(args.train_set_split))
 
         if args.shuffle:
-            valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000)
-            test_ds = test_ds.shuffle(seed=args.seed, buffer_size=20000)
-        else:
-            valid_ds = valid_ds.take(int(args.train_set_split))
-            test_ds = test_ds.take(int(args.train_set_split))
+            valid_ds = valid_ds.shuffle(seed=args.seed)
+            test_ds = test_ds.shuffle(seed=args.seed)
+        # else:
+        #     valid_ds = valid_ds.take(int(args.train_set_split))
+        #     test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
@@ -355,7 +358,7 @@ def main():
     logger.info(f"Creating dataloaders")
 
     # Define the cache directory for grouped datasets
-    grouped_datasets_dir = os.path.join(os.environ.get('HF_HOME', ''), "grouped")
+    grouped_datasets_dir = os.path.join(os.environ.get('HF_HOME', args.cache_dir), "grouped")
     if not os.path.exists(grouped_datasets_dir):
         os.makedirs(grouped_datasets_dir)
 
@@ -506,7 +509,7 @@ def main():
     optim = AdamW(params=model.parameters(), lr=args.learning_rate)
     from torch.optim.lr_scheduler import StepLR, LambdaLR
     if args.lr_decay:
-        if args.dynamic:
+        if not args.dynamic:
             scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
         else:
             lambda_f = lambda epoch: (args.lr_decay_gamma ** (epoch // 100)) * 0.1 if epoch%2==0 else (args.lr_decay_gamma ** (epoch // 100))
@@ -623,6 +626,7 @@ def main():
                     batch['sum_fraction'] = args.sum_fraction
                     out, _ = model(**batch)
                     loss = out.loss
+                    f1 = out.f1['f1']
                     # logger.debug(f'crl: {loss.item()}')
                     # if args.inject_autoencoder:
                     #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
@@ -633,6 +637,7 @@ def main():
                     if args.lr_decay:
                         scheduler.step()
                     losses.append(loss.detach().item())
+                    accelerator.log({"Train Loss": loss.detach().item(), "Train F1": f1}, step=global_step)
                 
                 if step % args.save_interval == 0:
                     torch.save(model.state_dict(), f'{save_dir}/model_weights_{step}.pth')

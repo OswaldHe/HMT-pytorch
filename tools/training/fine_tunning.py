@@ -208,18 +208,13 @@ def main():
         train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
     elif args.task_name == 'ioeddk/qmsum':
         from tools.data_processing.qmsum import load_qmsum_train
-        total_ds = load_qmsum_train(max_token_num=1000000, block_size=block_size, tokenizer=tokenizer, source='huggingface')
-        ind_to_keep = []
-        for i in range(len(total_ds)):
-            if len(total_ds[i]['labels']) <= args.max_context_length:
-                ind_to_keep.append(i)
-        train_ds = total_ds.select(ind_to_keep)
+        train_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
         # valid_ds = splited_dict['test']
         from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
         from datasets import load_dataset
         from tools.data_processing.generic import prepare_test
         valid_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
-        valid_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+        valid_ds = prepare_test(valid_ds, prepare_qmsum_test_ppl, max_token_num=10000000, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
@@ -229,14 +224,14 @@ def main():
         raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
 
     if args.shuffle_train:
-        train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000)
+        train_ds = train_ds.shuffle(seed=args.seed)
     else:
         train_ds = train_ds.take(int(args.train_set_split))
 
     if args.shuffle:
-        valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000)
-    else:
-        valid_ds = valid_ds.take(int(args.train_set_split))
+        valid_ds = valid_ds.shuffle(seed=args.seed)
+    # else:
+    #     valid_ds = valid_ds.take(int(args.train_set_split))
 
     # Print the length of train and validation datasets
     logger.info(f"Number of training datapoints: {len(train_ds)}")
@@ -352,6 +347,7 @@ def main():
                     batch['segment_size'] = block_size
                     batch['sum_fraction'] = args.sum_fraction
                     accelerator.log({ "Input Length": batch['labels'].shape[1]}, step=global_step)
+                    batch.pop('answer')
                     out, _ = model(**batch)
                     loss = out.loss
                     f1 = out.f1['f1']
@@ -381,14 +377,16 @@ def main():
                         batch = next(valid_gen)
                         # for k, v in batch.items():
                         #     batch[k] = v.cpu()
+                        ans_ = batch.pop('answer')
                         with torch.no_grad():
                             out, _ = model(**batch)
 
                             if args.rouge:
-                                text_labels = model.generate(input_ids=batch[0]['input_ids'], attention_mask=batch[0]['attention_mask'], segment_size=block_size)
+                                ans_len = tokenizer(ans_, return_tensors="pt")['input_ids'].shape[1]
+                                text_labels = model.generate(input_ids=batch['input_ids'][:, :-ans_len], attention_mask=batch['attention_mask'][:, :-ans_len], segment_size=block_size, max_new_tokens=ans_len)
                                 text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
-                                rouge = model.rouge(text_out, batch['answer'])
-                                valid_rouge.append(rouge['rouge1'].detach().item())
+                                rouge = model.rouge.compute(predictions=[text_out], references=[ans_])
+                                valid_rouge.append(rouge['rougeL'].item())
 
                         loss = out.loss
                         ppl = out.ppl
@@ -400,8 +398,8 @@ def main():
 
                     # Log to wandb by calling `accelerator.log`, `step` is optional
                     accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl), "Validation F1": np.mean(valid_f1), "Epoch": epoch}, step=global_step)
-                    # if args.rouge:
-                    #     accelerator.log({"Validation Rouge": np.mean(valid_rouge), "Epoch": epoch}, step=global_step)
+                    if args.rouge:
+                        accelerator.log({"Validation Rouge": np.mean(valid_rouge), "Epoch": epoch}, step=global_step)
                     model.train()
 
             accelerator.wait_for_everyone()
@@ -414,8 +412,9 @@ def main():
     model.eval()
     for step in tqdm.tqdm(range(eval_steps)):
         batch = next(valid_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
+        # for k, v in batch.items():
+        #     batch[k] = v.cpu()
+        batch.pop('answer')
         batch['segment_size'] = block_size
         # if args.timing:
         #     batch['prof'] = True
