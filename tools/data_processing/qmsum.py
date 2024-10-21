@@ -38,7 +38,7 @@ def load_qmsum_train(max_token_num, block_size, tokenizer, path=f"{HMT_PYTORCH_P
     ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
 
     # Remove unnecessary columns
-    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask', 'labels', 'mask_size'}]
+    column_to_remove = [name for name in ds.column_names if name not in {'input_ids', 'attention_mask',  'labels', 'mask_size', 'answer'}]
     ds = ds.remove_columns(column_to_remove)
 
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
