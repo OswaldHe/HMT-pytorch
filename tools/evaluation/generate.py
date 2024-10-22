@@ -98,6 +98,7 @@ parser.add_argument('--recache_splits', type=str, default=None, help='Provide a 
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a QA task')
 parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
+parser.add_argument('--sliding_window', action='store_true', default=False, help='use max token embedding length as the window size for sliding window attention.')
 
 torch.manual_seed(3407)
 
@@ -124,6 +125,7 @@ def main():
     """### Load model"""
     cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
+    eos_token = model.config.eos_token_id
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
 
     if isinstance(model.config, OPTConfig):
@@ -182,6 +184,8 @@ def main():
         demo_points = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
         demo_points = prepare_test(demo_points, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
+        from datasets import load_dataset
+        from tools.data_processing.generic import prepare_test
         from tools.data_processing.prep_funcs import prepare_musique_test_ppl
         demo_points = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=args.streaming, trust_remote_code=True)
         demo_points = prepare_test(demo_points, prepare_musique_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
@@ -233,16 +237,23 @@ def main():
 
     demo_gen = iter(demo_dataloader)
 
-    batch = next(demo_gen)
-    batch['segment_size'] = block_size
-    del batch['labels_mask']
-    # print(batch.keys())
-    out = model.generate(**batch)
-    # print(out.keys())
-    print('start decoding')
-    decoded_text = tokenizer.decode(out[0], skip_special_tokens=True)
-    print(decoded_text)
-    quit()
+    # for i in range(2):
+    #     batch = next(demo_gen)
+    # batch['segment_size'] = block_size
+    # del batch['labels_mask']
+    # # print(batch.keys())
+    # input_text = tokenizer.decode(batch['input_ids'][0], skip_special_tokens=True)
+    # print(input_text)
+
+    # out = model.generate(**batch, 
+    #         max_new_tokens = 512,
+    #         do_sample=True,
+    #         temperature = 1.2
+    #     )
+    # # print(out.keys())
+    # print('start decoding\n\n')
+    # decoded_text = tokenizer.decode(out[0], skip_special_tokens=True)
+    # print(decoded_text)
 
     # Start Testing
     # for step in tqdm.tqdm(range(args.test_step)):
@@ -280,21 +291,36 @@ def main():
         plt.savefig('artifact/heatmap_' + date_str + '.png')
         plt.show()
 
-    print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
+    # print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
-    if args.generate is not None and device == torch.device('cuda:0'):
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+
+    if args.generate is not None:
         with open(args.generate, 'r') as f:
             prompt_text = f.read()
 
         encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
+        if args.baseline_only and not args.sliding_window:
+            block_size = len(encoded_prompt.input_ids[0])
+
+        start_event.record()
         output_seq = model.generate(
             input_ids = encoded_prompt.input_ids.cpu(),
             attention_mask = encoded_prompt.attention_mask.cpu(),
             segment_size = block_size,
-            max_new_tokens = 100,
-            temperature = 0.6
+            max_new_tokens = 64,
+            do_sample=True,
+            temperature = 1.0
         )
+
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time_ms = start_event.elapsed_time(end_event)
         print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+
+        print(f'\nTime: {elapsed_time_ms} ms')
     
     accelerator.end_training()
 
