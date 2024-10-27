@@ -98,7 +98,7 @@ parser.add_argument('--recache_splits', type=str, default=None, help='Provide a 
 parser.add_argument('--is_qa_task', action='store_true', default=False, help='whether the task is a QA task')
 parser.add_argument('--max_context_length', type=int, default=None, help='Maximum context length for the dataset. If None, no limit is applied.')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
-
+parser.add_argument('--max_new_tokens', type=int, default=100, help='maximum number of new tokens to generate')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -180,9 +180,11 @@ def main():
         from tools.data_processing.generic import prepare_test
         from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
         demo_points = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
-        demo_points = prepare_test(demo_points, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+        demo_points = prepare_test(demo_points, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=False)
     elif args.task_name == 'musique':
         from tools.data_processing.prep_funcs import prepare_musique_test_ppl
+        from tools.data_processing.generic import prepare_test
+        from datasets import load_dataset
         demo_points = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=args.streaming, trust_remote_code=True)
         demo_points = prepare_test(demo_points, prepare_musique_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'togethercomputer/RedPajama-Data-V2':
@@ -190,6 +192,9 @@ def main():
         demo_points = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
     else:
         raise NotImplementedError(f"Task {args.task_name} not implemented")
+
+    print(demo_points.column_names)
+    # quit()
 
     logger.info(f"Creating dataloaders")
     # Create dataloaders
@@ -233,15 +238,18 @@ def main():
 
     demo_gen = iter(demo_dataloader)
 
-    batch = next(demo_gen)
-    batch['segment_size'] = block_size
-    del batch['labels_mask']
-    # print(batch.keys())
-    out = model.generate(**batch)
-    # print(out.keys())
-    print('start decoding')
-    decoded_text = tokenizer.decode(out[0], skip_special_tokens=True)
-    print(decoded_text)
+    for i in range(200):
+        batch = next(demo_gen)
+        batch['segment_size'] = block_size
+        del batch['labels_mask']
+        # print(batch.keys())
+        out = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), do_sample=True, temperature=0.6)
+        # print(out.keys())
+        print('start decoding')
+        decoded_text = tokenizer.decode(out[0], skip_special_tokens=True)
+        print('answer: ', batch['answer'])
+        print('decoded: ', decoded_text)
+        print()
     quit()
 
     # Start Testing
