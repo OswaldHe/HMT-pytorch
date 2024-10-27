@@ -31,6 +31,8 @@ import logging, shutil
 from accelerate.logging import get_logger
 from tools.collate import hmt_collate_fn
 from tools.models import load_model
+from datasets import load_dataset
+from tools.data_processing.generic import prepare_test
 
 parser = ArgumentParser()
 
@@ -63,7 +65,7 @@ parser.add_argument('--save_ckpt', type=str, default=None, help='store the model
 parser.add_argument('--load_from_ckpt', type=str, default=None, help='load the checkpoint for HMT stage 2')
 parser.add_argument('--mem_recall_context', type=int, default=100, help='number of memory embeddings cached in memory recall mech.')
 parser.add_argument('--token_file', type=str, default=None, help='path to the file with Huggingface token. Used for gated model such as Llama2.')
-parser.add_argument('--train_set_split', type=str, default=None, 
+parser.add_argument('--train_set_split', type=str, default='100%', 
         help='slice upper bound of training set to reduce time for tokenization. use percentage notation (e.g., 2%), or integer')
 parser.add_argument('--interleave_dataset', action='store_true', default=False, help='whether mix every two samples in the dataset to create context switching.')
 parser.add_argument('--interleave_len', type=int, default=100, help='the interleaving length of dataset (first sample pick some tokens, then the second).')
@@ -96,7 +98,8 @@ parser.add_argument('--is_qa_task', action='store_true', default=False, help='Wh
 parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train for')
 parser.add_argument('--rouge', action='store_true', default=False, help='Whether to evaluate Rouge-L')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
-
+parser.add_argument('--it', action='store_true', default=False, help='whether to use instruction tunning version of the QMSum test set')
+parser.add_argument('--with_text', action='store_true', default=False, help='whether to return the text in the dataset')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -198,7 +201,7 @@ def main():
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size)
+    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size, with_text=args.with_text)
     
 
     # Log the step
@@ -206,32 +209,44 @@ def main():
     if args.task_name == 'deepmind/narrativeqa':
         from tools.data_processing.narrativeqa import load_narrativeqa_train_valid
         train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
-    elif args.task_name == 'ioeddk/qmsum':
-        from tools.data_processing.qmsum import load_qmsum_train
-        total_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
-        splited_dict = total_ds.train_test_split(test_size=0.2)
-        train_ds = splited_dict['train']
-        # valid_ds = splited_dict['test']
-        from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
-        from datasets import load_dataset
-        from tools.data_processing.generic import prepare_test
-        test_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
-        test_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+    elif args.task_name == 'qmsum':
+        from tools.data_processing.generic import prepare_train
+        from tools.data_processing.qmsum import load_qmsum_train_dataset
+        train_ds = load_qmsum_train_dataset(path='/home/yingqi/repo/QMSum/data/train.jsonl')
+        valid_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
+        if args.it:
+            from tools.data_processing.prep_funcs import prepare_qmsum_train_it
+            train_ds = prepare_train(train_ds, partial(prepare_qmsum_train_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=None, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
+            from tools.data_processing.prep_funcs import prepare_qmsum_test_it
+            valid_ds = prepare_test(valid_ds, partial(prepare_qmsum_test_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
+        else:
+            from tools.data_processing.qmsum import load_qmsum_train
+            train_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
+            from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
+            valid_ds = prepare_test(valid_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
         from tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
         valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
     else:
         from tools.registry import VALID_TASK_NAMES
-        raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
+        pass
+        # raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
+    
+    if args.with_text:
+        print('train sample --->')
+        print(train_ds[0]['text'])
+        print('valid sample --->')
+        print(valid_ds[0]['text'])
+
 
     if args.shuffle_train:
-        train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000)
+        train_ds = train_ds.shuffle(seed=args.seed)
     else:
         train_ds = train_ds.take(int(args.train_set_split))
 
     if args.shuffle:
-        valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000)
+        valid_ds = valid_ds.shuffle(seed=args.seed)
     else:
         valid_ds = valid_ds.take(int(args.train_set_split))
 
@@ -300,10 +315,11 @@ def main():
             train_gen = iter(train_dataloader)
             for step in tqdm.tqdm(range(min(train_steps, len(train_dataloader)))):
                 optim.zero_grad()
-                global_step += 1
                 batch = next(train_gen)
                 # for k, v in batch.items():
                 #     batch[k] = v.cpu()
+                _ = batch.pop('answer')
+                _ = batch.pop('text')
                 if args.dynamic:
                     # for i in range(2):
                     #     batch['segment_size'] = block_size_list[i]
@@ -348,7 +364,8 @@ def main():
                 else:
                     batch['segment_size'] = block_size
                     batch['sum_fraction'] = args.sum_fraction
-                    accelerator.log({ "Input Length": batch['labels'].shape[1]}, step=global_step)
+                    accelerator.log({ "Input Length": batch['input_ids'].shape[1]}, step=global_step)
+                    
                     out, _ = model(**batch)
                     loss = out.loss
                     f1 = out.f1['f1']
@@ -376,16 +393,18 @@ def main():
                     model.eval()
                     for _ in range(args.validation_steps):
                         batch = next(valid_gen)
+                        answer = batch.pop('answer')
+                        _ = batch.pop('text')
                         # for k, v in batch.items():
                         #     batch[k] = v.cpu()
                         with torch.no_grad():
                             out, _ = model(**batch)
 
                             if args.rouge:
-                                text_labels = model.generate(input_ids=batch[0]['input_ids'], attention_mask=batch[0]['attention_mask'], segment_size=block_size)
+                                text_labels = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size)
                                 text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
-                                rouge = model.rouge(text_out, batch['answer'])
-                                valid_rouge.append(rouge['rouge1'].detach().item())
+                                rouge = model.rouge.compute(predictions=[text_out], references=[answer])
+                                valid_rouge.append(rouge['rouge1'].item())
 
                         loss = out.loss
                         ppl = out.ppl
@@ -397,9 +416,10 @@ def main():
 
                     # Log to wandb by calling `accelerator.log`, `step` is optional
                     accelerator.log({"Validation Loss": np.mean(valid_losses), "Validation PPL": np.mean(valid_ppl), "Validation F1": np.mean(valid_f1), "Epoch": epoch}, step=global_step)
-                    # if args.rouge:
-                    #     accelerator.log({"Validation Rouge": np.mean(valid_rouge), "Epoch": epoch}, step=global_step)
+                    if args.rouge:
+                        accelerator.log({"Validation Rouge": np.mean(valid_rouge), "Epoch": epoch}, step=global_step)
                     model.train()
+                global_step += 1
 
             accelerator.wait_for_everyone()
         
@@ -414,27 +434,27 @@ def main():
         plt.show()
         plt.close()
 
-    valid_losses = []
-    valid_ppl = []
-    model.eval()
-    for step in tqdm.tqdm(range(eval_steps)):
-        batch = next(valid_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
-        batch['segment_size'] = block_size
-        # if args.timing:
-        #     batch['prof'] = True
-        with torch.no_grad():
-            out, _ = model(**batch)
-        loss = out.loss
-        ppl = out.ppl
-        logger.debug(f'loss: {loss.item()}')
-        logger.debug(f'ppl: {ppl.item()}')
-        valid_losses.append(loss.detach().item())
-        valid_ppl.append(ppl.detach().item())
+    # valid_losses = []
+    # valid_ppl = []
+    # model.eval()
+    # for step in tqdm.tqdm(range(eval_steps)):
+    #     batch = next(valid_gen)
+    #     for k, v in batch.items():
+    #         batch[k] = v.cpu()
+    #     batch['segment_size'] = block_size
+    #     # if args.timing:
+    #     #     batch['prof'] = True
+    #     with torch.no_grad():
+    #         out, _ = model(**batch)
+    #     loss = out.loss
+    #     ppl = out.ppl
+    #     logger.debug(f'loss: {loss.item()}')
+    #     logger.debug(f'ppl: {ppl.item()}')
+    #     valid_losses.append(loss.detach().item())
+    #     valid_ppl.append(ppl.detach().item())
 
-    print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
-    print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
+    # print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
+    # print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
 
     test_losses = []
     test_ppl = []

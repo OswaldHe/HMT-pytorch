@@ -74,15 +74,16 @@ def group_texts(examples, block_size, history_size=None, with_answer=False, **kw
     if with_answer: result["answer"] = result["answer"].copy()
     return result
 
-def group_texts_qa(examples, with_answer=False):
+def group_texts_qa(examples, with_answer=False, with_text=False):
     result = {k: v for k, v in examples.items()}
     result["labels"] = result["input_ids"].copy()
     result["mask_size"] = result["mask_size"].copy()  # qa tasks should not be grouped
     if with_answer: result["answer"] = result["answer"].copy()
+    if with_text: result["text"] = result["text"].copy()
     return result
 
 # Function to load or create grouped dataset
-def group_dataset(dataset, split, history_size, block_size, levels: List[int]=None, is_qa_task=False, with_answer=False):
+def group_dataset(dataset, split, history_size, block_size, levels: List[int]=None, is_qa_task=False, with_answer=False, **kwargs):
     if levels is not None:
         grouped_datasets = []
         for i,n_segs in enumerate(levels):
@@ -102,7 +103,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
     else:
         if is_qa_task:
             grouped_dataset = dataset.map(
-                lambda x: group_texts_qa(x, with_answer=with_answer),
+                lambda x: group_texts_qa(x, with_answer=with_answer, with_text=kwargs.get('with_text', False)),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}" + (f" and no history size for this QA task" if split == 'train' else ""),
                 remove_columns=None,
@@ -110,7 +111,7 @@ def group_dataset(dataset, split, history_size, block_size, levels: List[int]=No
             )
         else:
             grouped_dataset = dataset.map(
-                lambda x: group_texts(x, history_size, block_size, with_answer=with_answer),
+                lambda x: group_texts(x, history_size, block_size, with_answer=with_answer, with_text=kwargs.get('with_text', False)),
                 batched=True,
                 desc=f"Grouping {split} in chunks of {block_size}" + (f" and history {history_size}" if split == 'train' else ""),
                 num_proc=16

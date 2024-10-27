@@ -1,8 +1,10 @@
 #!/bin/bash
 
 # IMPORTANT: Please set the CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint and HMT-pytorch repository you want to use.
-export CHECKPOINT=
-export HMT_PYTORCH_PATH=
+export CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/openllama_3b_v2/openllama-musique/model_weights_1301.pth
+export HMT_PYTORCH_PATH=/home/yingqi/repo/HMT-pytorch
+
+export PYTHONPATH=${HMT_PYTORCH_PATH}:$PYTHONPATH
 
 # Check if CHECKPOINT is set
 if [ -z "$CHECKPOINT" ]; then
@@ -29,19 +31,21 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 # Uncomment to disable wandb tracking
 export WANDB_MODE=offline
 
-
 python tools/evaluation/generate.py \
             --learning_rate=1e-4 \
-            --model_name=Qwen/Qwen2.5-0.5B \
-            --task_name=qmsum \
+            --model_name=openlm-research/open_llama_3b_v2 \
+            --task_name=musique \
             --task_subset=sample \
             --training_step=100 \
+            --max_new_tokens=16 \
             --num_sensory=32 \
+            --use_lora \
             --segment_length=512 \
             --bptt_depth=6 \
             --train_set_split=2 \
             --num_seg_save=8 \
-            --batch_size=2 \
+            --is_qa_task \
+            --batch_size=1 \
             --test_length=10000 \
             --save_dir=checkpoints/rp_opt-350m \
             --save_interval=10 \
@@ -51,8 +55,7 @@ python tools/evaluation/generate.py \
             --test_step=100 \
             --curriculum \
             --curriculum_segs=2,4,6,8 \
-            --mem_recall_hidden_dim=4864 \
-                        --wandb_project=wandb_pretrained_evaluation \
+            --wandb_project=wandb_pretrained_evaluation \
             --wandb_run="generate_${checkpoint}_testlen${test_length}" \
             --max_context_length=40000 \
             --load_from_ckpt=${CHECKPOINT}      

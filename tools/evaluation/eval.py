@@ -10,6 +10,7 @@ import logging
 import math
 import accelerate
 import datetime
+import pandas as pd
 
 from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
@@ -100,7 +101,10 @@ parser.add_argument('--is_qa_task', action='store_true', default=False, help='wh
 parser.add_argument('--temperature', type=float, default=1.0, help='temperature for sampling')
 parser.add_argument('--max_new_tokens', type=int, default=100, help='maximum number of new tokens generated')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
-
+parser.add_argument('--save_generated_texts', type=str, default=None, help='filename to save the generated texts')
+parser.add_argument('--do_sample', action='store_true', default=False, help='whether to sample from the model')
+parser.add_argument('--num_beams', type=int, default=5, help='number of beams for beam search')
+parser.add_argument('--it', action='store_true', default=False, help='whether to use instruction tunning version of the QMSum test set')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -145,11 +149,11 @@ def main():
     else:
         word_emb_dim = model.config.hidden_size
 
-    curriculum = args.curriculum
-    if curriculum and args.curriculum_segs is None:
-        raise ValueError("curriculum_segs must be provided if curriculum is True")
-
-    levels = [int(level) for level in args.curriculum_segs.split(',')]
+    if args.curriculum:
+        if args.curriculum_segs is None:
+            raise ValueError("curriculum_segs must be provided if curriculum is True")
+        else:
+            levels = [int(level) for level in args.curriculum_segs.split(',')]
 
     if args.inject_autoencoder:
         model = inject_eae(model, word_emb_dim, 16, 2)
@@ -191,7 +195,7 @@ def main():
     """### Prepare dataset"""
 
     id_pad_value = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size)
+    collate_fn = partial(hmt_collate_fn, id_pad_value=id_pad_value, is_qa_task=args.is_qa_task, block_size=block_size, batch_size=batch_size, with_text=True)
     
     # Log the step
     logger.info("Loading datasets")
@@ -210,16 +214,24 @@ def main():
         from tools.data_processing.red_pajamav2 import load_redpajama
         test_ds = load_redpajama(tokenizer=tokenizer, split='train[90%:]', history_size=args.test_length, block_size=block_size, streaming=args.streaming, trust_remote_code=True)
     elif args.task_name == 'qmsum':
-        from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
         test_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
-        test_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+        if args.it:
+            from tools.data_processing.prep_funcs import prepare_qmsum_test_it
+            test_ds = prepare_test(test_ds, partial(prepare_qmsum_test_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=True)
+        else:
+            from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
+            test_ds = prepare_test(test_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=True)
     elif args.task_name == 'musique':
         from tools.data_processing.prep_funcs import prepare_musique_test_ppl
         test_ds = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=args.streaming, trust_remote_code=True)
-        test_ds = prepare_test(test_ds, prepare_musique_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
+        test_ds = prepare_test(test_ds, prepare_musique_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=True)
     else:
         from tools.registry import VALID_TASK_NAMES
         raise NotImplementedError(f"Task {args.task_name} is not supported, please choose from {VALID_TASK_NAMES}")
+    
+    
+    if args.save_generated_texts is not None:
+        assert 'text' in test_ds.column_names, "text column not found in test dataset"
 
     # Print dataset sizes
     print(f"Test dataset size: {len(test_ds)}")
@@ -271,11 +283,13 @@ def main():
 
     test_gen = iter(test_dataloader)
 
+    # Create a dataframe to store results if save_generated_texts is True
+    if args.save_generated_texts:
+        results_df = pd.DataFrame(columns=['index', 'input_text', 'ppl', 'loss', 'rouge_l', 'decoded_text', 'answer'])
+
     # Start Testing
     for step in tqdm.tqdm(range(args.test_step)):
         batch = next(test_gen)
-        # for k, v in batch.items():
-        #     batch[k] = v.cpu()
         answer_ = batch.pop('answer')
         batch['segment_size'] = block_size
         if args.dynamic:
@@ -283,17 +297,20 @@ def main():
             batch['mode'] = 'test'
         if args.timing:
             batch['prof'] = True
+        input_text = batch.pop('text')
         with torch.no_grad():
             out, hist = model(**batch)
 
         if args.rouge:  # Set max new tokens according to LongBench
-            generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature)
+            if args.do_sample:
+                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature, num_beams=int(args.num_beams), do_sample=args.do_sample)
+            else:
+                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature)
             text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
-            # print(text_out)
-            # print(answer_)
-            # print(type(answer_))
+            print(input_text + "\n\n\n")
+            print(text_out + "\n")
             rouge = model.rouge.compute(predictions=[text_out], references=[answer_])
-        
+
         loss = out.loss
         ppl = out.ppl
         f1 = out.f1['f1']
@@ -307,6 +324,17 @@ def main():
         if hist is not None:
             total_hist.extend(hist)
 
+        # If save_generated_texts is True, save the results
+        if args.save_generated_texts:
+            results_df = pd.concat([results_df, pd.DataFrame([{
+                'index': step,
+                'input_text': input_text,
+                'ppl': ppl.item(),
+                'loss': loss.item(),
+                'rouge_l': rouge['rougeL'].item() if args.rouge else None,
+                'decoded_text': text_out if args.rouge else None,
+                'answer': answer_[0] if isinstance(answer_, list) else answer_
+            }])], ignore_index=True)
 
     date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     if (args.baseline_only == False) and (args.rmt_only == False) and (args.hmt_stage_1 == False) and args.plot_hist:
@@ -320,19 +348,10 @@ def main():
 
     print(f'PPL on {args.test_step * batch_size} test samples: {np.mean(test_ppl)}')
 
-    # if args.generate is not None and device == torch.device('cuda:0'):
-    #     with open(args.generate, 'r') as f:
-    #         prompt_text = f.read()
-
-    #     encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
-    #     output_seq = model.generate(
-    #         input_ids = encoded_prompt.input_ids.cpu(),
-    #         attention_mask = encoded_prompt.attention_mask.cpu(),
-    #         segment_size = block_size,
-    #         max_new_tokens = 100,
-    #         temperature = 0.6
-    #     )
-    #     print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+    # If save_generated_texts is True, save the results to a CSV file
+    if args.save_generated_texts:
+        results_df.to_csv(args.save_generated_texts, index=False)
+        print(f"Results saved to {args.save_generated_texts}")
     
     accelerator.end_training()
 

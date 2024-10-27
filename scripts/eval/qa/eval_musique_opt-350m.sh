@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # IMPORTANT: Please set the ZEROSHOT_CHECKPOINT and FINETUNED_CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
-export ZEROSHOT_CHECKPOINT=
-export FINETUNED_CHECKPOINT=
-export HMT_PYTORCH_PATH=
+export ZEROSHOT_CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/opt-350m/model_weights_700_lv_2.pth
+export FINETUNED_CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/opt-350m/opt-350m-musique/model_weights_201.pth
+export HMT_PYTORCH_PATH=/home/yingqi/repo/HMT-pytorch
 
 # Check if ZEROSHOT_CHECKPOINT is set
 if [ -z "$ZEROSHOT_CHECKPOINT" ]; then
@@ -58,10 +58,12 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --curriculum \
     --max_new_tokens=32 \
     --curriculum_segs=2,3,4,6,8 \
-    --wandb_run=baseline \
-    --wandb_project=qa_fine_tuning_evaluation \
+    --wandb_run=zeroshot \
+    --wandb_project=re-evaluation \
+    --wandb_entity=yic033-ucsd \
     --rouge \
     --is_qa_task \
+    --save_generated_texts=musique_opt-350m_zeroshot.csv \
     --max_context_length=16000000 \
     --load_from_ckpt="${ZEROSHOT_CHECKPOINT}"
 
@@ -87,9 +89,11 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
     --validation_interval=10 \
     --curriculum \
     --curriculum_segs=2,3,4,6,8 \
-    --wandb_run=fine_tuned \
-    --wandb_project=qa_fine_tuning_evaluation \
+    --wandb_run=finetuned \
+    --wandb_project=re-evaluation \
+    --wandb_entity=yic033-ucsd \
     --rouge \
     --is_qa_task \
     --max_context_length=16000000 \
+    --save_generated_texts=musique_opt-350m_finetuned.csv \
     --load_from_ckpt="${FINETUNED_CHECKPOINT}"

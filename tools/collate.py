@@ -1,7 +1,7 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-def hmt_collate_fn(batch, id_pad_value, is_qa_task, block_size, batch_size):
+def hmt_collate_fn(batch, id_pad_value, is_qa_task, block_size, batch_size, with_text=False):
     input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
     labels = [torch.tensor(b['labels'][::-1]) for b in batch]
     attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
@@ -18,6 +18,7 @@ def hmt_collate_fn(batch, id_pad_value, is_qa_task, block_size, batch_size):
                     'attention_mask': attention_mask,
                     'mask_size': torch.tensor(batch[0]['mask_size']),
                     'answer': batch[0]['answer'] }
+        if with_text: collated['text'] = batch[0]['text']
     else:
         collated = {'input_ids': input_ids,
                     'labels': labels,
