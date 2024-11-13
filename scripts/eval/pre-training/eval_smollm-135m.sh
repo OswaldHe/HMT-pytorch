@@ -42,7 +42,7 @@ for test_length in "${test_lengths[@]}"; do
     # remove the dataset cache
 
     for checkpoint in "${checkpoints[@]}"; do
-        accelerate launch $HMT_PYTORCH_PATH/tools/evaluation/eval.py \
+        accelerate launch $HMT_PYTORCH_PATH/hmt_tools/evaluation/eval.py \
             --learning_rate=1e-4 \
             --model_name=HuggingFaceTB/SmolLM-135M \
             --task_name=togethercomputer/RedPajama-Data-V2 \

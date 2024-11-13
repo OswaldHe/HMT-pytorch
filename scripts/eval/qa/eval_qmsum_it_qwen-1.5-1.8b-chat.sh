@@ -1,23 +1,22 @@
 #!/bin/bash
 
-export PYTHONPATH=/home/yingqi/repo/HMT-pytorch:$PYTHONPATH
-
 # IMPORTANT: Please set the ZEROSHOT_CHECKPOINT and FINETUNED_CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
-# export ZEROSHOT_CHECKPOINT=
-export FINETUNED_CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/llama-3.2-1b-instruct/model_weights_800.pth
+export ZEROSHOT_CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/qwen-1.5-1.8b-chat/model_weights_600.pth
+export FINETUNED_CHECKPOINT=/home/yingqi/scratch/checkpoints/fine_tuning/qwen-1.5-1.8b-chat/model_weights_295.pth
 export HMT_PYTORCH_PATH=/home/yingqi/repo/HMT-pytorch
+export MODEL_NAME=Qwen/Qwen1.5-1.8B-Chat
 
 # Check if ZEROSHOT_CHECKPOINT is set
-# if [ -z "$ZEROSHOT_CHECKPOINT" ]; then
-#     echo "Error: Please provide a path to the zeroshot checkpoint. "
-#     exit 1
-# fi
-
-# Check if FINETUNED_CHECKPOINT is set
-if [ -z "$FINETUNED_CHECKPOINT" ]; then
-    echo "Error: Please provide a path to the finetuned checkpoint. "
+if [ -z "$ZEROSHOT_CHECKPOINT" ]; then
+    echo "Error: Please provide a path to the zeroshot checkpoint. "
     exit 1
 fi
+
+# Check if FINETUNED_CHECKPOINT is set
+# if [ -z "$FINETUNED_CHECKPOINT" ]; then
+#     echo "Error: Please provide a path to the finetuned checkpoint. "
+#     exit 1
+# fi
 
 # Optionally, you can print the checkpoint path for verification
 echo "Using zeroshot checkpoint: $ZEROSHOT_CHECKPOINT"
@@ -35,14 +34,12 @@ cd "$HMT_PYTORCH_PATH"
 export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
-accelerate env
-
-# accelerate launch ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+# export WANDB_MODE=offline
+# accelerate launch ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
 #     --learning_rate=1e-4 \
-#     --model_name=HuggingFaceTB/SmolLM-135M \
+#     --model_name=$MODEL_NAME \
 #     --task_name=qmsum \
 #     --task_subset=sample \
-#     --training_step=100 \
 #     --num_sensory=32 \
 #     --segment_length=1024 \
 #     --bptt_depth=6 \
@@ -50,26 +47,28 @@ accelerate env
 #     --num_seg_save=8 \
 #     --batch_size=1 \
 #     --test_length=3000 \
-#     --mem_recall_hidden_dim=1536 \
 #     --test_step=200 \
-#     --save_dir=checkpoints/opt-350m/qmsum \
+#     --save_dir=checkpoints/$MODEL_NAME/qmsum \
 #     --save_interval=10 \
-#     --max_new_tokens=512 \
 #     --token_file=huggingface_token.txt \
 #     --validation_interval=10 \
-#     --curriculum \
-#     --curriculum_segs=2,3,4,6,8 \
-#     --wandb_run=baseline \
-#     --wandb_project=qa_fine_tuning_evaluation \
+#     --max_new_tokens=512 \
+#     --wandb_project=rebuttle_evaluation \
+#     --wandb_entity=yic033-ucsd \
+#     --wandb_run=qmsum_it_qwen-1.5-1.8b-chat_zeroshot \
 #     --rouge \
 #     --is_qa_task \
 #     --max_context_length=16000000 \
+#     --temperature=1.0 \
+#     --it \
+#     --do_sample \
+#     --num_beams=5 \
+#     --save_generated_texts=qmsum_qwen-1.5-1.8b-chat_zeroshot.csv \
 #     --load_from_ckpt="${ZEROSHOT_CHECKPOINT}"
 
-
-accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+accelerate launch --main_process_port=$MAIN_PROCESS_PORT ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
     --learning_rate=1e-4 \
-    --model_name=meta-llama/Llama-3.2-1B-Instruct \
+    --model_name=${MODEL_NAME} \
     --task_name=qmsum \
     --task_subset=sample \
     --training_step=100 \
@@ -78,20 +77,20 @@ accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation
     --bptt_depth=6 \
     --train_set_split=2 \
     --num_seg_save=8 \
+    --max_new_tokens=512 \
     --batch_size=1 \
     --test_length=3000 \
     --test_step=200 \
-    --max_new_tokens=512 \
     --save_dir=checkpoints/opt-350m/qmsum \
     --save_interval=10 \
     --token_file=huggingface_token.txt \
     --validation_interval=10 \
-    --wandb_run=llama-3.2-1b_qmsum_it \
-    --wandb_project=qa_fine_tuning_evaluation \
+    --wandb_project=rebuttle_evaluation \
+    --wandb_entity=yic033-ucsd \
+    --wandb_run=qmsum_it_qwen-1.5-1.8b-chat_finetuned \
     --rouge \
-    --is_qa_task \
     --it \
-    --max_context_length=300000 \
-    --save_generated_texts=qmsum_llama-3.2-1b_it.csv \
-    --temperature=1.0 \
+    --is_qa_task \
+    --max_context_length=16000000 \
+    --save_generated_texts=qmsum_qwen-1.5-1.8b-chat_finetuned.csv \
     --load_from_ckpt="${FINETUNED_CHECKPOINT}"

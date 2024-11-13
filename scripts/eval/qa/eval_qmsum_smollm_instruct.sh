@@ -42,7 +42,7 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 
 accelerate env
 
-# accelerate launch ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+# accelerate launch ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
 #     --learning_rate=1e-4 \
 #     --model_name=HuggingFaceTB/SmolLM-135M \
 #     --task_name=qmsum \
@@ -73,7 +73,7 @@ accelerate env
 
 
 for checkpoint in "${FINETUNED_CHECKPOINT_LIST[@]}"; do
-    accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+    accelerate launch --main_process_port=$MAIN_PROCESS_PORT ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
         --learning_rate=1e-4 \
         --model_name=HuggingFaceTB/SmolLM-135M-Instruct \
         --task_name=qmsum \

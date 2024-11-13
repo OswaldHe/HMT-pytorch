@@ -29,7 +29,7 @@ export TASK_NAME=narrativeqa
 export MAX_NEW_TOKENS=128
 
 # >>> SmolLM-135M >>>
-accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+accelerate launch  ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
     --learning_rate=1e-4 \
     --model_name=HuggingFaceTB/SmolLM-135M \
     --task_name=${TASK_NAME} \
@@ -60,7 +60,7 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
 # <<< SmolLM-135M <<<
 
 # >>> OPT-350M >>>
-accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+accelerate launch  ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
     --learning_rate=1e-4 \
     --model_name=facebook/opt-350m \
     --task_name=${TASK_NAME} \
@@ -90,7 +90,7 @@ accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
 # <<< OPT-350M <<<
 
 # >>> OpenLLaMA >>>
-accelerate launch  ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+accelerate launch  ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
     --learning_rate=1e-4 \
     --model_name=openlm-research/open_llama_3b_v2 \
     --task_name=${TASK_NAME} \

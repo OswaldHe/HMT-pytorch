@@ -160,3 +160,8 @@ generate.ipynb
 test__.py
 wandb_data/
 wandb_processing.ipynb
+write_token.txt
+
+*.csv
+data.ipynb
+/try_data.py

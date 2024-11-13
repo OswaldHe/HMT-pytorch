@@ -1,5 +1,5 @@
 import unittest
-from tools.data_processing.narrativeqa import load_narrativeqa_test, load_narrativeqa_train_valid
+from hmt_tools.data_processing.narrativeqa import load_narrativeqa_test, load_narrativeqa_train_valid
 from datasets import Dataset
 
 class TestLoadQADataset(unittest.TestCase):
@@ -33,7 +33,7 @@ class TestLoadQADataset(unittest.TestCase):
         print(ds_valid[0])
 
     def test_qmsum_train(self):
-        from tools.data_processing.qmsum import load_qmsum_train
+        from hmt_tools.data_processing.qmsum import load_qmsum_train
 
         ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=self.tokenizer, path="./repo/QMSum/data/train.jsonl")
         print("QMSum train dataset:")
@@ -55,7 +55,7 @@ class TestLoadQADataset(unittest.TestCase):
     
     
     def test_qmsum_train_huggingface(self):
-        from tools.data_processing.qmsum import load_qmsum_train
+        from hmt_tools.data_processing.qmsum import load_qmsum_train
 
         total_ds = load_qmsum_train(max_token_num=12000, block_size=1024, tokenizer=self.tokenizer, source='huggingface')
         splited_dict = total_ds.train_test_split(test_size=0.2)
@@ -69,8 +69,8 @@ class TestLoadQADataset(unittest.TestCase):
         print(valid_ds)
 
     def test_musique_test(self):
-        from tools.data_processing.prep_funcs import prepare_musique_test_ppl
-        from tools.data_processing.generic import prepare_test
+        from hmt_tools.data_processing.prep_funcs import prepare_musique_test_ppl
+        from hmt_tools.data_processing.generic import prepare_test
         from datasets import load_dataset
         ds = load_dataset(path="THUDM/LongBench", name="musique", split='test', streaming=False, trust_remote_code=True)
         ds = prepare_test(ds, prepare_musique_test_ppl, max_token_num=12800, test_length=10000, block_size=1024, tokenizer=self.tokenizer, with_answer=True)
@@ -91,7 +91,7 @@ class TestLoadQADataset(unittest.TestCase):
             print("mask_size: ", ds['mask_size'][i])
 
     def test_musique_train(self):
-        from tools.data_processing.musique import load_musique_train
+        from hmt_tools.data_processing.musique import load_musique_train
 
         ds = load_musique_train(max_token_num=12000, block_size=1024, tokenizer=self.tokenizer)
         print("MuSiQue train dataset:")
@@ -114,7 +114,7 @@ class TestLoadRedPajama(unittest.TestCase):
     def test_load_redpajama_test(self):
         """Trying to load the redpajama test split, which is the last 10% of the dataset. Also testing dataloader creation from the dataset.
         """
-        from tools.data_processing.red_pajamav2 import load_redpajama
+        from hmt_tools.data_processing.red_pajamav2 import load_redpajama
         test_ds = load_redpajama(tokenizer=self.tokenizer, split='train[90%:]', history_size=10000, block_size=990, streaming=False, trust_remote_code=True)
 
         print(type(test_ds))
@@ -125,7 +125,7 @@ class TestLoadRedPajama(unittest.TestCase):
 
         batch_size = 2
         from torch.utils.data import DataLoader
-        from tools.collate import collate_fn
+        from hmt_tools.collate import collate_fn
         from functools import partial
         collate_fn = partial(collate_fn, id_pad_value=self.tokenizer.pad_token_id, is_qa_task=False, block_size=990, batch_size=batch_size)
         dataloader = DataLoader(test_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)

@@ -29,7 +29,7 @@ accelerate env # Manually remove the cache dir if necessary. It is used to force
 # Uncomment to disable wandb tracking
 # export WANDB_MODE=offline
 
-accelerate launch $HMT_PYTORCH_PATH/tools/training/fine_tunning.py \
+accelerate launch $HMT_PYTORCH_PATH/hmt_tools/training/fine_tunning.py \
     --learning_rate=1e-5 \
     --model_name=openlm-research/open_llama_3b_v2 \
     --task_name=qmsum \

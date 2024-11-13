@@ -34,7 +34,7 @@ export NCCL_DEBUG=INFO
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
 # export WANDB_MODE=offline
-accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+accelerate launch --main_process_port=$MAIN_PROCESS_PORT ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
     --learning_rate=1e-4 \
     --model_name=openlm-research/open_llama_3b_v2 \
     --task_name=qmsum \
@@ -68,7 +68,7 @@ accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation
     --save_generated_texts=qmsum_openllama_zeroshot.csv \
     --load_from_ckpt="${ZEROSHOT_CHECKPOINT}"
 
-# accelerate launch --main_process_port=29501 ${HMT_PYTORCH_PATH}/tools/evaluation/eval.py \
+# accelerate launch --main_process_port=$MAIN_PROCESS_PORT ${HMT_PYTORCH_PATH}/hmt_tools/evaluation/eval.py \
 #     --learning_rate=1e-4 \
 #     --model_name=openlm-research/open_llama_3b_v2 \
 #     --task_name=qmsum \

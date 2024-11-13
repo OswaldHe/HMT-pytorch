@@ -197,7 +197,6 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         else:
             self.cross_attn = None
         
-        self.rouge = evaluate.load('rouge')
         self.f1 = evaluate.load("f1")
 
     def forward(self, 

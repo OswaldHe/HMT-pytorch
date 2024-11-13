@@ -29,10 +29,10 @@ from modeling_rmt.compression import inject_eae
 from typing import List
 import logging, shutil
 from accelerate.logging import get_logger
-from tools.collate import hmt_collate_fn
-from tools.models import load_model
+from hmt_tools.collate import hmt_collate_fn
+from hmt_tools.models import load_model
 from datasets import load_dataset
-from tools.data_processing.generic import prepare_test
+from hmt_tools.data_processing.generic import prepare_test, prepare_train
 
 parser = ArgumentParser()
 
@@ -100,6 +100,7 @@ parser.add_argument('--rouge', action='store_true', default=False, help='Whether
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
 parser.add_argument('--it', action='store_true', default=False, help='whether to use instruction tunning version of the QMSum test set')
 parser.add_argument('--with_text', action='store_true', default=False, help='whether to return the text in the dataset')
+parser.add_argument('--max_new_tokens', type=int, default=512, help='Maximum number of new tokens to generate')
 torch.manual_seed(3407)
 
 def gen_from_iterable_dataset(iterable_ds):
@@ -138,6 +139,9 @@ def main():
         with open(args.token_file, 'r') as f:
             token = f.read()
 
+    if args.rouge:
+        import evaluate
+        rouge_metric = evaluate.load('rouge')
 
     if args.save_dir is None:
         save_dir = f'./checkpoints/{args.model_name}'
@@ -207,31 +211,36 @@ def main():
     # Log the step
     logger.info("Loading datasets")
     if args.task_name == 'deepmind/narrativeqa':
-        from tools.data_processing.narrativeqa import load_narrativeqa_train_valid
+        from hmt_tools.data_processing.narrativeqa import load_narrativeqa_train_valid
         train_ds, valid_ds = load_narrativeqa_train_valid(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split=['train', 'validation'])
     elif args.task_name == 'qmsum':
-        from tools.data_processing.generic import prepare_train
-        from tools.data_processing.qmsum import load_qmsum_train_dataset
+        from hmt_tools.data_processing.qmsum import load_qmsum_train_dataset
         train_ds = load_qmsum_train_dataset(path='/home/yingqi/repo/QMSum/data/train.jsonl')
         valid_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
         if args.it:
-            from tools.data_processing.prep_funcs import prepare_qmsum_train_it
+            from hmt_tools.data_processing.prep_funcs import prepare_qmsum_train_it
             train_ds = prepare_train(train_ds, partial(prepare_qmsum_train_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=None, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
-            from tools.data_processing.prep_funcs import prepare_qmsum_test_it
+            from hmt_tools.data_processing.prep_funcs import prepare_qmsum_test_it
             valid_ds = prepare_test(valid_ds, partial(prepare_qmsum_test_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
         else:
-            from tools.data_processing.qmsum import load_qmsum_train
+            from hmt_tools.data_processing.qmsum import load_qmsum_train
             train_ds = load_qmsum_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, source='huggingface')
-            from tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
+            from hmt_tools.data_processing.prep_funcs import prepare_qmsum_test_ppl
             valid_ds = prepare_test(valid_ds, prepare_qmsum_test_ppl, max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True)
     elif args.task_name == 'musique':
-        from tools.data_processing.musique import load_musique_train
+        from hmt_tools.data_processing.musique import load_musique_train
         train_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='train')
         valid_ds = load_musique_train(max_token_num=args.max_context_length, block_size=block_size, tokenizer=tokenizer, split='validation')
+    elif args.task_name == 'dolly_sum':
+        from hmt_tools.data_processing.prep_funcs import prepare_dolly_sum_train
+        train_ds = load_dataset(path="databricks/databricks-dolly-15k", split='train', streaming=args.streaming, trust_remote_code=True)
+        train_ds = prepare_train(train_ds, partial(prepare_dolly_sum_train, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=None, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
+        from hmt_tools.data_processing.prep_funcs import prepare_qmsum_test_it
+        valid_ds = load_dataset(path="THUDM/LongBench", name="qmsum", split='test', streaming=args.streaming, trust_remote_code=True)
+        valid_ds = prepare_test(valid_ds, partial(prepare_qmsum_test_it, tokenizer=tokenizer), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=args.with_text)
     else:
-        from tools.registry import VALID_TASK_NAMES
-        pass
-        # raise NotImplementedError(f"Task name {args.task_name} is not implemented, please choose any of the: \n{VALID_TASK_NAMES}")
+        from hmt_tools.registry import VALID_TASK_NAMES
+        raise NotImplementedError(f"Task name {args.task_name} is not implemented. ")
     
     if args.with_text:
         print('train sample --->')
@@ -318,8 +327,10 @@ def main():
                 batch = next(train_gen)
                 # for k, v in batch.items():
                 #     batch[k] = v.cpu()
-                _ = batch.pop('answer')
-                _ = batch.pop('text')
+                if args.is_qa_task:
+                    _ = batch.pop('answer')
+                if args.with_text:
+                    _ = batch.pop('text')
                 if args.dynamic:
                     # for i in range(2):
                     #     batch['segment_size'] = block_size_list[i]
@@ -391,19 +402,24 @@ def main():
                     valid_rouge = []
                     valid_gen = iter(valid_dataloader)
                     model.eval()
-                    for _ in range(args.validation_steps):
+                    for _ in range(min(args.validation_steps, len(valid_dataloader))):
                         batch = next(valid_gen)
-                        answer = batch.pop('answer')
-                        _ = batch.pop('text')
+                        if args.is_qa_task:
+                            answer = batch.pop('answer')
+                        if args.with_text:
+                            _ = batch.pop('text')
                         # for k, v in batch.items():
                         #     batch[k] = v.cpu()
                         with torch.no_grad():
                             out, _ = model(**batch)
 
                             if args.rouge:
-                                text_labels = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size)
+                                text_labels = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=args.max_new_tokens)
                                 text_out = tokenizer.decode(text_labels[0], skip_special_tokens=True)
-                                rouge = model.rouge.compute(predictions=[text_out], references=[answer])
+                                # all_rouges = accelerator.gather(text_out)
+                                # all_answers = accelerator.gather(answer)
+                                rouge = rouge_metric.compute(predictions=[text_out], references=[answer])
+                                # rouge = rouge_metric.compute(predictions=all_rouges, references=all_answers)
                                 valid_rouge.append(rouge['rouge1'].item())
 
                         loss = out.loss

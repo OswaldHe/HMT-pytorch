@@ -116,67 +116,6 @@ def prepare_qmsum_test_it(dataset: datasets.Dataset, tokenizer=None):
                                                                                 'dataset', 'language', 'all_classes', '_id'])
     return dataset
 
-def prepare_qmsum_train_it(dataset: datasets.Dataset, tokenizer=None):
-    """Instruction tunning version of the QMSum test set. 
-
-    :param dataset: A QMSum test dataset
-    :type dataset: datasets.Dataset
-    :param tokenizer: tokenizer to use for encoding the text
-    :type tokenizer: _type_
-    """
-    def qmsum_entry_to_text_template(dataset):
-        """
-        Convert a QMSum dataset entry to a text entry. 
-        The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
-        """
-        return {
-            # "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
-            #                                         {"role": "user", "content": "[Document]: \n" +entry[1] + "\n\n" + "[Question]: \n" + entry[0]}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['input'], dataset['context'])],
-            "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
-                                                    {"role": "user", "content": entry[1] + "\n\n" + entry[0] + "\n\n"},
-                                                    {"role": "assistant", "content": entry[2]}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['task'], dataset['meeting_notes'], dataset['answers'])],
-            "answer": dataset['answers']
-        }
-
-    import re
-
-    def extract_and_remove_s_tags(text):
-        # Extract content within <s></s> tags
-        extracted = re.findall(r'<s>(.*?)</s>', text, re.DOTALL)
-        
-        # Remove <s></s> tags and their content from the original text
-        cleaned_text = re.sub(r'<s>.*?</s>', '', text, flags=re.DOTALL)
-        
-        return extracted, cleaned_text.strip()
-
-
-    # Process each entry in the dataset
-    task_col = []
-    meeting_notes_col = []
-    answer_col = []
-    for entry in dataset:
-        extracted, cleaned_text = extract_and_remove_s_tags(entry['src'])
-        
-        # Combine extracted parts into a single string (if needed)
-        extracted_text = ' '.join(extracted)
-
-        task_col.append(extracted_text)
-        meeting_notes_col.append(cleaned_text)
-        answer_col.append(entry['tgt'])
-
-    raw_datas = {
-        'task': task_col,
-        'meeting_notes': meeting_notes_col,
-        'answers': answer_col
-    }
-
-    dataset = Dataset.from_dict(raw_datas)
-
-    dataset = dataset.map(qmsum_entry_to_text_template, batched=True,
-                                                    desc=f"Concatenating QMSum Input Questions and Contexts",
-                                                    num_proc=8).remove_columns(['task', 'meeting_notes', 'answers'])
-    return dataset
-
 def prepare_qmsum_train(dataset: List):
     import re
 
@@ -288,3 +227,88 @@ def prepare_musique_train(dataset):
 
     return dataset
 
+
+def prepare_qmsum_train_it(dataset: datasets.Dataset, tokenizer=None):
+    """Instruction tunning version of the QMSum test set. 
+
+    :param dataset: A QMSum test dataset
+    :type dataset: datasets.Dataset
+    :param tokenizer: tokenizer to use for encoding the text
+    :type tokenizer: _type_
+    """
+    def qmsum_entry_to_text_template(dataset):
+        """
+        Convert a QMSum dataset entry to a text entry. 
+        The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
+        """
+        return {
+            # "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
+            #                                         {"role": "user", "content": "[Document]: \n" +entry[1] + "\n\n" + "[Question]: \n" + entry[0]}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['input'], dataset['context'])],
+            "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
+                                                    {"role": "user", "content": entry[1] + "\n\n" + entry[0] + "\n\n"},
+                                                    {"role": "assistant", "content": entry[2]}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['task'], dataset['meeting_notes'], dataset['answers'])],
+            "answer": dataset['answers']
+        }
+
+    import re
+
+    def extract_and_remove_s_tags(text):
+        # Extract content within <s></s> tags
+        extracted = re.findall(r'<s>(.*?)</s>', text, re.DOTALL)
+        
+        # Remove <s></s> tags and their content from the original text
+        cleaned_text = re.sub(r'<s>.*?</s>', '', text, flags=re.DOTALL)
+        
+        return extracted, cleaned_text.strip()
+
+
+    # Process each entry in the dataset
+    task_col = []
+    meeting_notes_col = []
+    answer_col = []
+    for entry in dataset:
+        extracted, cleaned_text = extract_and_remove_s_tags(entry['src'])
+        
+        # Combine extracted parts into a single string (if needed)
+        extracted_text = ' '.join(extracted)
+
+        task_col.append(extracted_text)
+        meeting_notes_col.append(cleaned_text)
+        answer_col.append(entry['tgt'])
+
+    raw_datas = {
+        'task': task_col,
+        'meeting_notes': meeting_notes_col,
+        'answers': answer_col
+    }
+
+    dataset = Dataset.from_dict(raw_datas)
+
+    dataset = dataset.map(qmsum_entry_to_text_template, batched=True,
+                                                    desc=f"Concatenating QMSum Input Questions and Contexts",
+                                                    num_proc=8).remove_columns(['task', 'meeting_notes', 'answers'])
+    return dataset
+
+
+def prepare_dolly_sum_train(dataset, tokenizer):
+
+    def dolly_entry_to_text_template(dataset):
+        """
+        Convert a Dolly dataset entry to a text entry. 
+        The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
+        """
+        return {
+            # "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
+            #                                         {"role": "user", "content": "[Document]: \n" +entry[1] + "\n\n" + "[Question]: \n" + entry[0]}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['input'], dataset['context'])],
+            "text": [tokenizer.apply_chat_template([{"role": "system", "content": "you are chatbot than can answer questions with given long document"},
+                                                    {"role": "user", "content": entry[1].replace('\n\n', '\n') + "\n\n" + entry[0].replace('\n\n', '\n') + "\n\n"},
+                                                    {"role": "assistant", "content": entry[2].replace('\n\n', '\n')}], tokenize=False, add_generation_prompt=True) for entry in zip(dataset['instruction'], dataset['context'], dataset['response'])],
+            "answer": [d.replace('\n\n', '\n') for d in dataset['response']]
+        }
+
+    dataset = dataset.filter(lambda x: x['category'] == 'summarization')
+
+    dataset = dataset.map(dolly_entry_to_text_template, batched=True,
+                                                        desc=f"Concatenating QA Input Questions and Contexts",
+                                                        num_proc=8).remove_columns(['instruction', 'context', 'response', 'category'])
+    return dataset
