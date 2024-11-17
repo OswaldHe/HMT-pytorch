@@ -36,6 +36,7 @@ from hmt_tools.collate import hmt_collate_fn
 
 from datasets import load_dataset
 from hmt_tools.data_processing.generic import prepare_test
+from hmt_tools.metrics import qa_f1_score
 
 parser = ArgumentParser()
 
@@ -314,11 +315,12 @@ def main():
             print(input_text + "\n\n\n")
             print(text_out + "\n")
             rouge = rouge_metric.compute(predictions=[text_out], references=[answer_])
+            f1 = qa_f1_score(text_out, answer_)
 
         loss = out.loss
         ppl = out.ppl
-        f1 = out.f1['f1']
-        accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1.item()}, step=step)
+        # f1 = out.f1['f1']
+        accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1}, step=step)
         if args.rouge:
             accelerator.log({"Test RougeL": rouge['rougeL'].item()}, step=step)
             test_rouge.append(rouge['rougeL'].item())
