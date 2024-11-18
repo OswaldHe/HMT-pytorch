@@ -316,7 +316,7 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         segmented = self.segment(segment_size, input_ids=input_ids, attention_mask=attention_mask)
         memory_seq = None
 
-        print('start parsing')
+        # print('start parsing')
         for seg_num, segment in enumerate(segmented[:-1]):
             for k, v in segment.items():
                 segment[k] = v.cuda()
@@ -343,11 +343,14 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             for k, v in segment.items():
                 segment[k] = v.cpu()
 
-        print("finish parsing")
+        # print("finish parsing")
         final_segment = segmented[-1]
         for k, v in final_segment.items():
             final_segment[k] = v.cuda()
         
+        if len(segmented) == 1:  # added to prevent "seg_num referenced before assignment" error when the input length is small. 
+            seg_num = 0
+
         if self.cross_attn is not None:
             s_mem = self.mem.repeat(final_segment['input_ids'].shape[0], 1, 1)
             seg = copy.deepcopy(final_segment)
