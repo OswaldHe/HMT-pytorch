@@ -325,6 +325,16 @@ def main():
             for step in tqdm.tqdm(range(min(train_steps, len(train_dataloader)))):
                 optim.zero_grad()
                 batch = next(train_gen)
+                # print("================")
+                # print("<input_ids shape>", batch['input_ids'].shape)
+                # print("================")
+                # print("================")
+                # # print("<batch>", batch['text'])
+                # print("<input_id shape>", batch['input_ids'].shape)
+                # print("input_ids", batch['input_ids'])
+                # print("attention_mask", batch['attention_mask'])
+                # quit()
+                # print("================")
                 # for k, v in batch.items():
                 #     batch[k] = v.cpu()
                 if args.is_qa_task:

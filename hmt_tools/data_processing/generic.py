@@ -34,10 +34,8 @@ def prepare_train(ds: Dataset, prep_func: Callable, max_token_num, test_length, 
     assert prep_func is not None, "Please provide a preparation function for the dataset."
 
     ds = prep_func(ds)
-
     # Tokenize the text column
     ds = tokenize_dataset(ds, tokenizer=tokenizer, text_column_name='text', **kwargs)  # Tokenize the text column
-
     # Tokenize the answer dataset, determine the token amount in each answer, and set the mask size. 
     answer_ids = tokenize_column(ds, tokenizer, column_name='answer')
     ds = ds.add_column("mask_size", [len(answer_id) for answer_id in answer_ids])
@@ -51,7 +49,7 @@ def prepare_train(ds: Dataset, prep_func: Callable, max_token_num, test_length, 
 
     # Filter the dataset by lenght
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
-    ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True, with_answer=with_answer, **kwargs)
+    ds = group_dataset(ds, split='train', history_size=test_length, block_size=block_size, is_qa_task=True, with_answer=with_answer, **kwargs)
     # print(ds.column_names)
     # print(ds[0]['text'])
     return ds

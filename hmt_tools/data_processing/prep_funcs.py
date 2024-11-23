@@ -312,3 +312,94 @@ def prepare_dolly_sum_train(dataset, tokenizer):
                                                         desc=f"Concatenating QA Input Questions and Contexts",
                                                         num_proc=8).remove_columns(['instruction', 'context', 'response', 'category'])
     return dataset
+
+def prepare_nihs_train(dataset, tokenizer, task, use_chat_template=True, use_instruction=True, use_examples=True, use_post_prompt=True):
+    # print(dataset)
+    from babilong.prompts import DEFAULT_PROMPTS, DEFAULT_TEMPLATE, get_formatted_input
+    prompt_cfg = {
+        'instruction': DEFAULT_PROMPTS[task]['instruction'] if use_instruction else '',
+        'examples': DEFAULT_PROMPTS[task]['examples'] if use_examples else '',
+        'post_prompt': DEFAULT_PROMPTS[task]['post_prompt'] if use_post_prompt else '',
+        'template': DEFAULT_TEMPLATE,
+        'chat_template': use_chat_template,
+    }
+
+    def nihs_entry_to_text_template(dataset):
+        """
+        Convert a Dolly dataset entry to a text entry. 
+        The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
+        """
+        return {
+            # "text": [tokenizer.apply_chat_template([{'role': 'user', 'content': get_formatted_input(context, 
+            #                                                                                         question, prompt_cfg['examples'], 
+            #                                                                                         prompt_cfg['instruction'], prompt_cfg['post_prompt'], 
+            #                                                                                         template=prompt_cfg['template'])},
+            "text": [get_formatted_input(context, 
+                                        question, prompt_cfg['examples'], 
+                                        prompt_cfg['instruction'], prompt_cfg['post_prompt'], 
+                                        template=prompt_cfg['template']) + "\n\n" + target for context, question, target in zip(dataset['input'], dataset['question'], dataset['target'])],
+            "answer": dataset['target']
+        }
+
+    dataset = dataset.map(nihs_entry_to_text_template, batched=True,
+                                                        desc=f"Concatenating Babilong Input Questions and Contexts",
+                                                        num_proc=8).remove_columns(['input', 'question', 'target'])
+    return dataset
+
+def prepare_nihs_test(dataset, tokenizer, task, use_chat_template=True, use_instruction=True, use_examples=True, use_post_prompt=True):
+    from babilong.prompts import DEFAULT_PROMPTS, DEFAULT_TEMPLATE, get_formatted_input
+    prompt_cfg = {
+        'instruction': DEFAULT_PROMPTS[task]['instruction'] if use_instruction else '',
+        'examples': DEFAULT_PROMPTS[task]['examples'] if use_examples else '',
+        'post_prompt': DEFAULT_PROMPTS[task]['post_prompt'] if use_post_prompt else '',
+        'template': DEFAULT_TEMPLATE,
+        'chat_template': use_chat_template,
+    }
+
+    def nihs_entry_to_text_template(dataset):
+        """
+        Convert a Dolly dataset entry to a text entry. 
+        The text is a concat of prompt, question delimiter, question, context delimiter, context and label is the answer.
+        """
+        return {
+            # "text": [tokenizer.apply_chat_template([{'role': 'user', 'content': get_formatted_input(context, 
+            #                                                                                         question, prompt_cfg['examples'], 
+            #                                                                                         prompt_cfg['instruction'], prompt_cfg['post_prompt'], 
+            #                                                                                         template=prompt_cfg['template'])}], tokenize=False, add_generation_prompt=True) for context, question, target in zip(dataset['input'], dataset['question'], dataset['target'])],
+            "text": [get_formatted_input(context, 
+                                                                                                    question, prompt_cfg['examples'], 
+                                                                                                    prompt_cfg['instruction'], prompt_cfg['post_prompt'], 
+                                                                                                    template=prompt_cfg['template']) for context, question, target in zip(dataset['input'], dataset['question'], dataset['target'])],
+            "answer": dataset['target']
+        }
+
+    dataset = dataset.map(nihs_entry_to_text_template, batched=True,
+                                                        desc=f"Concatenating Babilong Input Questions and Contexts",
+                                                        num_proc=8).remove_columns(['input', 'question', 'target'])
+    return dataset
+
+def prepare_longbench_test(dataset, subset_name):
+    # How longbench set the delimiter? 
+    # prompt = "<Prompt>: Answer the question based on the following passages. "
+    # context_delimiter = "<Passages>: "
+    # question_delimiter = "<Question>: "
+    # answer_delimiter = "<Answer>: "
+
+    import json
+    with open("/home/yingqi/repo/HMT-pytorch/configs/dataset2prompt.json", "r") as f:
+        prompt_cfg = json.load(f)
+    prompt = prompt_cfg[subset_name]
+
+    columns = dataset.column_names
+
+    def apply_prompt(prompt, context, question):
+        return prompt.replace("{context}", context).replace("{input}", question)
+
+    def musique_entry_to_text(dataset):
+        dataset_ = {'text': [apply_prompt(prompt, cxt, question) for question, cxt in zip(dataset['input'], dataset['context'])],
+                    'answer': [answer[0] for answer in dataset['answers']]}
+        return dataset_
+    
+    dataset = dataset.map(musique_entry_to_text, batched=True, 
+                                                    desc=f"Concatenating QA Input Questions, Answers, and Passagesf for MuSiQue").remove_columns(columns)
+    return dataset

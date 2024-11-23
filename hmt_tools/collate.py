@@ -12,17 +12,24 @@ def hmt_collate_fn(batch, id_pad_value, is_qa_task, block_size, batch_size, with
     if is_qa_task:
         assert batch_size == 1, "QA Tasks currently only support batch_size = 1 and batches can't be collated"
 
-    if is_qa_task:
-        collated = {'input_ids': input_ids,
-                    'labels': labels,
-                    'attention_mask': attention_mask,
-                    'mask_size': torch.tensor(batch[0]['mask_size']),
-                    'answer': batch[0]['answer'] }
-        if with_text: collated['text'] = batch[0]['text']
-    else:
-        collated = {'input_ids': input_ids,
-                    'labels': labels,
-                    'attention_mask': attention_mask}
+    # FIXME: proper way to handel non QA tasks
+    # if is_qa_task:
+    #     collated = {'input_ids': input_ids,
+    #                 'labels': labels,
+    #                 'attention_mask': attention_mask,
+    #                 'mask_size': torch.tensor(batch[0]['mask_size']),
+    #                 'answer': batch[0]['answer'] }
+    #     if with_text: collated['text'] = batch[0]['text']
+    # else:
+    #     collated = {'input_ids': input_ids,
+    #                 'labels': labels,
+    #                 'attention_mask': attention_mask}
+    collated = {'input_ids': input_ids,
+                'labels': labels,
+                'attention_mask': attention_mask,
+                'mask_size': torch.tensor(batch[0]['mask_size']),
+                'answer': batch[0]['answer'] }
+    if with_text: collated['text'] = batch[0]['text']
 
     if input_ids.shape[1] != block_size:
         labels_mask = torch.ones_like(input_ids, dtype=bool)

@@ -10,7 +10,7 @@ import numpy as np
 from babilong.metrics import compare_answers, TASK_LABELS
 import argparse
 
-def visualize_accuracy(results_folder, model_name, prompt_name, tasks, lengths):
+def visualize_accuracy(results_folder, model_name, prompt_name, tasks, lengths, plot_name):
     accuracy = np.zeros((len(tasks), len(lengths)))
     for j, task in enumerate(tasks):
         for i, ctx_length in enumerate(lengths):
@@ -47,7 +47,7 @@ def visualize_accuracy(results_folder, model_name, prompt_name, tasks, lengths):
     ax.set_ylabel('Tasks')
 
     # Save the figure to a PDF
-    plt.savefig('all_tasks_performance.pdf', bbox_inches='tight')
+    plt.savefig(plot_name, bbox_inches='tight')
     # plt.show()
 
 if __name__ == '__main__':
@@ -57,10 +57,11 @@ if __name__ == '__main__':
     parser.add_argument('--prompt_name', type=str, default='instruction_yes_examples_yes_post_prompt_yes_chat_template_yes')
     parser.add_argument('--tasks', type=str, default='qa1,qa2')
     parser.add_argument('--lengths', type=str, default='0k,1k')
+    parser.add_argument('--plot_name', type=str, default='all_tasks_performance.pdf')
 
     args = parser.parse_args()
 
     tasks = args.tasks.split(',')
     lengths = args.lengths.split(',')
 
-    visualize_accuracy(args.results_folder, args.model_name, args.prompt_name, tasks, lengths)
+    visualize_accuracy(args.results_folder, args.model_name, args.prompt_name, tasks, lengths, args.plot_name)

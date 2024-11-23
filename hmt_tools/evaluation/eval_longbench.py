@@ -140,6 +140,10 @@ def main():
         with open(args.token_file, 'r') as f:
             token = f.read()
 
+    with open("/home/yingqi/repo/HMT-pytorch/configs/dataset2maxlen.json", "r") as f:
+        maxlen_cfg = json.load(f)
+    max_generate_length = maxlen_cfg[args.task_subset]
+
     """### Load model"""
     cache_dir = os.environ.get('HF_HOME', args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
@@ -297,7 +301,7 @@ def main():
         results_df = pd.DataFrame(columns=['index', 'input_text', 'ppl', 'loss', 'rouge_l', 'decoded_text', 'answer'])
 
     # Start Testing
-    for step in tqdm.tqdm(range(args.test_step)):
+    for step in tqdm.tqdm(range(min(args.test_step, len(test_dataloader)))):
         batch = next(test_gen)
         answer_ = batch.pop('answer')
         batch['segment_size'] = block_size
@@ -312,18 +316,16 @@ def main():
 
         if args.rouge:  # Set max new tokens according to LongBench
             if args.do_sample:
-                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature, num_beams=int(args.num_beams), do_sample=args.do_sample)
+                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(max_generate_length), temperature=args.temperature, num_beams=int(args.num_beams), do_sample=args.do_sample)
             else:
-                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(args.max_new_tokens), temperature=args.temperature)
+                generated = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], segment_size=block_size, max_new_tokens=int(max_generate_length), temperature=args.temperature)
             text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
-            print(input_text + "\n\n\n")
-            print(text_out + "\n")
             rouge = rouge_metric.compute(predictions=[text_out], references=[answer_])
-            f1 = qa_f1_score(text_out, answer_)
+            # f1 = qa_f1_score(text_out, answer_)
 
         loss = out.loss
         ppl = out.ppl
-        # f1 = out.f1['f1']
+        f1 = out.f1['f1']
         accelerator.log({"Test CrossEntropy Loss": loss.item(), "Test PPL": ppl.item(), "Test F1": f1}, step=step)
         if args.rouge:
             accelerator.log({"Test RougeL": rouge['rougeL'].item()}, step=step)
@@ -341,6 +343,7 @@ def main():
                 'input_text': input_text,
                 'ppl': ppl.item(),
                 'loss': loss.item(),
+                'f1': f1.item(),
                 'rouge_l': rouge['rougeL'].item() if args.rouge else None,
                 'decoded_text': text_out if args.rouge else None,
                 'answer': answer_[0] if isinstance(answer_, list) else answer_

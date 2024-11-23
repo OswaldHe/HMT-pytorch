@@ -171,8 +171,8 @@ def babilong_eval(model_config, data_lengths=['0k', '1k'], tasks=['qa1', 'qa2'],
                     input_text = [{'role': 'user', 'content': input_text}]
                     model_inputs_text = tokenizer.apply_chat_template(input_text, add_generation_prompt=True,
                                                                  return_tensors='pt', tokenize=False)
-                    print(model_inputs_text)
-                    exit()
+                    # print(model_inputs_text)
+                    # exit()
                     model_inputs_tokenized = tokenizer(model_inputs_text, return_tensors='pt', add_special_tokens=True, return_attention_mask=True).to(device)
                     model_inputs = {'input_ids': model_inputs_tokenized['input_ids'], 'attention_mask': model_inputs_tokenized['attention_mask']}
                 else:

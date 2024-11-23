@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # IMPORTANT: Please set the CHECKPOINT and HMT_PYTORCH_PATH variables to the path to the checkpoint you want to use.
-export CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/smollm-135m/model_weights_0_lv_3.pth
+export CHECKPOINT=/home/yingqi/scratch/hmt_pretrained/llama-3.2-1b-instruct/model_weights_800.pth
 export HMT_PYTORCH_PATH=/home/yingqi/repo/HMT-pytorch
 
 # Check if CHECKPOINT is set
@@ -25,31 +25,34 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 accelerate env # Manually remove the cache dir if necessary. It is used to force recaching. 
 
 
-# Uncomment to disable wandb tracking
-export WANDB_MODE=offline
 
-accelerate launch $HMT_PYTORCH_PATH/hmt_tools/training/fine_tunning.py \
+# Uncomment to disable wandb tracking
+# export WANDB_MODE=offline
+
+accelerate launch --main_process_port ${MAIN_PROCESS_PORT} $HMT_PYTORCH_PATH/nihs/nihs_train.py \
     --learning_rate=1e-5 \
-    --model_name=HuggingFaceTB/SmolLM-135M \
-    --task_name=musique \
-    --task_subset=sample \
-    --training_step=1000 \
+    --model_name=meta-llama/Llama-3.2-1B-Instruct \
+    --task_name=ioeddk/babilong_finetuning \
+    --task_subset=qa1 \
+    --training_step=80 \
     --num_sensory=32 \
-    --segment_length=1024 \
-    --bptt_depth=6 \
+    --segment_length=512 \
+    --bptt_depth=16 \
     --train_set_split=2 \
     --num_seg_save=8 \
     --batch_size=1 \
-    --mem_recall_hidden_dim=1536 \
-    --save_dir=checkpoints/smollm-135m/musique \
-    --save_interval=20 \
+    --save_dir=/home/yingqi/scratch/checkpoints/babilong/llama-3.2-1b-instruct \
+    --save_interval=40 \
     --token_file=huggingface_token.txt \
     --validation_interval=40 \
-    --validation_steps=30 \
-    --wandb_run=musique_fine_tuning \
-    --wandb_project=qa_fine_tuning \
-    --max_context_length=16000 \
+    --validation_steps=20 \
+    --wandb_run=babilong_finetuning \
+    --wandb_project=rebuttle_finetuning \
+    --max_context_length=10000 \
     --is_qa_task \
     --with_text \
+    --epochs=15 \
+    --it \
     --rouge \
+    --max_new_tokens=5 \
     --load_from_ckpt="${CHECKPOINT}"
