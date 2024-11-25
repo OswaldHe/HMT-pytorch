@@ -197,3 +197,5 @@ write_token.txt
 *.csv
 data.ipynb
 /try_data.py
+benchmark_results/
+benchmark_results_longbench_original.zip
