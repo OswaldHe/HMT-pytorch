@@ -6,6 +6,11 @@ def filter_by_length(dataset: datasets.Dataset, max_token_num: int, tokens_colum
     assert len(dataset) != 0, f"The number of samples with length < {max_token_num} is 0!"
     return dataset
 
+def filter_by_minimum_length(dataset: datasets.Dataset, min_token_num: int, tokens_column_name: str='text'):
+    dataset = dataset.filter(lambda x: len(x[tokens_column_name]) > min_token_num, num_proc=8)
+    assert len(dataset) != 0, f"The number of samples with length > {min_token_num} is 0!"
+    return dataset
+    
 def tokenization(dataset, tokenizer, text_column_name):
     return tokenizer(dataset[text_column_name])
 

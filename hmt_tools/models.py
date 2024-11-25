@@ -38,6 +38,7 @@ def load_model(args, model, memory_size, block_size, n_segments, mask_size, word
                                 segment_alignment=args.segment_alignment
                                 )
     else:
+        print("Initializing Memory Cell")
         cell = MemoryCell(model, 
                         num_mem_tokens=memory_size,
                         num_prepend=args.num_sensory)
@@ -68,6 +69,7 @@ def load_model(args, model, memory_size, block_size, n_segments, mask_size, word
                 ori_model.load_state_dict(state_dict)
                 cell = copy.deepcopy(ori_model.memory_cell)
 
+            print("Initializing Recurrent Wrapper")
             model = RecurrentWrapper(cell,
                                 emb=copy.deepcopy(model.get_input_embeddings()),
                                 word_emb_dim=word_emb_dim,
@@ -80,7 +82,7 @@ def load_model(args, model, memory_size, block_size, n_segments, mask_size, word
                                 segment_alignment=args.segment_alignment,
                                 is_qa_task=is_qa_task
                                 )
-            
+            print("Loading Checkpoint")
             if args.load_from_ckpt is not None and not args.hmt_stage_2:
                 # checkpoint_dir = os.path.dirname(args.load_from_ckpt)
                 state_dict = torch.load(args.load_from_ckpt,map_location='cpu' if cpu else 'cuda:0')

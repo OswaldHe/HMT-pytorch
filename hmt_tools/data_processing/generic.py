@@ -2,7 +2,7 @@ from typing import Callable
 import datasets
 from datasets import Dataset
 
-from .tokenize import tokenize_dataset, tokenize_column, filter_by_length
+from .tokenize import tokenize_dataset, tokenize_column, filter_by_length, filter_by_minimum_length
 from .grouping import group_dataset
 
 def prepare_test(ds: Dataset, prep_func: Callable, max_token_num, test_length, block_size, tokenizer, with_answer=False, **kwargs):
@@ -26,6 +26,8 @@ def prepare_test(ds: Dataset, prep_func: Callable, max_token_num, test_length, b
 
     # Filter the dataset by lenght
     ds = filter_by_length(ds, max_token_num=max_token_num, tokens_column_name='input_ids')
+    if kwargs.get('min_token_num', None) is not None:
+        ds = filter_by_minimum_length(ds, min_token_num=kwargs.get('min_token_num'), tokens_column_name='input_ids')
     ds = group_dataset(ds, split='test', history_size=test_length, block_size=block_size, is_qa_task=True, with_answer=with_answer, **kwargs)
     # print(ds.column_names)
     return ds

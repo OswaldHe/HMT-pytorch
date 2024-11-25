@@ -237,7 +237,7 @@ def main():
     elif args.task_name == 'THUDM/LongBench':
         from hmt_tools.data_processing.prep_funcs import prepare_longbench_test  # This is a generic pre-processor for LongBench test dataset. 
         test_ds = load_dataset('THUDM/LongBench', args.task_subset, split='test')
-        test_ds = prepare_test(test_ds, partial(prepare_longbench_test, subset_name=args.task_subset), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=True)
+        test_ds = prepare_test(test_ds, partial(prepare_longbench_test, subset_name=args.task_subset), max_token_num=args.max_context_length, test_length=args.test_length, block_size=block_size, tokenizer=tokenizer, with_answer=True, with_text=True, min_token_num=int(args.segment_length))
     else:
         from hmt_tools.registry import VALID_TASK_NAMES
         raise NotImplementedError(f"Task {args.task_name} is not supported, please choose from {VALID_TASK_NAMES}")
