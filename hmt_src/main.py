@@ -28,6 +28,7 @@ from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from modeling_rmt.compression import inject_eae
+from accelerate.utils import DummyOptim, DummyScheduler
 
 
 # set up logging
@@ -112,6 +113,9 @@ parser.add_argument('--streaming', action='store_true', default=False, help='gen
 parser.add_argument('--shuffle', action='store_true', default=False, help='shuffle the dataset')
 parser.add_argument('--shuffle_train', action='store_true', default=True, help='shuffle the training dataset')
 parser.add_argument('--cache_dir', type=str, default='.', help='cache directory, default to the current directory')
+parser.add_argument('--wandb_project', type=str, default=None, help='Name for the WanDB Project')
+parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
+parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
 
 torch.manual_seed(3407)
 
@@ -123,10 +127,21 @@ def main():
 
     args = parser.parse_args()
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with="wandb")
     device = accelerator.device
     from accelerate.logging import get_logger
     logger = get_logger('')
+
+    # Initialize WanDB Tracker
+    accelerator.init_trackers(
+        project_name=args.wandb_project, 
+        config={"dropout": 0.1, 
+                "learning_rate": args.learning_rate, 
+                "model_name": args.model_name,
+                "task_name": args.task_name, 
+                "test_length": args.test_length},
+        init_kwargs={"wandb": {"entity": args.wandb_entity, "name": f'{args.wandb_run}'}}
+    )
 
     token=None
     if args.token_file is not None:
@@ -280,12 +295,12 @@ def main():
         valid_ds = datasets.load_dataset(args.task_name, task_name, split='validation', streaming=args.streaming)
         test_ds = datasets.load_dataset(args.task_name, task_name, split='test', streaming=args.streaming)
         if args.shuffle_train:
-            train_ds = train_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+            train_ds = train_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
         else:
             train_ds = train_ds.take(int(args.train_set_split))
         if args.shuffle:
-            valid_ds = valid_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
-            test_ds = test_ds.shuffle(seed=args.seed, buffer_size=20000).take(int(args.train_set_split))
+            valid_ds = valid_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
+            test_ds = test_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
         else:
             valid_ds = valid_ds.take(int(args.train_set_split))
             test_ds = test_ds.take(int(args.train_set_split))
@@ -421,16 +436,32 @@ def main():
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
-    optim = AdamW(params=model.parameters(), lr=args.learning_rate)
+    optimizer_cls = (
+        AdamW
+        if accelerator.state.deepspeed_plugin is None
+        or "optimizer" not in accelerator.state.deepspeed_plugin.deepspeed_config
+        else DummyOptim
+    )
+
+    optim = optimizer_cls(model.parameters(), lr=args.learning_rate)
     from torch.optim.lr_scheduler import StepLR, LambdaLR
-    if args.lr_decay:
-        if args.dynamic:
-            scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+
+    if (
+     accelerator.state.deepspeed_plugin is None
+     or "scheduler" not in accelerator.state.deepspeed_plugin.deepspeed_config
+    ):
+        if args.lr_decay:
+            if not args.dynamic:
+                scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+            else:
+                lambda_f = lambda epoch: (args.lr_decay_gamma ** (epoch // 100)) * 0.1 if epoch%2==0 else (args.lr_decay_gamma ** (epoch // 100))
+                scheduler = LambdaLR(optim, lr_lambda=lambda_f)
         else:
-            lambda_f = lambda epoch: (args.lr_decay_gamma ** (epoch // 100)) * 0.1 if epoch%2==0 else (args.lr_decay_gamma ** (epoch // 100))
-            scheduler = LambdaLR(optim, lr_lambda=lambda_f)
+            scheduler = StepLR(optim, step_size=100, gamma=1.0)
     else:
-        scheduler = StepLR(optim, step_size=100, gamma=1.0)
+        scheduler = DummyScheduler(
+            optim, total_num_steps=args.training_step, num_training_steps=100
+        )
 
     train_steps = args.training_step
     eval_steps = args.eval_step
@@ -470,32 +501,30 @@ def main():
             optim.zero_grad()
 
             batch = next(train_gen)
-            for k, v in batch.items():
-                batch[k] = v.cpu()
-            for batch in train_dataloader:
-                if batch is None:
-                    raise ValueError("Batch is None")
-                if args.dynamic:
-                    # for i in range(2):
-                    #     batch['segment_size'] = block_size_list[i]
-                    #     if i == 1:
-                    #         batch['mode'] = 'browse'
-                    #     out, _ = model(**batch)
-                    #     loss = out.loss
+            if args.dynamic:
+                batch['segment_size'] = block_size
+                batch['extra_size'] = args.num_sensory//2
+                batch['mode'] = 'test'
+                out, _ = model(**batch)
+                loss = out.loss
 
-                    #     accelerator.backward(loss)
-                    #     optim.step()
-                    #     if args.lr_decay:
-                    #         scheduler.step()
-                    #     logger.debug(f'loss: {loss.item()}')
-                    #     logger.debug(f'ppl: {out.ppl.item()}')
-                    #     losses.append(loss.detach().item())
+                accelerator.backward(loss)
+                optim.step()
+                if args.lr_decay:
+                    scheduler.step()
+                # logger.debug(f'loss: {loss.item()}')
+                # logger.debug(f'ppl: {out.ppl.item()}')
+                losses.append(loss.detach().item())
+
+            elif args.train_memory_map:
+                for i in range(args.bptt_depth-1):
+                    optim.zero_grad()
                     batch['segment_size'] = block_size
                     batch['extra_size'] = args.num_sensory//2
-                    batch['mode'] = 'test'
+                    batch['switch_at'] = i
                     out, _ = model(**batch)
                     loss = out.loss
-
+                    # need to use this for loss
                     accelerator.backward(loss)
                     optim.step()
                     if args.lr_decay:
@@ -503,53 +532,22 @@ def main():
                     # logger.debug(f'loss: {loss.item()}')
                     # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-
-                elif args.train_memory_map:
-                    for i in range(args.bptt_depth-1):
-                        optim.zero_grad()
-                        batch['segment_size'] = block_size
-                        batch['extra_size'] = args.num_sensory//2
-                        batch['switch_at'] = i
-                        out, _ = model(**batch)
-                        loss = out.loss
-                        # need to use this for loss
-                        accelerator.backward(loss)
-                        optim.step()
-                        if args.lr_decay:
-                            scheduler.step()
-                        # logger.debug(f'loss: {loss.item()}')
-                        # logger.debug(f'ppl: {out.ppl.item()}')
-                        losses.append(loss.detach().item())
-                
-                else:
-                    batch['segment_size'] = block_size
-                    batch['sum_fraction'] = args.sum_fraction
-                    out, _ = model(**batch)
-                    loss = out.loss
-                    # logger.debug(f'crl: {loss.item()}')
-                    # if args.inject_autoencoder:
-                    #     for layer in model.module.memory_cell.model.base_model.model.model.layers:
-                    #         loss += (layer.mlp[0].rec_loss)
-
-                    accelerator.backward(loss)
-                    optim.step()
-                    if args.lr_decay:
-                        scheduler.step()
-                    # logger.info(f'loss: {loss.item()}')
-                    # logger.debug(f'ppl: {out.ppl.item()}')
-                    losses.append(loss.detach().item())
+            
+            else:
+                batch['segment_size'] = block_size
+                batch['sum_fraction'] = args.sum_fraction
+                out, _ = model(**batch)
+                loss = out.loss
+                accelerator.backward(loss)
+                optim.step()
+                if args.lr_decay:
+                    scheduler.step()
+                losses.append(loss.detach().item())
+                accelerator.log({"train loss": loss.detach().item(), "train ppl": out.ppl.detach().item()}, step=step)
 
         accelerator.wait_for_everyone()
         if args.save_ckpt is not None:
             model.save_checkpoint(args.save_ckpt)
-
-        plt.plot(losses)
-        plt.xlabel('step')
-        plt.ylabel('train loss')
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        plt.savefig('artifact/loss_' + date_str + '.png')
-        plt.show()
-        plt.close()
 
     valid_losses = []
     valid_ppl = []
