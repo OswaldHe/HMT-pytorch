@@ -298,12 +298,8 @@ def main():
             train_ds = train_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
         else:
             train_ds = train_ds.take(int(args.train_set_split))
-        if args.shuffle:
-            valid_ds = valid_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
-            test_ds = test_ds.shuffle(seed=args.seed).take(int(args.train_set_split))
-        else:
-            valid_ds = valid_ds.take(int(args.train_set_split))
-            test_ds = test_ds.take(int(args.train_set_split))
+        valid_ds = valid_ds.take(int(args.train_set_split))
+        test_ds = test_ds.take(int(args.train_set_split))
         train_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, train_ds), features=train_ds.features)
         valid_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, valid_ds), features=valid_ds.features)
         test_ds = datasets.Dataset.from_generator(partial(gen_from_iterable_dataset, test_ds), features=test_ds.features)
@@ -362,7 +358,7 @@ def main():
         valid_dataset = valid_ds_tok.map(lambda x: group_texts(x, history_size, block_size),
                                                                 batched=True, desc=f"Grouping valid in chunks of {block_size}")
         valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
-                                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+                                                collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
         if args.task_name != 'suolyer/pile_arxiv':
             train_rnd_generator = torch.Generator()
             train_rnd_generator.manual_seed(args.seed)
@@ -377,7 +373,7 @@ def main():
         else:
             test_dataset = test_ds_tok
         test_dataloader = DataLoader(test_dataset, batch_size=batch_size,
-                                                collate_fn=collate_fn, shuffle=args.shuffle, drop_last=True, pin_memory=True)
+                                                collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
 
     logger.info("Preparing memory cell")
     if args.rmt_only or args.baseline_only:
@@ -430,9 +426,9 @@ def main():
                                 segment_alignment=args.segment_alignment
                                 )
             
-            if args.load_from_ckpt is not None and not args.hmt_stage_2:
-                state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
-                model.load_state_dict(state_dict)
+    if args.load_from_ckpt is not None and not args.hmt_stage_2:
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
+        model.load_state_dict(state_dict)
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
@@ -544,6 +540,21 @@ def main():
                     scheduler.step()
                 losses.append(loss.detach().item())
                 accelerator.log({"train loss": loss.detach().item(), "train ppl": out.ppl.detach().item()}, step=step)
+            
+            if step % 50 == 0:
+                # evaluate
+                model.eval()
+                sub_valid_gen = iter(valid_dataloader)
+                eval_losses = []
+                eval_ppl = []
+                for eval_step in range(10):
+                    eval_batch = next(sub_valid_gen)
+                    with torch.no_grad():
+                        out, _ = model(**batch)
+                    eval_losses.append(out.loss.detach().item())
+                    eval_ppl.append(out.ppl.detach().item())
+                accelerator.log({"eval loss": np.mean(eval_losses), "eval ppl": np.mean(eval_ppl)}, step=step)
+
 
         accelerator.wait_for_everyone()
         if args.save_ckpt is not None:
