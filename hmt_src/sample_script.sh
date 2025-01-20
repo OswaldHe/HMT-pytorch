@@ -22,4 +22,4 @@ accelerate launch hmt_src/main.py \
     --test_length=30000 \
     --wandb_run=pg19_qwen \
     --wandb_project=large_model_hmt \
-    --wandb_entity=zifanhe1202-ucla \
+    --wandb_entity=your_wandb_entity \ # change to your wandb entity
