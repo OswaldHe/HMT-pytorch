@@ -215,6 +215,7 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             mode='train', 
             prof=False,
             switch_at=-1,
+            **kwargs
         ):
 
         mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
@@ -317,7 +318,6 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         segmented = self.segment(segment_size, input_ids=input_ids, attention_mask=attention_mask)
         memory_seq = None
 
-        print('start parsing')
         for seg_num, segment in enumerate(segmented[:-1]):
             for k, v in segment.items():
                 segment[k] = v.cuda()
@@ -344,11 +344,11 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             for k, v in segment.items():
                 segment[k] = v.cpu()
 
-        print("finish parsing")
         final_segment = segmented[-1]
         for k, v in final_segment.items():
             final_segment[k] = v.cuda()
         
+        seg_num = len(segmented) - 1
         if self.cross_attn is not None:
             s_mem = self.mem.repeat(final_segment['input_ids'].shape[0], 1, 1)
             seg = copy.deepcopy(final_segment)

@@ -27,6 +27,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
+from hmt_src.openroad_qa_preprocess import OpenROAD, OpenROAD_test
 from modeling_rmt.compression import inject_eae
 from accelerate.utils import DummyOptim, DummyScheduler
 
@@ -116,6 +117,7 @@ parser.add_argument('--cache_dir', type=str, default='.', help='cache directory,
 parser.add_argument('--wandb_project', type=str, default=None, help='Name for the WanDB Project')
 parser.add_argument('--wandb_run', type=str, default=None, help='Name for the WanDB run')
 parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity (username or team name)')
+parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs to train the model')
 
 torch.manual_seed(3407)
 
@@ -309,6 +311,15 @@ def main():
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
         elif args.task_name == 'suolyer/pile_arxiv':
             valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['validation', 'test'])
+        elif args.task_name == 'eda_corpus':
+            full_ds = datasets.load_dataset("json", data_files="/home/jovyan/workspace/RAG-EDA/training_dataset/generator_dataset/eda_corpus_pretrain.jsonl")
+            full_ds = full_ds["train"]
+            split_ds = full_ds.train_test_split(test_size=0.05, seed=42)
+            train_ds = split_ds['train']
+            valid_ds = split_ds['test']
+            test_ds = valid_ds
+        elif args.task_name == 'eda_qa':
+            pass
         else:
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
 
@@ -318,6 +329,10 @@ def main():
         train_dataloader = PubMedQA(train_ds, tokenizer, fuse_size=2, batch_size=batch_size, shuffle=args.shuffle, seed=args.seed)
         valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
         test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
+    elif args.task_name == 'eda_qa':
+        logger.info("Preprocessing OpenROAD QA dataset")
+        train_dataloader, valid_dataloader = OpenROAD(tokenizer, batch_size=batch_size, max_len=args.bptt_depth*block_size, mode='hard', neg_sample=12)
+        test_dataloader = valid_dataloader
     else:
         logger.info("Preprocessing other datasets")
         column_names = valid_ds.column_names
@@ -493,34 +508,20 @@ def main():
     if not args.inference_only:
         logger.info("Starting training")
         losses = []
-        for step in tqdm.tqdm(range(train_steps)):
-            optim.zero_grad()
+        for epoch in range(args.num_epochs):
+            train_gen = iter(train_dataloader)
+            total_len = min(train_steps, len(train_dataloader))
+            for step in tqdm.tqdm(range(min(train_steps, len(train_dataloader)))):
+                optim.zero_grad()
 
-            batch = next(train_gen)
-            if args.dynamic:
-                batch['segment_size'] = block_size
-                batch['extra_size'] = args.num_sensory//2
-                batch['mode'] = 'test'
-                out, _ = model(**batch)
-                loss = out.loss
-
-                accelerator.backward(loss)
-                optim.step()
-                if args.lr_decay:
-                    scheduler.step()
-                # logger.debug(f'loss: {loss.item()}')
-                # logger.debug(f'ppl: {out.ppl.item()}')
-                losses.append(loss.detach().item())
-
-            elif args.train_memory_map:
-                for i in range(args.bptt_depth-1):
-                    optim.zero_grad()
+                batch = next(train_gen)
+                if args.dynamic:
                     batch['segment_size'] = block_size
                     batch['extra_size'] = args.num_sensory//2
-                    batch['switch_at'] = i
+                    batch['mode'] = 'test'
                     out, _ = model(**batch)
                     loss = out.loss
-                    # need to use this for loss
+
                     accelerator.backward(loss)
                     optim.step()
                     if args.lr_decay:
@@ -528,32 +529,53 @@ def main():
                     # logger.debug(f'loss: {loss.item()}')
                     # logger.debug(f'ppl: {out.ppl.item()}')
                     losses.append(loss.detach().item())
-            
-            else:
-                batch['segment_size'] = block_size
-                batch['sum_fraction'] = args.sum_fraction
-                out, _ = model(**batch)
-                loss = out.loss
-                accelerator.backward(loss)
-                optim.step()
-                if args.lr_decay:
-                    scheduler.step()
-                losses.append(loss.detach().item())
-                accelerator.log({"train loss": loss.detach().item(), "train ppl": out.ppl.detach().item()}, step=step)
-            
-            if step % 50 == 0:
-                # evaluate
-                model.eval()
-                sub_valid_gen = iter(valid_dataloader)
-                eval_losses = []
-                eval_ppl = []
-                for eval_step in range(10):
-                    eval_batch = next(sub_valid_gen)
-                    with torch.no_grad():
+
+                elif args.train_memory_map:
+                    for i in range(args.bptt_depth-1):
+                        optim.zero_grad()
+                        batch['segment_size'] = block_size
+                        batch['extra_size'] = args.num_sensory//2
+                        batch['switch_at'] = i
                         out, _ = model(**batch)
-                    eval_losses.append(out.loss.detach().item())
-                    eval_ppl.append(out.ppl.detach().item())
-                accelerator.log({"eval loss": np.mean(eval_losses), "eval ppl": np.mean(eval_ppl)}, step=step)
+                        loss = out.loss
+                        # need to use this for loss
+                        accelerator.backward(loss)
+                        optim.step()
+                        if args.lr_decay:
+                            scheduler.step()
+                        # logger.debug(f'loss: {loss.item()}')
+                        # logger.debug(f'ppl: {out.ppl.item()}')
+                        losses.append(loss.detach().item())
+                
+                else:
+                    batch['segment_size'] = block_size
+                    batch['sum_fraction'] = args.sum_fraction
+                    if args.task_name == 'eda_qa':
+                        batch['mask_size'] = batch['answer_len'][0]
+                    out, _ = model(**batch)
+                    loss = out.loss
+                    accelerator.backward(loss)
+                    optim.step()
+                    if args.lr_decay:
+                        scheduler.step()
+                    losses.append(loss.detach().item())
+                    accelerator.log({"train loss": loss.detach().item(), "train ppl": out.ppl.detach().item()}, step=step+total_len*epoch)
+                
+                if step % 50 == 0:
+                    # evaluate
+                    model.eval()
+                    sub_valid_gen = iter(valid_dataloader)
+                    eval_losses = []
+                    eval_ppl = []
+                    for eval_step in range(10):
+                        eval_batch = next(sub_valid_gen)
+                        if args.task_name == 'eda_qa':
+                            batch['mask_size'] = batch['answer_len'][0]
+                        with torch.no_grad():
+                            out, _ = model(**batch)
+                        eval_losses.append(out.loss.detach().item())
+                        eval_ppl.append(out.ppl.detach().item())
+                    accelerator.log({"eval loss": np.mean(eval_losses), "eval ppl": np.mean(eval_ppl)}, step=step+total_len*epoch)
 
 
         accelerator.wait_for_everyone()
@@ -565,9 +587,9 @@ def main():
     model.eval()
     for step in tqdm.tqdm(range(eval_steps)):
         batch = next(valid_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
         batch['segment_size'] = block_size
+        if args.task_name == 'eda_qa':
+            batch['mask_size'] = batch['answer_len'][0]
         # if args.timing:
         #     batch['prof'] = True
         with torch.no_grad():
@@ -590,9 +612,9 @@ def main():
 
     for step in tqdm.tqdm(range(args.test_step)):
         batch = next(test_gen)
-        for k, v in batch.items():
-            batch[k] = v.cpu()
         batch['segment_size'] = block_size
+        if args.task_name == 'eda_qa':
+            batch['mask_size'] = batch['answer_len'][0]
         if args.dynamic:
             batch['extra_size'] = args.num_sensory//2
             batch['mode'] = 'test'
@@ -632,6 +654,76 @@ def main():
             temperature = 0.6
         )
         print(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+    
+    
+    if args.task_name == 'eda_qa':
+        import evaluate
+        rouge = evaluate.load('rouge')
+
+        with open('RAG-EDA/benchmark/openroad_documentation.json', 'r') as f:
+            corpus_dict = json.load(f)
+        
+        content = []
+        for topic in corpus_dict:
+            for knowledge in topic['knowledge']:
+                content.append(knowledge['content'])
+        
+        content_str = " ".join(content)
+
+        ORD_QA_sample = []
+        with open('RAG-EDA/benchmark/ORD-QA.jsonl') as file:
+            for line in file:
+                if line.strip():  # Skip any empty lines
+                    ORD_QA_sample.append(json.loads(line))
+
+        rougeL_full = []
+        for step in tqdm.tqdm(range(len(ORD_QA_sample))):
+            entry = ORD_QA_sample[step]
+            question_str = entry['question']
+            answer_str = entry['answer']
+            messages = [
+                {"role": "system", "content": "You are an expert with EDA tool usage. Answer the question based on the following reference information."},
+                {"role": "system", "content": content_str},
+                {"role": "user", "content": question_str}
+            ]
+            message_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            tok_message = tokenizer(message_str, return_tensors='pt')
+            tok_answer = tokenizer.encode(answer_str)
+            with torch.no_grad():
+                output_seq = model.generate(
+                    input_ids = tok_message['input_ids'],
+                    attention_mask = tok_message['attention_mask'],
+                    segment_size = block_size,
+                    max_new_tokens = len(tok_answer)
+                )
+            predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            references = [answer_str]
+            results = rouge.compute(predictions=predictions, references=references)
+            rougeL_full.append(results['rougeL'])
+        print(f'ROUGE-L on {len(ORD_QA_sample)} test samples using whole database: {np.mean(rougeL_full)}')
+
+
+        test_dataloader = OpenROAD_test(tokenizer, batch_size=batch_size)
+        test_gen = iter(test_dataloader)
+
+        rougeL = []
+
+        for step in tqdm.tqdm(range(len(test_dataloader))):
+            batch = next(test_gen)
+            batch['segment_size'] = block_size
+            output_seq = model.generate(
+                input_ids = batch['input_ids'],
+                attention_mask = batch['attention_mask'],
+                segment_size = block_size,
+                max_new_tokens = batch['answer_len'][0]
+            )
+            predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            references = batch['answer']
+            results = rouge.compute(predictions=predictions, references=references)
+            rougeL.append(results['rougeL'])
+        
+        print(f'ROUGE-L on {len(test_dataloader)} test samples with only correct reference: {np.mean(rougeL)}')
+            
 
 if __name__ == "__main__":
     main()
