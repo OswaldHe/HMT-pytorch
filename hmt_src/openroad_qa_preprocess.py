@@ -18,8 +18,8 @@ from transformers import AutoTokenizer
 
 def OpenROAD(
     tokenizer,
-    ds_file="/home/jovyan/workspace/RAG-EDA/training_dataset/generator_dataset/QA_finetuning_v1v2amend1.jsonl",
-    corpus_file="/home/jovyan/workspace/RAG-EDA/benchmark/openroad_documentation.json",
+    ds_file="RAG-EDA/training_dataset/generator_dataset/QA_finetuning_v1v2amend1.jsonl",
+    corpus_file="RAG-EDA/benchmark/openroad_documentation.json",
     mode='simple',
     segment_length=512,
     num_sensory=32,
