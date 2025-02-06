@@ -21,6 +21,8 @@ def OpenROAD(
     ds_file="RAG-EDA/training_dataset/generator_dataset/QA_finetuning_v1v2amend1.jsonl",
     corpus_file="RAG-EDA/benchmark/openroad_documentation.json",
     mode='simple',
+    segment_length=512,
+    num_sensory=32,
     neg_sample=5,
     max_len=4096,
     batch_size=1
@@ -40,7 +42,8 @@ def OpenROAD(
     def tokenize_function(examples, tok_mode='train'):
         prompt_text = {
             'text': [],
-            'answer_len': []
+            'answer_len': [],
+            'pos_mask': []
         }
         for chat in examples['conversation']:
             chat = chat[0]
@@ -76,11 +79,23 @@ def OpenROAD(
                 neg_knowledge_samples.insert(insert_index, reference)
                 mix_reference = " ".join(neg_knowledge_samples)
                 mix_ref_tok = tokenizer.encode(mix_reference)
+
+                begin_idx = len(tokenizer.encode(" ".join(neg_knowledge_samples[:insert_index]))) - 1
+                end_idx = len(tokenizer.encode(" ".join(neg_knowledge_samples[:insert_index+1]))) - 1
+                pos_mask = [0.02] * len(mix_ref_tok)
+                gamma = 1.001
+                rate = 1.0
+                for idx in range(begin_idx, end_idx):
+                    pos_mask[idx] = rate
+                    rate *= gamma
+
                 if len(mix_ref_tok) > max_len - 80 and tok_mode == 'train':
                     ref_tok = tokenizer.encode(reference)
                     if len(ref_tok) > max_len - 80:
                         ref_tok = ref_tok[:max_len-80]
                     mix_ref_tok = ref_tok
+                    pos_mask = [1] * min(max_len - 80, len(ref_tok))
+                    
                 mix_reference = tokenizer.decode(mix_ref_tok)
                 messages = [
                     {"role": "system", "content": "You are an expert with EDA tool usage. Answer the question based on the following reference information."},
@@ -92,10 +107,25 @@ def OpenROAD(
                 prompt_text['text'].append(message_str)
                 answer_len = len(tokenizer.encode(answer))
                 prompt_text['answer_len'].append(answer_len)
+
+                message_prefix = [
+                    {"role": "system", "content": "You are an expert with EDA tool usage. Answer the question based on the following reference information."},
+                    {"role": "system", "content": ""}
+                ]
+                message_prefix_str = tokenizer.apply_chat_template(message_prefix, tokenize=False, add_generation_prompt=False)
+                pos_mask = [0.15] * len(tokenizer.encode(message_prefix_str)) + pos_mask
+                pos_mask.extend([1.2] * (len(tokenizer.encode(message_str)) - len(pos_mask)))
+                pos_mask[0] = 0.7
+                prompt_text['pos_mask'].append(pos_mask)
         
         sample = tokenizer(prompt_text['text'])
         sample['labels'] = sample['input_ids'].copy()
         sample['answer_len'] = prompt_text['answer_len']
+        sample['pos_mask'] = []
+        if mode == 'hard':
+            for pos_mask in prompt_text['pos_mask']:
+                pos_mask_histogram = [sum(pos_mask[i:i + segment_length-num_sensory]) for i in range(0, len(pos_mask), segment_length-num_sensory)] + [1.2]
+                sample['pos_mask'].append(pos_mask_histogram)
         return sample
     
     def tokenize_function_train(examples):
@@ -109,6 +139,10 @@ def OpenROAD(
         input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
         labels = [torch.tensor(b['labels'][::-1]) for b in batch]
         attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
+        pos_mask = None
+        if mode == 'hard':
+            pos_mask = [torch.tensor(b['pos_mask'][::-1]) for b in batch]
+            pos_mask = pad_sequence(pos_mask, padding_value=0.02).T.flip(1)
         answer_len = [b['answer_len'] for b in batch]
         input_ids = pad_sequence(input_ids, padding_value=id_pad_value).T.flip(1)
         labels = pad_sequence(labels, padding_value=-100).T.flip(1)
@@ -117,7 +151,8 @@ def OpenROAD(
         collated = {'input_ids': input_ids,
                     'labels': labels,
                     'attention_mask': attention_mask,
-                    'answer_len': answer_len}
+                    'answer_len': answer_len,
+                    'pos_mask': pos_mask}
 
         return collated
     
