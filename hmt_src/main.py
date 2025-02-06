@@ -576,6 +576,7 @@ def main():
                         eval_losses.append(out.loss.detach().item())
                         eval_ppl.append(out.ppl.detach().item())
                     accelerator.log({"eval loss": np.mean(eval_losses), "eval ppl": np.mean(eval_ppl)}, step=step+total_len*epoch)
+                    model.train()
 
 
         accelerator.wait_for_everyone()
@@ -677,6 +678,11 @@ def main():
                     ORD_QA_sample.append(json.loads(line))
 
         rougeL_full = []
+        # load pre-computed memory embeddings
+        mem_seq = None
+        if os.path.exists('memory.pt'):
+            mem_seq = torch.load('memory.pt')
+
         for step in tqdm.tqdm(range(len(ORD_QA_sample))):
             entry = ORD_QA_sample[step]
             question_str = entry['question']
@@ -694,7 +700,9 @@ def main():
                     input_ids = tok_message['input_ids'],
                     attention_mask = tok_message['attention_mask'],
                     segment_size = block_size,
-                    max_new_tokens = len(tok_answer)
+                    mem_seq = mem_seq,
+                    max_new_tokens = len(tok_answer),
+                    do_sample=False
                 )
             predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             references = [answer_str]
@@ -715,7 +723,8 @@ def main():
                 input_ids = batch['input_ids'],
                 attention_mask = batch['attention_mask'],
                 segment_size = block_size,
-                max_new_tokens = batch['answer_len'][0]
+                max_new_tokens = batch['answer_len'][0],
+                do_sample=False
             )
             predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             references = batch['answer']

@@ -14,9 +14,6 @@ from huggingface_hub import PyTorchModelHubMixin
 
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
-# from tools.debug.dump import DebugDumper
-# dumper = DebugDumper()
-
 class MemoryCell(torch.nn.Module):
     def __init__(self, base_model, num_mem_tokens, num_prepend):
         super().__init__()
@@ -164,7 +161,13 @@ class SegmentIterator:
         return segment
     
     def is_empty(self):
-        return self.empty
+        for k, tensor in self.iter_content.items():
+            if tensor is not None:
+                if self.pointer >= tensor.shape[1]:
+                    self.empty = True
+                    return True
+                else:
+                    return False
 
 class MemoryMap(torch.nn.Module):
     def __init__(self, emb_dim):
@@ -215,6 +218,7 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             mode='train', 
             prof=False,
             switch_at=-1,
+            pos_mask=None,
             **kwargs
         ):
 
@@ -237,8 +241,9 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         seg_num = 0
         segment = None
         browse_count = 0
+        total_ret_loss = 0
 
-        while not seg_iter.is_empty():
+        while True:
             segment = seg_iter.next(segment_size)
             if segment is None:
                 break
@@ -253,7 +258,16 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                 browse_thres = 0
                 if mode == 'test':
                     browse_thres = 3
-                memory_state, hist, browse = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context, browse_thres)
+                pos_mask_n = None
+                if pos_mask is not None:
+                    pos_mask_n = pos_mask[..., :seg_num]
+                if seg_iter.is_empty():
+                    last_seg = True
+                else:
+                    last_seg = False
+                memory_state, hist, browse, ret_loss = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context, browse_thres, pos_mask_n, last_seg)
+                if seg_iter.is_empty():
+                    total_ret_loss += ret_loss
                 if hist is not None:
                     total_hist.extend(hist)
             
@@ -308,17 +322,26 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
                                    output_hidden_states=output_hidden_states,
-                                   mask_size=mask_size)
+                                   mask_size=mask_size,
+                                   ret_loss=total_ret_loss)
         return out, total_hist
     
-    def generate(self, input_ids, attention_mask, segment_size, **generate_kwargs):
+    def generate(self, input_ids, attention_mask, segment_size, mem_seq=None, **generate_kwargs):
         #TODO: rewrite generation function
         memory_state = None
         prepend_state = None
         segmented = self.segment(segment_size, input_ids=input_ids, attention_mask=attention_mask)
-        memory_seq = None
+        memory_seq = mem_seq
+        enum_seg = None
+        if memory_seq is not None:
+            iter_len = (len(segmented)-1-memory_seq.shape[1])
+            enum_seg = segmented[-(iter_len+1):-1]
+            n_prepend = self.memory_cell.n_prepend
+            prepend_state = segmented[-(iter_len+2)]['input_ids'][:,-n_prepend:].cuda()
+        else:
+            enum_seg = segmented[:-1]
 
-        for seg_num, segment in enumerate(segmented[:-1]):
+        for seg_num, segment in enumerate(enum_seg):
             for k, v in segment.items():
                 segment[k] = v.cuda()
             
@@ -328,7 +351,7 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                 seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
                 seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
                 _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
-                memory_state, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context)
+                memory_state, _, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context, generate=True)
             
             with torch.no_grad():
                 _, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
@@ -343,11 +366,11 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
 
             for k, v in segment.items():
                 segment[k] = v.cpu()
-
+        
         final_segment = segmented[-1]
         for k, v in final_segment.items():
             final_segment[k] = v.cuda()
-        
+
         seg_num = len(segmented) - 1
         if self.cross_attn is not None:
             s_mem = self.mem.repeat(final_segment['input_ids'].shape[0], 1, 1)
@@ -355,8 +378,8 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             seg['input_ids'] = seg['input_ids'][:,:(segment_size//2)]
             seg['attention_mask'] = seg['attention_mask'][:,:(segment_size//2)]
             _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
-            memory_state, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context)
-
+            memory_state, _, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context, generate=True)
+        
         out = self.memory_cell.generate(**final_segment, memory_state=memory_state, prepend_state=prepend_state, **generate_kwargs)
 
         return out
@@ -393,11 +416,9 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
-
-        # dumper.store('labels', kwargs.get('labels'))
-        # dumper.store('labels_mask', kwargs.get('labels_mask'))
         
         mask_size = kwargs.get('mask_size')
+        ret_loss = kwargs.get('ret_loss')
 
         labels = kwargs.get('labels')
         if labels.shape[1] <= mask_size:
@@ -409,8 +430,10 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             
             loss_fct = CrossEntropyLoss()
-            out['loss'] = loss_fct(flat_logits.cuda(), flat_labels.cuda())
-            out['ppl'] = torch.exp(out['loss'])
+            gen_loss = loss_fct(flat_logits.cuda(), flat_labels.cuda())
+            out['loss'] = gen_loss + 0.05 * ret_loss
+            out['ppl'] = torch.exp(gen_loss)
+            out['ret_loss'] = ret_loss
 
             # Compute the F1 score
             predictions = torch.argmax(torch.Tensor(flat_logits), dim=-1)
@@ -421,6 +444,7 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         else:
             out['loss'] = 0
             out['ppl'] = 0
+            out['ret_loss'] = 0
 
         out['logits'] = full_logits
         segment_keys = ['loss', 'logits']
@@ -429,10 +453,6 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         if kwargs.get('output_hidden_states'):
             segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states
-        
-        # dumper.store_no_step('full_logits', full_logits)
-        # dumper.store_no_step('flat_logits', flat_logits)
-        # dumper.store_no_step('flat_labels', flat_labels)
 
         for seg_num, o in enumerate(cell_outputs):
             for key, value in o.items():
