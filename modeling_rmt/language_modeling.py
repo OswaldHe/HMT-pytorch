@@ -372,6 +372,8 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             final_segment[k] = v.cuda()
 
         seg_num = len(segmented) - 1
+        output_len = generate_kwargs.get('max_new_tokens', None)
+        
         if self.cross_attn is not None:
             s_mem = self.mem.repeat(final_segment['input_ids'].shape[0], 1, 1)
             seg = copy.deepcopy(final_segment)
@@ -380,7 +382,40 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
             memory_state, _, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context, generate=True)
         
-        out = self.memory_cell.generate(**final_segment, memory_state=memory_state, prepend_state=prepend_state, **generate_kwargs)
+        if output_len is None or output_len <= segment_size - self.memory_cell.n_prepend:
+            out = self.memory_cell.generate(**final_segment, memory_state=memory_state, prepend_state=prepend_state, **generate_kwargs)
+        else:
+            # chunk and process generated segments
+            generate_kwargs['max_new_tokens'] = (segment_size - self.memory_cell.n_prepend)
+            final_out = []
+            for i in range(math.ceil(output_len / (segment_size - self.memory_cell.n_prepend))):
+                out = self.memory_cell.generate(**final_segment, memory_state=memory_state, prepend_state=prepend_state, **generate_kwargs)
+                final_out.append(out)
+                # if out is shorter than max_new_tokens, then stop, otherwise we will continue generation
+                if out.shape[1] < (segment_size - self.memory_cell.n_prepend):
+                    return torch.cat(final_out, dim=1)
+                else:
+                    if self.cross_attn is not None:
+                        s_mem = self.mem.repeat(out.shape[0], 1, 1)
+                        seg = {}
+                        seg['input_ids'] = out[:,:(segment_size//2)]
+                        seg['attention_mask'] = torch.ones_like(seg['input_ids'])
+                        _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
+
+                        memory_state, _, _, _, _ = self.cross_attn(memory_seq, q_mem, 'generate', seg_num if seg_num < self.ltm_context else self.ltm_context, generate=True)
+                        
+                    with torch.no_grad():
+                        _, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, output_hidden_states=True)
+                    
+                    if self.cross_attn is not None:
+                        if memory_seq is None:
+                            memory_seq = memory_state.cpu()
+                        else:
+                            memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                            if memory_seq.shape[1] > self.ltm_context:
+                                memory_seq = memory_seq[:,-self.ltm_context:,:]
+
+            return torch.cat(final_out, dim=1)
 
         return out
 
