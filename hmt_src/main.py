@@ -570,9 +570,9 @@ def main():
                     for eval_step in range(10):
                         eval_batch = next(sub_valid_gen)
                         if args.task_name == 'eda_qa':
-                            batch['mask_size'] = batch['answer_len'][0]
+                            eval_batch['mask_size'] = eval_batch['answer_len'][0]
                         with torch.no_grad():
-                            out, _ = model(**batch)
+                            out, _ = model(**eval_batch)
                         eval_losses.append(out.loss.detach().item())
                         eval_ppl.append(out.ppl.detach().item())
                     accelerator.log({"eval loss": np.mean(eval_losses), "eval ppl": np.mean(eval_ppl)}, step=step+total_len*epoch)
