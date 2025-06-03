@@ -10,6 +10,7 @@ import logging
 import math
 import accelerate
 import datetime
+import random
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -27,6 +28,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
+from hmt_src.long_sft_ds_preprocess import LongSFT
 from hmt_src.openroad_qa_preprocess import OpenROAD, OpenROAD_test
 from modeling_rmt.compression import inject_eae
 from accelerate.utils import DummyOptim, DummyScheduler
@@ -172,7 +174,7 @@ def main():
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False, 
-            # target_modules=['embed_tokens', 'gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj'],
+            target_modules=['embed_tokens', 'gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj'],
             r=8, 
             lora_alpha=32, 
             lora_dropout=0.1
@@ -309,6 +311,9 @@ def main():
         if args.task_name == 'pubmed_qa':
             # split train set into three subsets
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:75%]', 'train[75%:90%]', 'train[90%:]'])
+        elif args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+            train_ds, valid_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'test'])
+            test_ds = valid_ds
         elif args.task_name == 'suolyer/pile_arxiv':
             valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['validation', 'test'])
         elif args.task_name == 'eda_corpus':
@@ -320,6 +325,8 @@ def main():
             test_ds = valid_ds
         elif args.task_name == 'eda_qa':
             pass
+        elif args.task_name == 'HuggingFaceFW/fineweb':
+            train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train[:5%]', 'train[5%:7%]', 'train[7%:8%]'])
         else:
             train_ds, valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'validation', 'test'], trust_remote_code=True)
 
@@ -329,6 +336,12 @@ def main():
         train_dataloader = PubMedQA(train_ds, tokenizer, fuse_size=2, batch_size=batch_size, shuffle=args.shuffle, seed=args.seed)
         valid_dataloader = PubMedQA(valid_ds, tokenizer, fuse_size=2, batch_size=batch_size)
         test_dataloader = PubMedQA(test_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size)
+    elif args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+        logger.info("Preprocessing ChatQA2 Long SFT dataset")
+        # preprocess qa database
+        train_dataloader = LongSFT(train_ds, tokenizer, batch_size=batch_size, clip=True, shuffle=args.shuffle, seed=args.seed)
+        valid_dataloader = LongSFT(valid_ds, tokenizer, batch_size=batch_size, clip=True)
+        test_dataloader = LongSFT(test_ds, tokenizer, batch_size=batch_size)
     elif args.task_name == 'eda_qa':
         logger.info("Preprocessing OpenROAD QA dataset")
         train_dataloader, valid_dataloader = OpenROAD(tokenizer, batch_size=batch_size, max_len=args.bptt_depth*block_size, mode='hard', neg_sample=12)
@@ -552,6 +565,25 @@ def main():
                     batch['sum_fraction'] = args.sum_fraction
                     if args.task_name == 'eda_qa':
                         batch['mask_size'] = batch['answer_len'][0]
+                    if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                        batch['mask_size'] = batch['mask_size'][0]
+                    if args.task_name == 'HuggingFaceFW/fineweb':
+                        total_len = random.randint(450, len(batch['input_ids'][0]))
+                        context_len = random.randint(256, total_len-100)
+                        answer_len = total_len - context_len
+                        if answer_len > context_len:
+                            answer_len = context_len
+                        context = tokenizer.decode(batch['input_ids'][0][:context_len])
+                        answer = tokenizer.decode(batch['input_ids'][0][:answer_len])
+                        chat = [
+                            {"role": "user", "content": context},
+                            {"role": "system", "content": "Repeat the previous passage from the beginning."},
+                            {"role": "assistant", "content": answer}
+                        ]
+                        message = tokenizer.apply_chat_template(chat, tokenize=True, return_tensors='pt')
+                        batch['input_ids'] = batch['labels'] = message
+                        batch['attention_mask'] = torch.ones_like(batch['input_ids'])
+                        batch['mask_size'] = answer_len + 1
                     out, _ = model(**batch)
                     loss = out.loss
                     accelerator.backward(loss)
@@ -571,6 +603,25 @@ def main():
                         eval_batch = next(sub_valid_gen)
                         if args.task_name == 'eda_qa':
                             eval_batch['mask_size'] = eval_batch['answer_len'][0]
+                        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                            eval_batch['mask_size'] = eval_batch['mask_size'][0]
+                        if args.task_name == 'HuggingFaceFW/fineweb':
+                            total_len = random.randint(450, len(eval_batch['input_ids'][0]))
+                            context_len = random.randint(256, total_len-100)
+                            answer_len = total_len - context_len
+                            if answer_len > context_len:
+                                answer_len = context_len
+                            context = tokenizer.decode(eval_batch['input_ids'][0][:context_len])
+                            answer = tokenizer.decode(eval_batch['input_ids'][0][:answer_len])
+                            chat = [
+                                {"role": "user", "content": context},
+                                {"role": "system", "content": "Repeat the previous passage from the beginning."},
+                                {"role": "assistant", "content": answer}
+                            ]
+                            message = tokenizer.apply_chat_template(chat, tokenize=True, return_tensors='pt')
+                            eval_batch['input_ids'] = eval_batch['labels'] = message
+                            eval_batch['attention_mask'] = torch.ones_like(eval_batch['input_ids'])
+                            eval_batch['mask_size'] = answer_len + 1
                         with torch.no_grad():
                             out, _ = model(**eval_batch)
                         eval_losses.append(out.loss.detach().item())
@@ -591,8 +642,37 @@ def main():
         batch['segment_size'] = block_size
         if args.task_name == 'eda_qa':
             batch['mask_size'] = batch['answer_len'][0]
+        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+            batch['mask_size'] = batch['mask_size'][0]
         # if args.timing:
         #     batch['prof'] = True
+        
+        # total_len = 2048
+        # context_len = 1024
+        # answer_len = 256
+        # if answer_len > context_len:
+        #     answer_len = context_len
+        # context = tokenizer.decode(batch['input_ids'][0][:context_len])
+        # answer = tokenizer.decode(batch['input_ids'][0][:answer_len])
+        # chat = [
+        #     {"role": "user", "content": context},
+        #     {"role": "system", "content": "Repeat the previous passage from the beginning."}
+        # ]
+        # message = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+        # tok_message = tokenizer(message, return_tensors='pt')
+        # tok_answer = tokenizer.encode(answer)
+        # with torch.no_grad():
+        #     output_seq = model.generate(
+        #         input_ids = tok_message['input_ids'],
+        #         attention_mask = tok_message['attention_mask'],
+        #         segment_size = block_size,
+        #         max_new_tokens = len(tok_answer)+1
+        #     )
+        # predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        # print(predictions[0])
+        # print("=" * 100)
+        # print(answer)
+        # exit()
         with torch.no_grad():
             out, _ = model(**batch)
         loss = out.loss
@@ -616,6 +696,8 @@ def main():
         batch['segment_size'] = block_size
         if args.task_name == 'eda_qa':
             batch['mask_size'] = batch['answer_len'][0]
+        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+            batch['mask_size'] = batch['mask_size'][0]
         if args.dynamic:
             batch['extra_size'] = args.num_sensory//2
             batch['mode'] = 'test'
