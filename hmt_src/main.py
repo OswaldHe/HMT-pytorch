@@ -22,13 +22,15 @@ from itertools import chain
 from functools import partial
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator, DistributedDataParallelKwargs, prepare_pippy, PartialState
 from pathlib import Path
 from peft import get_peft_model, LoraConfig, TaskType
 from modeling_rmt.language_modeling import MemoryCell, RecurrentWrapper
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from hmt_src.pubmedqa_ds_preprocess import PubMedQA
 from hmt_src.long_sft_ds_preprocess import LongSFT
+from hmt_src.chatqa_pretrain_ds import ChatQAPretrain
+from hmt_src.longbench_ds import LongBench
 from hmt_src.openroad_qa_preprocess import OpenROAD, OpenROAD_test
 from modeling_rmt.compression import inject_eae
 from accelerate.utils import DummyOptim, DummyScheduler
@@ -180,6 +182,7 @@ def main():
             lora_dropout=0.1
             )
         model = get_peft_model(model, peft_config)
+        model.add_adapter("target", peft_config)
         logger.info(f'Added LoRA, trainable parameters with LoRA only:')
         model.print_trainable_parameters()
 
@@ -195,7 +198,7 @@ def main():
     batch_size = args.batch_size
 
     block_size = input_size
-    block_size -= 2 * memory_size
+    block_size -= (2 * memory_size)
     block_size -= args.num_sensory
     history_size = (n_segments - 1) * block_size
 
@@ -314,6 +317,20 @@ def main():
         elif args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
             train_ds, valid_ds = datasets.load_dataset(args.task_name, task_name, split=['train', 'test'])
             test_ds = valid_ds
+        elif args.task_name == 'nvidia/ChatQA-Training-Data':
+            train_nqa_ds = datasets.load_dataset(args.task_name, 'narrativeqa', split='train')
+            # Convert nested sequence of strings to sequence of strings for answers column
+            train_nqa_ds = train_nqa_ds.map(lambda x: {'answers': x['answers'][0]})
+            train_scqa_ds = datasets.load_dataset(args.task_name, 'synthetic_convqa', split='train')
+            train_tatqa_ds = datasets.load_dataset(args.task_name, 'tatqa', split='train')
+            train_ds = datasets.concatenate_datasets([train_nqa_ds, train_scqa_ds, train_tatqa_ds])
+            split_ds = train_ds.train_test_split(test_size=0.05, seed=42)
+            valid_ds = split_ds['test']
+            test_ds = valid_ds
+            train_ds = split_ds['train']
+        elif args.task_name == 'THUDM/LongBench':
+            test_ds = datasets.load_dataset(args.task_name, task_name, split='test')
+            train_ds = valid_ds = test_ds # no training
         elif args.task_name == 'suolyer/pile_arxiv':
             valid_ds, test_ds = datasets.load_dataset(args.task_name, task_name, split=['validation', 'test'])
         elif args.task_name == 'eda_corpus':
@@ -339,13 +356,23 @@ def main():
     elif args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
         logger.info("Preprocessing ChatQA2 Long SFT dataset")
         # preprocess qa database
-        train_dataloader = LongSFT(train_ds, tokenizer, batch_size=batch_size, clip=True, shuffle=args.shuffle, seed=args.seed)
-        valid_dataloader = LongSFT(valid_ds, tokenizer, batch_size=batch_size, clip=True)
+        train_dataloader = LongSFT(train_ds, tokenizer, batch_size=batch_size, clip=True, max_len=args.bptt_depth*block_size, shuffle=args.shuffle, seed=args.seed)
+        valid_dataloader = LongSFT(valid_ds, tokenizer, batch_size=batch_size)
         test_dataloader = LongSFT(test_ds, tokenizer, batch_size=batch_size)
+    elif args.task_name == 'nvidia/ChatQA-Training-Data':
+        logger.info("Preprocessing ChatQA Training dataset")
+        train_dataloader = ChatQAPretrain(train_ds, tokenizer, batch_size=batch_size, clip=True, max_len=args.bptt_depth*block_size, shuffle=args.shuffle, seed=args.seed)
+        valid_dataloader = ChatQAPretrain(valid_ds, tokenizer, batch_size=batch_size)
+        test_dataloader = ChatQAPretrain(test_ds, tokenizer, batch_size=batch_size)
     elif args.task_name == 'eda_qa':
         logger.info("Preprocessing OpenROAD QA dataset")
         train_dataloader, valid_dataloader = OpenROAD(tokenizer, batch_size=batch_size, max_len=args.bptt_depth*block_size, mode='hard', neg_sample=12)
         test_dataloader = valid_dataloader
+    elif args.task_name == 'THUDM/LongBench':
+        logger.info("Preprocessing LongBench dataset")
+        train_dataloader = LongBench(train_ds, tokenizer, batch_size=batch_size)
+        valid_dataloader = LongBench(valid_ds, tokenizer, batch_size=batch_size)
+        test_dataloader = LongBench(test_ds, tokenizer, batch_size=batch_size)
     else:
         logger.info("Preprocessing other datasets")
         column_names = valid_ds.column_names
@@ -456,7 +483,44 @@ def main():
             
     if args.load_from_ckpt is not None and not args.hmt_stage_2:
         state_dict = get_fp32_state_dict_from_zero_checkpoint(args.load_from_ckpt)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
+
+        # Copy default adapter parameters to target adapter parameters in PEFT model
+        try:
+            # Collect all default adapter parameters
+            default_params = {}
+            target_params = {}
+            
+            # First, collect all parameter references
+            for name, param in model.memory_cell.model.named_parameters():
+                if 'lora_' in name and '.default' in name:
+                    default_params[name] = param
+                elif 'lora_' in name and '.target' in name:
+                    target_params[name] = param
+            
+            # Copy default parameters to target parameters
+            for default_name, default_param in default_params.items():
+                target_name = default_name.replace('.default', '.target')
+                if target_name in target_params:
+                    target_params[target_name].data.copy_(default_param.data)
+                    logger.debug(f"Copied {default_name} to {target_name}")
+            
+            logger.info(f"Successfully copied {len(default_params)} default adapter parameters to target adapter")
+            
+        except Exception as e:
+            logger.warning(f"Could not copy adapter parameters: {e}")
+            # Alternative approach: direct name-based copying
+            all_params = dict(model.memory_cell.model.named_parameters())
+            for name in all_params:
+                if 'lora_A.default' in name or 'lora_B.default' in name:
+                    target_name = name.replace('.default', '.target')
+                    if target_name in all_params:
+                        all_params[target_name].data.copy_(all_params[name].data)
+                        logger.debug(f"Fallback copied {name} to {target_name}")
+        
+        if hasattr(model, 'cross_attn') and hasattr(model, 'cross_attn_gen'):
+            model.cross_attn_gen = copy.deepcopy(model.cross_attn)
+
 
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
@@ -565,8 +629,9 @@ def main():
                     batch['sum_fraction'] = args.sum_fraction
                     if args.task_name == 'eda_qa':
                         batch['mask_size'] = batch['answer_len'][0]
-                    if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                    if args.task_name == 'nvidia/ChatQA2-Long-SFT-data' or args.task_name == 'nvidia/ChatQA-Training-Data':
                         batch['mask_size'] = batch['mask_size'][0]
+                        batch['context_len'] = batch['context_len'][0]
                     if args.task_name == 'HuggingFaceFW/fineweb':
                         total_len = random.randint(450, len(batch['input_ids'][0]))
                         context_len = random.randint(256, total_len-100)
@@ -584,6 +649,7 @@ def main():
                         batch['input_ids'] = batch['labels'] = message
                         batch['attention_mask'] = torch.ones_like(batch['input_ids'])
                         batch['mask_size'] = answer_len + 1
+                        batch['context_len'] = context_len
                     out, _ = model(**batch)
                     loss = out.loss
                     accelerator.backward(loss)
@@ -603,8 +669,9 @@ def main():
                         eval_batch = next(sub_valid_gen)
                         if args.task_name == 'eda_qa':
                             eval_batch['mask_size'] = eval_batch['answer_len'][0]
-                        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data' or args.task_name == 'nvidia/ChatQA-Training-Data':
                             eval_batch['mask_size'] = eval_batch['mask_size'][0]
+                            eval_batch['context_len'] = eval_batch['context_len'][0]
                         if args.task_name == 'HuggingFaceFW/fineweb':
                             total_len = random.randint(450, len(eval_batch['input_ids'][0]))
                             context_len = random.randint(256, total_len-100)
@@ -622,6 +689,7 @@ def main():
                             eval_batch['input_ids'] = eval_batch['labels'] = message
                             eval_batch['attention_mask'] = torch.ones_like(eval_batch['input_ids'])
                             eval_batch['mask_size'] = answer_len + 1
+                            eval_batch['context_len'] = context_len
                         with torch.no_grad():
                             out, _ = model(**eval_batch)
                         eval_losses.append(out.loss.detach().item())
@@ -642,8 +710,9 @@ def main():
         batch['segment_size'] = block_size
         if args.task_name == 'eda_qa':
             batch['mask_size'] = batch['answer_len'][0]
-        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data' or args.task_name == 'nvidia/ChatQA-Training-Data' or args.task_name == 'THUDM/LongBench':
             batch['mask_size'] = batch['mask_size'][0]
+            batch['context_len'] = batch['context_len'][0]
         # if args.timing:
         #     batch['prof'] = True
         
@@ -675,13 +744,30 @@ def main():
         # exit()
         with torch.no_grad():
             out, _ = model(**batch)
+
+        # with torch.no_grad():
+        #     output_seq = model.generate(
+        #         input_ids = batch['input_ids'][:,:-batch['mask_size']],
+        #         attention_mask = batch['attention_mask'][:,:-batch['mask_size']],
+        #         segment_size = block_size,
+        #         max_new_tokens = batch['mask_size'] + 5,
+        #         do_sample=True,
+        #         temperature=0.8
+        #     )
+        # predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        # print("=" * 100)
+        # print(f"Prediction: {predictions[0]}")
+        # print("-" * 100)
+        # print(f"Ground Truth: {tokenizer.decode(batch['input_ids'][0][-batch['mask_size']:], skip_special_tokens=True, clean_up_tokenization_spaces=False)}")
+        # print("=" * 100)
+
         loss = out.loss
         ppl = out.ppl
         logger.debug(f'loss: {loss.item()}')
         logger.debug(f'ppl: {ppl.item()}')
         valid_losses.append(loss.detach().item())
         valid_ppl.append(ppl.detach().item())
-
+    # exit()
     print(f'Loss on {eval_steps * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
     print(f'PPL on {eval_steps * batch_size} validation samples: {np.mean(valid_ppl)}')
 
@@ -696,8 +782,9 @@ def main():
         batch['segment_size'] = block_size
         if args.task_name == 'eda_qa':
             batch['mask_size'] = batch['answer_len'][0]
-        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data' or args.task_name == 'nvidia/ChatQA-Training-Data':
             batch['mask_size'] = batch['mask_size'][0]
+            batch['context_len'] = batch['context_len'][0]
         if args.dynamic:
             batch['extra_size'] = args.num_sensory//2
             batch['mode'] = 'test'

@@ -25,6 +25,9 @@ class MemoryCell(torch.nn.Module):
         else:
             self.mem_map = MemoryMap(getattr(self.model.config, 'n_embd', self.model.config.hidden_size))
         self.create_memory(num_mem_tokens)
+    
+    def switch_adapter(self, adapter_name):
+        self.model.set_adapter(adapter_name)
 
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
@@ -46,7 +49,7 @@ class MemoryCell(torch.nn.Module):
         memory = self.memory.repeat(input_shape[0], 1, 1)
         return memory
 
-    def forward(self, input_ids, memory_state=None, prepend_state=None, browse=False, switch=False, **kwargs):
+    def forward(self, input_ids, compress_state=None, memory_state=None, prepend_state=None, browse=False, switch=False, **kwargs):
         input_ids = input_ids.cuda()
         for k, v in kwargs.items():
             if torch.is_tensor(v):
@@ -61,11 +64,11 @@ class MemoryCell(torch.nn.Module):
                 self.mem_map.set_mode('forward')
             memory_state = self.mem_map(memory_state)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, prepend_state=prepend_state, **kwargs)
+        seg_kwargs = self.process_input(input_ids, memory_state, compress_state, prepend_state=prepend_state, **kwargs)
 
         out = self.model(**seg_kwargs)
         n_prepend = self.n_prepend//2 if browse else self.n_prepend
-        out, new_memory_state = self.process_output(out, 0 if prepend_state is None else n_prepend, **kwargs)
+        out, new_memory_state = self.process_output(out, 0 if prepend_state is None else n_prepend, 0 if compress_state is None else 1, **kwargs)
         input_ids = input_ids.cpu()
         for k, v in kwargs.items():
                 if torch.is_tensor(v):
@@ -82,7 +85,7 @@ class MemoryCell(torch.nn.Module):
         out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
         return out
 
-    def process_input(self, input_ids, memory_state, prepend_state=None, generate=False, **kwargs):
+    def process_input(self, input_ids, memory_state, compress_state=None, prepend_state=None, generate=False, **kwargs):
         seg_kwargs = dict(**kwargs)
 
         inputs_embeds = kwargs.get('inputs_embeds')
@@ -91,6 +94,8 @@ class MemoryCell(torch.nn.Module):
         if prepend_state is not None:
             prepend_embeds = self.model.get_input_embeddings()(prepend_state)
             inputs_embeds = torch.cat([prepend_embeds, inputs_embeds], dim=1)
+        if compress_state is not None:
+            inputs_embeds = torch.cat([compress_state, inputs_embeds], dim=1)
         if memory_state is not None:
             if generate:
                 inputs_embeds = torch.cat([memory_state, inputs_embeds], dim=1)
@@ -102,32 +107,32 @@ class MemoryCell(torch.nn.Module):
         seg_kwargs['input_ids'] = None
         seg_kwargs['inputs_embeds'] = inputs_embeds
         if kwargs.get('attention_mask') is not None:
-            seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape, 0 if prepend_state is None else self.n_prepend, generate)
+            seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape, 0 if prepend_state is None else self.n_prepend, 0 if compress_state is None else 1, generate)
         seg_kwargs['output_hidden_states'] = True
         return seg_kwargs
     
-    def pad_attention_mask(self, attention_mask, shape, n_prepend, generate=False):
+    def pad_attention_mask(self, attention_mask, shape, n_prepend, rec_state_size=0, generate=False):
         if self.num_mem_tokens in {0, None}:
             mask = torch.ones(*shape[:2], dtype=torch.int64).to(attention_mask.device)
-            mask[:, (n_prepend):] = attention_mask
+            mask[:, (n_prepend+rec_state_size):] = attention_mask
             return mask
         else:
             mask = torch.ones(*shape[:2], dtype=torch.int64).to(attention_mask.device)
             if generate:
-                mask[:, (self.num_mem_tokens+n_prepend):] = attention_mask
+                mask[:, (self.num_mem_tokens+n_prepend+rec_state_size):] = attention_mask
             else:
-                mask[:, (self.num_mem_tokens+n_prepend):-self.num_mem_tokens] = attention_mask
+                mask[:, (self.num_mem_tokens+n_prepend+rec_state_size):-self.num_mem_tokens] = attention_mask
             return mask
     
-    def process_output(self, model_outputs, n_prepend, **kwargs):
+    def process_output(self, model_outputs, n_prepend, rec_state_size=0, **kwargs):
         if self.num_mem_tokens not in {0, None}:
             out = CausalLMOutputWithCrossAttentions()
             memory_state = model_outputs.hidden_states[-1][:, -self.num_mem_tokens:]
-            out['logits'] = model_outputs.logits[:, (self.num_mem_tokens+n_prepend):-self.num_mem_tokens]
+            out['logits'] = model_outputs.logits[:, (self.num_mem_tokens+n_prepend+rec_state_size):-self.num_mem_tokens]
             out['logits'] = out['logits'].cpu()
 
             if kwargs.get('output_hidden_states'):
-                out['hidden_states'] = [lh[:, (self.num_mem_tokens+n_prepend):-self.num_mem_tokens] for lh in model_outputs.hidden_states]
+                out['hidden_states'] = [lh[:, (self.num_mem_tokens+n_prepend+rec_state_size):-self.num_mem_tokens] for lh in model_outputs.hidden_states]
             if kwargs.get('output_attentions'):
                 out['attentions'] = model_outputs['attentions']
         else:
@@ -190,20 +195,179 @@ class RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
     def __init__(self, memory_cell, emb=None, word_emb_dim=4096, hidden_dim=4096, ltm_context=100, **rmt_kwargs):
         super().__init__()
         self.memory_cell = memory_cell
+        self.freeze_cell = copy.deepcopy(memory_cell)
+        self.freeze_cell.eval()
+        self.memory_cell.model = self.memory_cell.model.get_base_model()
         self.rmt_config = rmt_kwargs
         self.ltm_context = ltm_context
         self.logger = get_logger('')
         if emb is not None:
             memory_weights = torch.randn((1, word_emb_dim)) * emb.weight.data.std()
             self.register_parameter('mem', torch.nn.Parameter(memory_weights, requires_grad=True))
+            self.register_parameter('mem_gen', torch.nn.Parameter(memory_weights, requires_grad=True))
             self.cross_attn = CrossAttentionMemory(word_emb_dim, hidden_dim)
+            self.cross_attn_gen = CrossAttentionMemory(word_emb_dim, hidden_dim)
         else:
             self.cross_attn = None
         
         self.rouge = evaluate.load('rouge')
         self.f1 = evaluate.load("f1")
-
+    
     def forward(self, 
+            input_ids, 
+            labels=None, 
+            labels_mask=None, 
+            inputs_embeds=None, 
+            attention_mask=None, 
+            mask_size=None,  # Size of the attention mask used to compute the loss, it should be the length of the labels. If it's None, then self.mask_size is used. 
+            output_attentions=None, 
+            output_hidden_states=None, 
+            sum_fraction=0.5,
+            segment_size=1022, 
+            extra_size=16, 
+            mode='train', 
+            prof=False,
+            switch_at=-1,
+            pos_mask=None,
+            context_len=None,
+            **kwargs
+        ):
+
+        mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
+
+        memory_state = None
+        prepend_state = None
+        seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+
+        cell_outputs = []
+        # if self.rmt_config.get('is_qa_task'):
+        #     n_cell_out = mask_size // self.rmt_config.get('segment_size') + 1
+        # else:
+        #     n_cell_out = self.rmt_config.get('n_cell_out')
+        n_cell_out = self.rmt_config.get('n_cell_out')
+        memory_seq = None
+
+        total_hist = []
+
+        seg_num = 0
+        segment = None
+        browse_count = 0
+        total_ret_loss = 0
+
+        # self.memory_cell.switch_adapter("default")
+
+        # start with processing context
+        with torch.no_grad():
+            for i in range(max(context_len//segment_size, 0)):
+                segment = seg_iter.next(segment_size)
+
+                if self.cross_attn is not None:
+                    s_mem = self.mem.repeat(segment['input_ids'].shape[0], 1, 1)
+                    seg = copy.deepcopy(segment)
+                    seg['input_ids'] = seg['input_ids'][:,:int(round(segment_size * sum_fraction))]
+                    seg['attention_mask'] = seg['attention_mask'][:,:int(round(segment_size * sum_fraction))]
+                    _, q_mem, _ = self.freeze_cell(**seg, memory_state=s_mem)
+                    memory_state, hist, browse, ret_loss = self.cross_attn(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context, 0, None, False)
+                
+                cell_out, memory_state, prepend_state = self.freeze_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, output_hidden_states=True)
+                
+                if self.cross_attn is not None:
+                    if memory_seq is None:
+                        memory_seq = memory_state.cpu()
+                    else:
+                        memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                        if memory_seq.shape[1] > self.ltm_context:
+                            memory_seq = memory_seq[:,-self.ltm_context:,:]
+
+                seg_num+=1
+
+        # switch adapter, memory retrieval, and continue
+        # self.memory_cell.switch_adapter("target")
+
+        while True:
+            segment = seg_iter.next(segment_size)
+            if segment is None:
+                break
+
+            browse = False
+            if self.cross_attn_gen is not None:
+                s_mem = self.mem_gen.repeat(segment['input_ids'].shape[0], 1, 1)
+                seg = copy.deepcopy(segment)
+                seg['input_ids'] = seg['input_ids'][:,:int(round(segment_size * sum_fraction))]
+                seg['attention_mask'] = seg['attention_mask'][:,:int(round(segment_size * sum_fraction))]
+                _, q_mem, _ = self.memory_cell(**seg, memory_state=s_mem)
+                browse_thres = 0
+                if mode == 'test':
+                    browse_thres = 3
+                pos_mask_n = None
+                if pos_mask is not None:
+                    pos_mask_n = pos_mask[..., :seg_num]
+                if seg_iter.is_empty():
+                    last_seg = True
+                else:
+                    last_seg = False
+                memory_state, hist, browse, ret_loss = self.cross_attn_gen(memory_seq, q_mem, mode, seg_num if seg_num < self.ltm_context else self.ltm_context, browse_thres, pos_mask_n, last_seg)
+                if seg_iter.is_empty():
+                    total_ret_loss += ret_loss
+                if hist is not None:
+                    total_hist.extend(hist)
+            
+            if (browse and mode == 'test') or (switch_at <= seg_num and switch_at >= 0):
+                # proceed extra tokens
+                browse_count += 1
+                extra_seg = seg_iter.next(extra_size)
+                if extra_seg is not None:
+                    for k, tensor in extra_seg.items():
+                        segment[k] = torch.cat([segment[k], tensor], dim=1)
+
+            browse = browse or mode == 'browse' or (switch_at <= seg_num and switch_at >= 0)
+
+            if prof:
+                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_stack=True) as prof_m:
+                    with record_function("model_inference"):
+                        cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, switch=(switch_at==seg_num), output_hidden_states=True)
+                
+                with open('model_profile_dump.txt', 'w') as file:
+                    file.write(prof_m.key_averages().table(sort_by="cuda_time_total"))
+                
+                prof_m.export_chrome_trace("model_trace.json")
+                exit(0)
+            else:
+                cell_out, memory_state, prepend_state = self.memory_cell(**segment, memory_state=memory_state, prepend_state=prepend_state, browse=browse, switch=(switch_at==seg_num), output_hidden_states=True)
+
+            # if prof:
+            #     torch.cuda.synchronize()
+            #     self.logger.info('segment ' + str(seg_num) + ' elapsed time: ' + str(start.elapsed_time(end)) + ' ms')
+
+            cell_outputs.append(cell_out)
+            if len(cell_outputs) > n_cell_out:
+                cell_outputs.pop(0)
+            
+            if self.cross_attn is not None:
+                if memory_seq is None:
+                    memory_seq = memory_state.cpu()
+                else:
+                    memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                    if memory_seq.shape[1] > self.ltm_context:
+                        memory_seq = memory_seq[:,-self.ltm_context:,:]
+
+            if memory_state is not None:
+                self.manage_gradients(memory_state, seg_num)
+
+            seg_num+=1
+        
+        
+        # self.logger.info('read ' + str(browse_count * 16) + ' tokens faster.')
+
+        out = self.process_outputs(cell_outputs, labels=labels, 
+                                   labels_mask=labels_mask,
+                                   output_attentions=output_attentions, 
+                                   output_hidden_states=output_hidden_states,
+                                   mask_size=mask_size,
+                                   ret_loss=total_ret_loss)
+        return out, total_hist
+
+    def forward_old(self, 
             input_ids, 
             labels=None, 
             labels_mask=None, 

@@ -22,10 +22,7 @@ class CrossAttentionMemory(torch.nn.Module):
         xq = self.wq(inputs) # (batch, 1, hidden_dim)
         mk = self.wk(memory) # (batch, mem_len, hidden_dim)
 
-        if self.dim >= 4096 and self.hidden_dim >= 4096 and not generate:
-            scores = torch.matmul(xq, mk.transpose(1,2)) / self.hidden_dim
-        else:
-            scores = torch.matmul(xq, mk.transpose(1,2)) / math.sqrt(self.hidden_dim)
+        scores = torch.matmul(xq, mk.transpose(1,2)) / math.sqrt(self.hidden_dim)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq) # (batch, 1, mem_len)
         loss_fct = CrossEntropyLoss()
         if pos_mask is not None:

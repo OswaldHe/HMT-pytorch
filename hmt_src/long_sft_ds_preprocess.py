@@ -16,12 +16,13 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 
-def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=3704):
+def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, max_len=3000, seed=3704):
 
     def tokenize_function(examples):
         tok_sample = {
             'text': [],
-            'answer_len': []
+            'answer_len': [],
+            'context_len': []
         }
 
         for ind in range(len(examples['question'])):
@@ -39,8 +40,8 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
                 # clip last 3000 tokens
                 if clip:
                     tok_context = tokenizer.encode(context)
-                    if len(tok_context) > 2500:
-                        tok_context = tok_context[-2500:]
+                    if len(tok_context) > max_len:
+                        tok_context = tok_context[-max_len:]
                     context = tokenizer.decode(tok_context)
                     tok_answer = tokenizer.encode(answer)
                     if len(tok_answer) > 300:
@@ -48,13 +49,14 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
                     answer = tokenizer.decode(tok_answer)
                 chat = [
                     {"role": "user", "content": context},
-                    {"role": "system", "content": "Repeat and recall the previous passage and answer the following question by user."},
+                    {"role": "system", "content": "Repeat and recall the previous passage and answer the following question by user. Reply \"I don't know\" if you cannot find the answer in the passage."},
                     {"role": "user", "content": question},
                     {"role": "assistant", "content": answer}
                 ]
                 message_text = tokenizer.apply_chat_template(chat, tokenize=False)
                 tok_sample['text'].append(message_text)
                 tok_sample['answer_len'].append(len(tokenizer.encode(answer))+1)
+                tok_sample['context_len'].append(len(tokenizer.encode(context)))
             else:
                 question = e['question']
                 answer = e["answer"]
@@ -63,8 +65,8 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
                     question = question[:pos]
                 if clip:
                     tok_context = tokenizer.encode(question)
-                    if len(tok_context) > 2500:
-                        tok_context = tok_context[-2500:]
+                    if len(tok_context) > max_len:
+                        tok_context = tok_context[-max_len:]
                     question = tokenizer.decode(tok_context)
                     tok_answer = tokenizer.encode(answer)
                     if len(tok_answer) > 300:
@@ -78,9 +80,11 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
                 message_text = tokenizer.apply_chat_template(chat, tokenize=False)
                 tok_sample['text'].append(message_text)
                 tok_sample['answer_len'].append(len(tokenizer.encode(answer))+1)
+                tok_sample['context_len'].append(len(tokenizer.encode(question)))
         
         sample = tokenizer(tok_sample['text'])
         sample['answer_len'] = tok_sample['answer_len']
+        sample['context_len'] = tok_sample['context_len']
         sample['labels'] = sample['input_ids'].copy()
         return sample
     
@@ -90,6 +94,7 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
         labels = [torch.tensor(b['labels'][::-1]) for b in batch]
         attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
         mask_size = [b['answer_len'] for b in batch]
+        context_len = [b['context_len'] for b in batch]
         input_ids = pad_sequence(input_ids, padding_value=id_pad_value).T.flip(1)
         labels = pad_sequence(labels, padding_value=-100).T.flip(1)
         attention_mask = pad_sequence(attention_mask, padding_value=0).T.flip(1)
@@ -97,7 +102,8 @@ def LongSFT(dataset, tokenizer, batch_size=1, shuffle=False, clip=False, seed=37
         collated = {'input_ids': input_ids,
                     'labels': labels,
                     'attention_mask': attention_mask,
-                    'mask_size': mask_size}
+                    'mask_size': mask_size,
+                    'context_len': context_len}
 
         # labels_mask = []
         # for i in range(input_ids.shape[0]):
