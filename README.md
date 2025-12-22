@@ -19,9 +19,9 @@ Hierarchical Memory Transformer (HMT) is a novel framework that enables and impr
 ## Code Structure
 
 - `hmt_src/main.py`: Entrypoint of HMT command line.
-- `hmt_src/pubmedqa_ds_preprocess.py`: Script used to preprocess PubMedQA dataset.
-- `modeling_rmt/language_modeling.py`: The HMT model source code.
-- `modeling_rmt/long_mem_cross_attn.py`: The memory recall module.
+- `hmt_src/data/pubmedqa_ds_preprocess.py`: Script used to preprocess PubMedQA dataset.
+- `hmt_src/model/language_modeling.py`: The HMT model source code.
+- `hmt_src/model/long_mem_cross_attn.py`: The memory recall module.
 
 
 ## Instructions
@@ -30,12 +30,12 @@ The code adapts the recurrent memory transformer repository (https://github.com/
 ```
 conda create -n hmt python=3.10 -y
 conda activate hmt
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
 *For AMD GPUs:* Please install the ROCm version of pytorch
 ```
-pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/rocm5.6
+pip install torch==2.3.1+rocm6.0 torchvision==0.18.1+rocm6.0 torchaudio==2.3.1+rocm6.0 --index-url https://download.pytorch.org/whl/rocm6.0
 ```
 
 
