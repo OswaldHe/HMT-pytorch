@@ -13,9 +13,9 @@ class CrossAttentionMemory(torch.nn.Module):
         self.wq = torch.nn.Linear(self.dim, self.hidden_dim, bias=False, dtype=torch.bfloat16)
         self.wk = torch.nn.Linear(self.dim, self.hidden_dim, bias=False, dtype=torch.bfloat16)
 
-    def forward(self, memory, inputs, mode="train", seg_num=0, browse_thres=4, pos_mask=None, last_seg=False, generate=False):
+    def forward(self, memory, inputs, mode="train", seg_num=0, pos_mask=None, last_seg=False, generate=False):
         if memory is None:
-            return None, None, False, torch.tensor(0.0)
+            return None, None, torch.tensor(0.0)
         inputs = inputs.cuda().bfloat16()
         memory = memory.cuda().bfloat16()
         batch_size, _, _ = inputs.shape
@@ -39,11 +39,8 @@ class CrossAttentionMemory(torch.nn.Module):
         else:
             loss = torch.tensor(0.0)
         hist = torch.flatten(torch.sub(torch.full((batch_size, 1), seg_num).cpu(), torch.argmax(scores, dim=2).cpu())).tolist()
-        browse = False
-        if hist[0] < browse_thres:
-            browse = True
         output = torch.matmul(scores, memory) # (batch, 1, dim)
         inputs = inputs.cpu()
         memory = memory.cpu()
 
-        return output, hist, browse, loss
+        return output, hist, loss
