@@ -26,7 +26,8 @@ from accelerate.utils import DummyOptim, DummyScheduler
 
 from hmt_src.utils import apply_chat_template_with_fallback
 
-
+print("test.")
+ 
 # set up logging
 logging_fmt = "[%(levelname)s] (%(asctime)s): %(message)s"
 date_fmt = '%m/%d/%Y %I:%M:%S %p'
