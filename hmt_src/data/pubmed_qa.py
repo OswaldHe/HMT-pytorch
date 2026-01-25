@@ -8,17 +8,20 @@ from hmt_src.data.utils import apply_train_set_split
 logger = logging.getLogger(__name__)
 
 
-def load_pubmedqa_dataloaders(args, tokenizer, batch_size):
+def load_pubmedqa_dataloaders(args, tokenizer, batch_size, include_train=True):
     task_subset = args.task_subset
     if args.streaming:
         base_ds = datasets.load_dataset(
             args.task_name, task_subset, split="train", streaming=True
         )
-        train_ds = valid_ds = test_ds = base_ds
+        train_ds = base_ds if include_train else None
+        valid_ds = test_ds = base_ds
     else:
-        train_ds = datasets.load_dataset(
-            args.task_name, task_subset, split="train[:75%]"
-        )
+        train_ds = None
+        if include_train:
+            train_ds = datasets.load_dataset(
+                args.task_name, task_subset, split="train[:75%]"
+            )
         valid_ds = datasets.load_dataset(
             args.task_name, task_subset, split="train[75%:90%]"
         )
@@ -28,17 +31,23 @@ def load_pubmedqa_dataloaders(args, tokenizer, batch_size):
         base_ds = None
 
     train_ds, valid_ds, test_ds = apply_train_set_split(
-        train_ds, valid_ds, test_ds, args, base_dataset=base_ds
+        train_ds,
+        valid_ds,
+        test_ds,
+        args,
+        base_dataset=base_ds if include_train else None,
     )
 
-    train_dataloader = PubMedQA(
-        train_ds,
-        tokenizer,
-        fuse_size=args.fuse_size,
-        batch_size=batch_size,
-        shuffle=args.shuffle,
-        seed=args.seed,
-    )
+    train_dataloader = None
+    if train_ds is not None:
+        train_dataloader = PubMedQA(
+            train_ds,
+            tokenizer,
+            fuse_size=args.fuse_size,
+            batch_size=batch_size,
+            shuffle=args.shuffle,
+            seed=args.seed,
+        )
     valid_dataloader = PubMedQA(
         valid_ds, tokenizer, fuse_size=args.fuse_size, batch_size=batch_size
     )

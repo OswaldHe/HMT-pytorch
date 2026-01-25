@@ -26,7 +26,7 @@ from accelerate.utils import DummyOptim, DummyScheduler
 
 from hmt_src.utils import apply_chat_template_with_fallback
 
-print("test.")
+print("train model.")
  
 # set up logging
 logging_fmt = "[%(levelname)s] (%(asctime)s): %(message)s"
@@ -98,21 +98,25 @@ parser.add_argument('--model_name', type=str, default='facebook/opt-2.7b', help=
 parser.add_argument('--segment_length', type=int, default=1024, help='segment length of HMT')
 parser.add_argument('--num_seg_save', type=int, default=4, help='max number of segment inference results saved on GPU')
 parser.add_argument('--bptt_depth', type=int, default=8, help='number of segments unrolled in bptt')
-parser.add_argument('--test_max_context_length', type=int, default=8192, help='max context length of input to test')
+parser.add_argument('--test_max_context_length', type=int, default=None, help='max context length of input to test')
 
 parser.add_argument('--sum_fraction', type=float, default=0.5, help='fraction of the segment that will be used for representation extraction')
 parser.add_argument('--num_sensory', type=int, default=0, help='number of preserved tokens for sensory memory')
 parser.add_argument('--mem_hidden_dim', type=int, default=4096, help='hidden dimension of cross attention in memory recall mech.')
 parser.add_argument('--mem_recall_size', type=int, default=1, help='number of memory embeddings to be concanated with segment.')
-parser.add_argument('--mem_window_size', type=int, default=64, help='number of memory embeddings cached in memory recall mech.')
+parser.add_argument('--mem_window_size', type=int, default=256, help='number of memory embeddings cached in memory recall mech.')
+parser.add_argument('--mem_mlp', action='store_true', default=False, help='use an MLP to process memory_state in Memory-Only wrapper')
+parser.add_argument('--mem_mlp_hidden_dim', type=int, default=None, help='hidden dimension of memory_state MLP (default: model hidden size)')
 
 parser.add_argument('--rmt_only', action='store_true', default=False, help='train and evaluate with only rmt')
 parser.add_argument('--baseline_only', action='store_true', default=False, help='train and evaluate only the backbone model')
 
 parser.add_argument('--plot_hist', action='store_true', default=False, help='show memory recall context histogram.')
 parser.add_argument('--timing', action='store_true', default=False, help='profile the timing of inference.')
-parser.add_argument('--inference_only', action='store_true', default=False, help='perform inference of the model only.')
-parser.add_argument('--generate', type=str, default=None, help='generate for harry potter book.')
+parser.add_argument('--evaluate_only', action='store_true', default=False, help='perform evaluation of the model only.')
+parser.add_argument('--generate_only', action='store_true', default=False, help='perform generation of the model only.')
+parser.add_argument('--generate_prompt', type=str, default=None, help='prompt text for generation.')
+parser.add_argument('--chat', action='store_true', default=False, help='use chat template for prompt generation.')
 parser.add_argument('--max_new_tokens', type=int, default=256, help='number of tokens to generate during inference.')
 
 # wandb settings
@@ -131,6 +135,15 @@ def main():
     device = accelerator.device
     from accelerate.logging import get_logger
     logger = get_logger('')
+
+    def mean_metric(value):
+        if value is None:
+            return None
+        if not torch.is_tensor(value):
+            value = torch.tensor(value, device=accelerator.device)
+        value = value.detach()
+        gathered = accelerator.gather_for_metrics(value)
+        return gathered.float().mean().item()
 
     # Initialize WanDB Tracker
     accelerator.init_trackers(
@@ -158,8 +171,6 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=token, cache_dir=cache_dir)
     
-    
-
     if args.use_lora:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -173,18 +184,21 @@ def main():
         logger.info(f'Added LoRA, trainable parameters with LoRA only:')
         model.print_trainable_parameters()
 
-    batch_size = args.batch_size
-
     model, block_size, history_size = generate_model(
         args=args, base_model=model, logger=logger
     )
 
     """### Prepare dataset"""
     logger.info("Preparing datasets and dataloaders")
-    train_dataloader, valid_dataloader, test_dataloader = generate_dataloaders(
-        args, tokenizer, batch_size, block_size, history_size
-    )
 
+    if not args.generate_only:
+        batch_size = args.batch_size
+        include_train = not args.evaluate_only 
+        train_dataloader, valid_dataloader, test_dataloader = generate_dataloaders(
+            args, tokenizer, batch_size, block_size, history_size, include_train=include_train
+        )
+
+    """### Prepare optimizer and scheduler"""
     logger.info("Preparing optimizer")
     from torch.optim import AdamW
     optimizer_cls = (
@@ -193,44 +207,47 @@ def main():
         or "optimizer" not in accelerator.state.deepspeed_plugin.deepspeed_config
         else DummyOptim
     )
-
     optim = optimizer_cls(model.parameters(), lr=args.learning_rate)
-    from torch.optim.lr_scheduler import StepLR
 
-    if (
-     accelerator.state.deepspeed_plugin is None
-     or "scheduler" not in accelerator.state.deepspeed_plugin.deepspeed_config
-    ):
-        if args.lr_decay:
-            scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+    if not args.generate_only and not args.evaluate_only:
+        from torch.optim.lr_scheduler import StepLR
+        if (
+            accelerator.state.deepspeed_plugin is None
+            or "scheduler" not in accelerator.state.deepspeed_plugin.deepspeed_config
+        ):
+            if args.lr_decay:
+                scheduler = StepLR(optim, step_size=100, gamma=args.lr_decay_gamma)
+            else:
+                scheduler = StepLR(optim, step_size=100, gamma=1.0)
         else:
-            scheduler = StepLR(optim, step_size=100, gamma=1.0)
-    else:
-        scheduler = DummyScheduler(
-            optim, total_num_steps=args.training_step, num_training_steps=100
-        )
+            scheduler = DummyScheduler(
+                optim, total_num_steps=args.training_step, num_training_steps=100
+            )
 
-    train_steps = args.training_step
-    eval_steps = args.eval_step
-
-
-    logger.info("Preparing accelerator")
-    # wrap with accelerate
-    model, optim, train_dataloader, valid_dataloader, scheduler = accelerator.prepare(
-        model, optim, train_dataloader, valid_dataloader, scheduler
-    )
-
-    logger.info("Preparing generators")
-    train_gen = iter(train_dataloader)
+    """### Prepare accelerator"""
+    if not args.generate_only:
+        logger.info("Preparing accelerator")
+        if args.evaluate_only:
+            model, optim, valid_dataloader, test_dataloader = accelerator.prepare(
+                model, optim, valid_dataloader, test_dataloader
+            )
+        else:
+            model, optim, train_dataloader, valid_dataloader, test_dataloader, scheduler = accelerator.prepare(
+                model, optim, train_dataloader, valid_dataloader, test_dataloader, scheduler
+            )
 
     logger.info("Moving model to device")
     model.to(device)
+    
+    if not args.evaluate_only and not args.generate_only:
+        logger.info("Preparing generators")
+        train_gen = iter(train_dataloader)
 
-    logger.info("Setting model to train mode")
-    model.train()
+        logger.info("Setting model to train mode")
+        model.train()
 
-    if not args.inference_only:
         logger.info("Starting training")
+        train_steps = args.training_step
         losses = []
         for epoch in range(args.num_epochs):
             train_gen = iter(train_dataloader)
@@ -251,12 +268,15 @@ def main():
                 optim.step()
                 if args.lr_decay:
                     scheduler.step()
-                losses.append(loss.detach().item())
-                train_log = {"train loss": loss.detach().item()}
-                if batch_metrics.get("ppl") is not None:
-                    train_log["train ppl"] = batch_metrics["ppl"]
-                if batch_metrics.get("f1") is not None:
-                    train_log["train f1"] = batch_metrics["f1"]
+                mean_loss = mean_metric(loss)
+                losses.append(mean_loss)
+                train_log = {"train loss": mean_loss}
+                mean_ppl = mean_metric(batch_metrics.get("ppl"))
+                if mean_ppl is not None:
+                    train_log["train ppl"] = mean_ppl
+                mean_f1 = mean_metric(batch_metrics.get("f1"))
+                if mean_f1 is not None:
+                    train_log["train f1"] = mean_f1
                 accelerator.log(train_log, step=step+total_len*epoch)
                 
                 if step % 50 == 0:
@@ -275,11 +295,13 @@ def main():
                             eval_batch['mask_size'] = eval_batch['mask_size'][0]
                         with torch.no_grad():
                             out, _, eval_metrics = model(**eval_batch)
-                        eval_losses.append(out.loss.detach().item())
-                        if eval_metrics.get("ppl") is not None:
-                            eval_ppl.append(eval_metrics["ppl"])
-                        if eval_metrics.get("f1") is not None:
-                            eval_f1.append(eval_metrics["f1"])
+                        eval_losses.append(mean_metric(out.loss))
+                        mean_eval_ppl = mean_metric(eval_metrics.get("ppl"))
+                        if mean_eval_ppl is not None:
+                            eval_ppl.append(mean_eval_ppl)
+                        mean_eval_f1 = mean_metric(eval_metrics.get("f1"))
+                        if mean_eval_f1 is not None:
+                            eval_f1.append(mean_eval_f1)
 
                     log_payload = {"eval loss": np.mean(eval_losses)}
                     if eval_ppl:
@@ -293,89 +315,183 @@ def main():
         accelerator.wait_for_everyone()
         if args.save_ckpt is not None:
             model.save_checkpoint(args.save_ckpt)
-
-    valid_losses = []
-    valid_ppl = []
-    valid_f1 = []
-    model.eval()
-    valid_gen = iter(valid_dataloader)
-    logger.info("Starting evaluation")
-
-    for step in tqdm.tqdm(range(min(eval_steps, len(valid_dataloader)))):
-        batch = next(valid_gen)
-        batch['segment_size'] = block_size
-        if args.task_name == 'eda_qa':
-            batch['mask_size'] = batch['answer_len'][0]
-        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
-            batch['mask_size'] = batch['mask_size'][0]
-        if args.timing:
-            batch['prof'] = True
-        
-        with torch.no_grad():
-            out, _, val_metrics = model(**batch)
-        loss = out.loss
-        # ppl = out.ppl
-        # logger.debug(f'loss: {loss.item()}')
-        # logger.debug(f'ppl: {ppl.item()}')
-        valid_losses.append(loss.detach().item())
-        if val_metrics.get("ppl") is not None:
-            valid_ppl.append(val_metrics["ppl"])
-        if val_metrics.get("f1") is not None:
-            valid_f1.append(val_metrics["f1"])
-
-    logger.info(f'Loss on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
-    if valid_ppl:
-        logger.info(f'PPL on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples: {np.mean(valid_ppl)}')
-    if valid_f1:
-        logger.info(f'F1 on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples: {np.mean(valid_f1)}')
-
-    test_losses = []
-    test_ppl = []
-    test_f1 = []
-    total_hist = []
-
-    test_gen = iter(test_dataloader)
-    logger.info("Starting testing")
-    for step in tqdm.tqdm(range(min(args.test_step, len(test_dataloader)))):
-        batch = next(test_gen)
-        batch['segment_size'] = block_size
-        if args.task_name == 'eda_qa':
-            batch['mask_size'] = batch['answer_len'][0]
-        if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
-            batch['mask_size'] = batch['mask_size'][0]
-        if args.timing:
-            batch['prof'] = True
-        
-        with torch.no_grad():
-            out, hist, test_metrics = model(**batch)
-        loss = out.loss
-        # ppl = out.ppl
-        test_losses.append(loss.detach().item())
-        if test_metrics.get("ppl") is not None:
-            test_ppl.append(test_metrics["ppl"])
-        if test_metrics.get("f1") is not None:
-            test_f1.append(test_metrics["f1"])
-        # logger.info(f'loss: {loss.item()}')
-        if hist is not None:
-            total_hist.extend(hist)
     
-    if (args.baseline_only == False) and (args.rmt_only == False) and args.plot_hist:
-        max_d = np.max(total_hist)
-        plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=50)
-        plt.gca().yaxis.set_major_formatter(PercentFormatter(1))
-        plt.xlabel("Context Distance")
-        plt.ylabel("Probability")
-        plt.savefig('artifact/heatmap_' + date_str + '.png')
-        plt.show()
+    if not args.generate_only:
+        eval_steps = args.eval_step
+        valid_losses = []
+        valid_ppl = []
+        valid_f1 = []
+        model.eval()
+        valid_gen = iter(valid_dataloader)
+        logger.info("Starting evaluation")
 
-    if test_ppl:
-        logger.info(f'PPL on {min(args.test_step, len(test_dataloader)) * batch_size} test samples: {np.mean(test_ppl)}')
-    if test_f1:
-        logger.info(f'F1 on {min(args.test_step, len(test_dataloader)) * batch_size} test samples: {np.mean(test_f1)}')
+        for step in tqdm.tqdm(range(min(eval_steps, len(valid_dataloader)))):
+            batch = next(valid_gen)
+            batch['segment_size'] = block_size
+            if args.task_name == 'eda_qa':
+                batch['mask_size'] = batch['answer_len'][0]
+            if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                batch['mask_size'] = batch['mask_size'][0]
+            if args.timing:
+                batch['prof'] = True
+            
+            with torch.no_grad():
+                out, _, val_metrics = model(**batch)
+            loss = out.loss
+            # ppl = out.ppl
+            # logger.debug(f'loss: {loss.item()}')
+            # logger.debug(f'ppl: {ppl.item()}')
+            valid_losses.append(mean_metric(loss))
+            mean_valid_ppl = mean_metric(val_metrics.get("ppl"))
+            if mean_valid_ppl is not None:
+                valid_ppl.append(mean_valid_ppl)
+            mean_valid_f1 = mean_metric(val_metrics.get("f1"))
+            if mean_valid_f1 is not None:
+                valid_f1.append(mean_valid_f1)
 
-    if args.generate is not None and device == torch.device('cuda:0'):
-        with open(args.generate, 'r') as f:
+        logger.info(f'Loss on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples (CrossEntropy): {np.mean(valid_losses)}')
+        if valid_ppl:
+            logger.info(f'PPL on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples: {np.mean(valid_ppl)}')
+        if valid_f1:
+            logger.info(f'F1 on {min(eval_steps, len(valid_dataloader)) * batch_size} validation samples: {np.mean(valid_f1)}')
+
+        test_steps = args.test_step
+        test_losses = []
+        test_ppl = []
+        test_f1 = []
+        total_hist = []
+
+        test_gen = iter(test_dataloader)
+        logger.info("Starting testing")
+
+        for step in tqdm.tqdm(range(min(test_steps, len(test_dataloader)))):
+            batch = next(test_gen)
+            batch['segment_size'] = block_size
+            if args.task_name == 'eda_qa':
+                batch['mask_size'] = batch['answer_len'][0]
+            if args.task_name == 'nvidia/ChatQA2-Long-SFT-data':
+                batch['mask_size'] = batch['mask_size'][0]
+            if args.timing:
+                batch['prof'] = True
+            
+            with torch.no_grad():
+                out, hist, test_metrics = model(**batch)
+            loss = out.loss
+            # ppl = out.ppl
+            test_losses.append(mean_metric(loss))
+            mean_test_ppl = mean_metric(test_metrics.get("ppl"))
+            if mean_test_ppl is not None:
+                test_ppl.append(mean_test_ppl)
+            mean_test_f1 = mean_metric(test_metrics.get("f1"))
+            if mean_test_f1 is not None:
+                test_f1.append(mean_test_f1)
+            # logger.info(f'loss: {loss.item()}')
+            if hist is not None:
+                total_hist.extend(hist)
+        
+        if (args.baseline_only == False) and (args.rmt_only == False) and args.plot_hist:
+            max_d = np.max(total_hist)
+            plt.hist(total_hist, weights=np.ones(len(total_hist))/len(total_hist), bins=50)
+            plt.gca().yaxis.set_major_formatter(PercentFormatter(1))
+            plt.xlabel("Context Distance")
+            plt.ylabel("Probability")
+            plt.savefig('artifact/heatmap_' + date_str + '.png')
+            plt.show()
+
+        if test_ppl:
+            logger.info(f'PPL on {min(test_steps, len(test_dataloader)) * batch_size} test samples: {np.mean(test_ppl)}')
+        if test_f1:
+            logger.info(f'F1 on {min(test_steps, len(test_dataloader)) * batch_size} test samples: {np.mean(test_f1)}')
+        
+        if args.task_name == 'eda_qa':
+            import evaluate
+            rouge = evaluate.load('rouge')
+
+            with open('RAG-EDA/benchmark/openroad_documentation.json', 'r') as f:
+                corpus_dict = json.load(f)
+            
+            content = []
+            for topic in corpus_dict:
+                for knowledge in topic['knowledge']:
+                    content.append(knowledge['content'])
+            
+            content_str = " ".join(content)
+
+            ORD_QA_sample = []
+            with open('RAG-EDA/benchmark/ORD-QA.jsonl') as file:
+                for line in file:
+                    if line.strip():  # Skip any empty lines
+                        ORD_QA_sample.append(json.loads(line))
+
+            rougeL_full = []
+            # load pre-computed memory embeddings
+            mem_seq = None
+            if os.path.exists('memory.pt'):
+                mem_seq = torch.load('memory.pt')
+
+            for step in tqdm.tqdm(range(len(ORD_QA_sample))):
+                entry = ORD_QA_sample[step]
+                question_str = entry['question']
+                answer_str = entry['answer']
+                messages = [
+                    {"role": "system", "content": "You are an expert with EDA tool usage. Answer the question based on the following reference information."},
+                    {"role": "system", "content": content_str},
+                    {"role": "user", "content": question_str}
+                ]
+                message_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                tok_message = tokenizer(message_str, return_tensors='pt')
+                tok_answer = tokenizer.encode(answer_str)
+                with torch.no_grad():
+                    output_seq = model.generate(
+                        input_ids = tok_message['input_ids'],
+                        attention_mask = tok_message['attention_mask'],
+                        segment_size = block_size,
+                        mem_seq = mem_seq,
+                        max_new_tokens = len(tok_answer),
+                        do_sample=False
+                    )
+                predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                references = [answer_str]
+                results = rouge.compute(predictions=predictions, references=references)
+                rougeL_full.append(results['rougeL'])
+            logger.info(f'ROUGE-L on {len(ORD_QA_sample)} test samples using whole database: {np.mean(rougeL_full)}')
+
+
+            test_dataloader = OpenROAD_test(tokenizer, batch_size=batch_size)
+            test_gen = iter(test_dataloader)
+
+            rougeL = []
+
+            for step in tqdm.tqdm(range(len(test_dataloader))):
+                batch = next(test_gen)
+                batch['segment_size'] = block_size
+                output_seq = model.generate(
+                    input_ids = batch['input_ids'],
+                    attention_mask = batch['attention_mask'],
+                    segment_size = block_size,
+                    max_new_tokens = batch['answer_len'][0],
+                    do_sample=False
+                )
+                predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                references = batch['answer']
+                results = rouge.compute(predictions=predictions, references=references)
+                rougeL.append(results['rougeL'])
+            
+            logger.info(f'ROUGE-L on {len(test_dataloader)} test samples with only correct reference: {np.mean(rougeL)}')
+    
+    if args.generate_prompt is not None and device == torch.device('cuda:0'):
+        with open(args.generate_prompt, 'r') as f:
             prompt_text = f.read()
+
+        if args.chat:
+            if hasattr(model, "apply_chat_template"):
+                prompt_text = model.apply_chat_template(
+                    [{"role": "user", "content": prompt_text}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            else:
+                prompt_text = f"User: {prompt_text}\nAssistant:"
 
         encoded_prompt = tokenizer(prompt_text, return_tensors="pt")
         output_seq = model.generate(
@@ -386,83 +502,6 @@ def main():
             temperature = 0.6
         )
         logger.info(tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
-    
-    
-    if args.task_name == 'eda_qa':
-        import evaluate
-        rouge = evaluate.load('rouge')
-
-        with open('RAG-EDA/benchmark/openroad_documentation.json', 'r') as f:
-            corpus_dict = json.load(f)
-        
-        content = []
-        for topic in corpus_dict:
-            for knowledge in topic['knowledge']:
-                content.append(knowledge['content'])
-        
-        content_str = " ".join(content)
-
-        ORD_QA_sample = []
-        with open('RAG-EDA/benchmark/ORD-QA.jsonl') as file:
-            for line in file:
-                if line.strip():  # Skip any empty lines
-                    ORD_QA_sample.append(json.loads(line))
-
-        rougeL_full = []
-        # load pre-computed memory embeddings
-        mem_seq = None
-        if os.path.exists('memory.pt'):
-            mem_seq = torch.load('memory.pt')
-
-        for step in tqdm.tqdm(range(len(ORD_QA_sample))):
-            entry = ORD_QA_sample[step]
-            question_str = entry['question']
-            answer_str = entry['answer']
-            messages = [
-                {"role": "system", "content": "You are an expert with EDA tool usage. Answer the question based on the following reference information."},
-                {"role": "system", "content": content_str},
-                {"role": "user", "content": question_str}
-            ]
-            message_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            tok_message = tokenizer(message_str, return_tensors='pt')
-            tok_answer = tokenizer.encode(answer_str)
-            with torch.no_grad():
-                output_seq = model.generate(
-                    input_ids = tok_message['input_ids'],
-                    attention_mask = tok_message['attention_mask'],
-                    segment_size = block_size,
-                    mem_seq = mem_seq,
-                    max_new_tokens = len(tok_answer),
-                    do_sample=False
-                )
-            predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            references = [answer_str]
-            results = rouge.compute(predictions=predictions, references=references)
-            rougeL_full.append(results['rougeL'])
-        logger.info(f'ROUGE-L on {len(ORD_QA_sample)} test samples using whole database: {np.mean(rougeL_full)}')
-
-
-        test_dataloader = OpenROAD_test(tokenizer, batch_size=batch_size)
-        test_gen = iter(test_dataloader)
-
-        rougeL = []
-
-        for step in tqdm.tqdm(range(len(test_dataloader))):
-            batch = next(test_gen)
-            batch['segment_size'] = block_size
-            output_seq = model.generate(
-                input_ids = batch['input_ids'],
-                attention_mask = batch['attention_mask'],
-                segment_size = block_size,
-                max_new_tokens = batch['answer_len'][0],
-                do_sample=False
-            )
-            predictions = tokenizer.batch_decode(output_seq, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            references = batch['answer']
-            results = rouge.compute(predictions=predictions, references=references)
-            rougeL.append(results['rougeL'])
-        
-        logger.info(f'ROUGE-L on {len(test_dataloader)} test samples with only correct reference: {np.mean(rougeL)}')
             
 
 if __name__ == "__main__":

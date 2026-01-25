@@ -7,21 +7,22 @@ from .memory_cell import MemoryCell
 
 def generate_model(args, base_model, logger):
     """Configure the recurrent model wrapper and return it with sequence parameters."""
-    num_mem_embed = args.mem_recall_size
-    n_segments = args.bptt_depth
-
     if args.baseline_only:
         logger.warning(
             "training and evaluating only the backbone. remember to align the segment rightward"
         )
         num_mem_embed = 0
-        n_segments = 2
-
-    block_size = args.segment_length
-    # block_size -= 2 * num_mem_embed
-    # block_size -= args.num_sensory
-    history_size = (n_segments - 1) * block_size
-    mask_size = block_size
+        block_size = args.segment_length
+        history_size = block_size
+        mask_size = block_size
+    else:
+        num_mem_embed = args.mem_recall_size
+        n_segments = args.bptt_depth
+        block_size = args.segment_length
+        # block_size -= 2 * num_mem_embed
+        # block_size -= args.num_sensory
+        history_size = (n_segments - 1) * block_size
+        mask_size = block_size
 
     logger.info("Preparing recurrent model wrapper...")
     if getattr(args, "recurrent_type") == "summary_memory":
@@ -39,7 +40,6 @@ def generate_model(args, base_model, logger):
             num_mem_embed=num_mem_embed,
             num_prepend=0,
             segment_size=block_size,
-            max_n_segments=n_segments,
             mask_size=mask_size,
             n_cell_out=args.num_seg_save,
             rmt_only=args.rmt_only,
@@ -53,9 +53,10 @@ def generate_model(args, base_model, logger):
             mem_hidden_dim=args.mem_hidden_dim,
             mem_window_size=args.mem_window_size,
             segment_size=block_size,
-            max_n_segments=n_segments,
             mask_size=mask_size,
             n_cell_out=args.num_seg_save,
+            mem_mlp=args.mem_mlp,
+            mem_mlp_hidden_dim=args.mem_mlp_hidden_dim,
         )
 
     if args.load_from_ckpt is not None:

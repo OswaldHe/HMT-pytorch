@@ -8,14 +8,18 @@ from hmt_src.data.utils import apply_train_set_split
 logger = logging.getLogger(__name__)
 
 
-def load_generic_text_dataloaders(args, tokenizer, batch_size, block_size, history_size):
-    train_ds = datasets.load_dataset(
-        args.task_name,
-        args.task_subset,
-        split="train",
-        streaming=args.streaming,
-        trust_remote_code=True,
-    )
+def load_generic_text_dataloaders(
+    args, tokenizer, batch_size, block_size, history_size, include_train=True
+):
+    train_ds = None
+    if include_train:
+        train_ds = datasets.load_dataset(
+            args.task_name,
+            args.task_subset,
+            split="train",
+            streaming=args.streaming,
+            trust_remote_code=True,
+        )
     valid_ds = datasets.load_dataset(
         args.task_name,
         args.task_subset,
@@ -33,7 +37,7 @@ def load_generic_text_dataloaders(args, tokenizer, batch_size, block_size, histo
 
     train_ds, valid_ds, test_ds = apply_train_set_split(train_ds, valid_ds, test_ds, args)
 
-    loaders = create_text_dataloaders(
+    train_dataloader, valid_dataloader, test_dataloader = create_text_dataloaders(
         train_ds,
         valid_ds,
         test_ds,
@@ -43,5 +47,7 @@ def load_generic_text_dataloaders(args, tokenizer, batch_size, block_size, histo
         block_size,
         history_size,
     )
+    if not include_train:
+        train_dataloader = None
     logger.info("Prepared generic text dataloaders")
-    return loaders
+    return train_dataloader, valid_dataloader, test_dataloader

@@ -19,7 +19,7 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 IGNORE_INDEX = -100
 
 class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
-    def __init__(self, base_model, num_mem_embed, num_prepend, mem_hidden_dim=4096, mem_window_size=64, rmt_only=False, baseline_only=False, **rmt_kwargs):
+    def __init__(self, base_model, num_mem_embed, num_prepend, mem_hidden_dim=4096, mem_window_size=64, rmt_only=False, baseline_only=False, **hmt_kwargs):
         super().__init__()
 
         if isinstance(base_model.config, OPTConfig):
@@ -38,10 +38,10 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             self.cross_attn = CrossAttentionMemory(mem_emb_dim, mem_hidden_dim)
             self.summary_cell = SummaryCell(base_model, num_mem_embed)
             
-        self.rmt_config = rmt_kwargs
+        self.hmt_config = hmt_kwargs
         self.mem_window_size = mem_window_size
+
         self.logger = get_logger('')
-        
         self.rouge = evaluate.load('rouge')
         self.f1 = evaluate.load("f1")
 
@@ -55,14 +55,13 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             output_attentions=None, 
             output_hidden_states=None, 
             sum_fraction=0.5,
-            segment_size=1022, 
+            segment_size=1024, 
             mode='train', 
-            prof=False,
             pos_mask=None,
             **kwargs
         ):
 
-        mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
+        mask_size = self.hmt_config.get('mask_size') if mask_size is None else mask_size
 
         memory_state = None
         prepend_state = None
@@ -71,7 +70,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         seg_num = 0
 
         cell_outputs = []
-        n_cell_out = self.rmt_config.get('n_cell_out')
+        n_cell_out = self.hmt_config.get('n_cell_out')
         memory_seq = None
 
         total_hist = []
@@ -83,6 +82,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             if segment is None:
                 break
 
+            memory_prompt = None
             if self.cross_attn is not None:
                 seg = copy.deepcopy(segment)
                 seg['input_ids'] = seg['input_ids'][:,:int(round(segment_size * sum_fraction))]
@@ -101,33 +101,12 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                 if hist is not None:
                     total_hist.extend(hist)
 
-            # process the whole segement and get new long-term memory
-            if prof:
-                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, profile_memory=True, with_stack=True) as prof_m:
-                    with record_function("model_inference"):
-                        cell_out, memory_state = self.memory_cell(
-                            **segment,
-                            pre_memory_state=memory_prompt,
-                            prepend_state=prepend_state,
-                            output_hidden_states=True,
-                        )
-                
-                with open('model_profile_dump.txt', 'w') as file:
-                    file.write(prof_m.key_averages().table(sort_by="cuda_time_total"))
-                
-                prof_m.export_chrome_trace("model_trace.json")
-                exit(0)
-            else:
-                cell_out, memory_state = self.memory_cell(
-                    **segment,
-                    pre_memory_state=memory_prompt,
-                    prepend_state=prepend_state,
-                    output_hidden_states=True,
-                )
-
-            # if prof:
-            #     torch.cuda.synchronize()
-            #     self.logger.info('segment ' + str(seg_num) + ' elapsed time: ' + str(start.elapsed_time(end)) + ' ms')
+            cell_out, memory_state = self.memory_cell(
+                **segment,
+                pre_memory_state=memory_prompt,
+                prepend_state=prepend_state,
+                output_hidden_states=True,
+            )
 
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
@@ -141,9 +120,6 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                     if memory_seq.shape[1] > self.mem_window_size:
                         memory_seq = memory_seq[:,-self.mem_window_size:,:]
 
-            if memory_state is not None:
-                self.manage_gradients(memory_state, seg_num)
-
             seg_num+=1
         
         out, metrics = self.process_outputs(cell_outputs, labels=labels, 
@@ -153,7 +129,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                                    mask_size=mask_size)
         return out, total_hist, metrics
     
-    def generate(self, input_ids, attention_mask, segment_size, mem_seq=None, sum_fraction=0.5, **generate_kwargs):
+    def generate(self, input_ids, attention_mask, segment_size=1024, mem_seq=None, sum_fraction=0.5, **generate_kwargs):
         """Generate tokens by processing segments sequentially and rolling memory forward."""
         memory_prompt = None
         memory_state = None
@@ -218,8 +194,9 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
 
         if self.cross_attn is not None:
             seg = copy.deepcopy(final_segment)
-            seg['input_ids'] = seg['input_ids'][:, :(segment_size // 2)]
-            seg['attention_mask'] = seg['attention_mask'][:, :(segment_size // 2)]
+            cut = int(round(segment_size * sum_fraction))
+            seg['input_ids'] = seg['input_ids'][:, :cut]
+            seg['attention_mask'] = seg['attention_mask'][:, :cut]
             summary_prompt = self.summary_cell(final_segment['input_ids'].shape[0]) if self.num_mem_embed > 0 else None
             _, summary_state = self.memory_cell(**seg, pre_memory_state=summary_prompt)
             memory_prompt, _ = self.cross_attn(
@@ -247,8 +224,8 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                     if self.cross_attn is not None:
                         summary_prompt = self.summary_cell(out.shape[0]) if self.num_mem_embed > 0 else None
                         seg = {
-                            'input_ids': out[:, :(segment_size // 2)],
-                            'attention_mask': torch.ones_like(out[:, :(segment_size // 2)]),
+                            'input_ids': out[:, :cut],
+                            'attention_mask': torch.ones_like(out[:, :cut]),
                         }
                         _, summary_state = self.memory_cell(**seg, pre_memory_state=summary_prompt)
                         memory_prompt, _ = self.cross_attn(
@@ -365,17 +342,23 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             out['hidden_states'] = full_hidden_states
 
         return out, metrics
-        
-    def manage_gradients(self, memory_state, seg_num):
-        if seg_num == 0:
-            return True
-        memory_state = memory_state.detach()
-        return False
 
 
 
 class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
-    def __init__(self, base_model, num_mem_embed, num_prepend, mem_hidden_dim=4096, mem_window_size=64, rmt_only=False, baseline_only=False, **rmt_kwargs):
+    def __init__(
+        self, 
+        base_model, 
+        num_mem_embed, 
+        num_prepend, 
+        mem_hidden_dim=4096, 
+        mem_window_size=64, 
+        rmt_only=False, 
+        baseline_only=False,
+        mem_mlp=False,
+        mem_mlp_hidden_dim=None, 
+        **hmt_kwargs
+    ):
         super().__init__()
 
         if isinstance(base_model.config, OPTConfig):
@@ -392,11 +375,21 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         else:
             self.cross_attn = CrossAttentionMemory(mem_emb_dim, mem_hidden_dim)
 
-            
-        self.rmt_config = rmt_kwargs
         self.mem_window_size = mem_window_size
-        self.logger = get_logger('')
         
+        self.hmt_config = hmt_kwargs
+        self.mem_mlp = None
+        if mem_mlp:
+            print("Using mem_mlp to process memory_state before adding to memory_seq.")
+            if mem_mlp_hidden_dim is None:
+                mem_mlp_hidden_dim = mem_emb_dim
+            self.mem_mlp = torch.nn.Sequential(
+                torch.nn.Linear(mem_emb_dim, mem_mlp_hidden_dim),
+                torch.nn.GELU(),
+                torch.nn.Linear(mem_mlp_hidden_dim, mem_emb_dim),
+            )
+        
+        self.logger = get_logger('')
         self.rouge = evaluate.load('rouge')
         self.f1 = evaluate.load("f1")
 
@@ -409,30 +402,26 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             mask_size=None,  # Size of the attention mask used to compute the loss, it should be the length of the labels. If it's None, then self.mask_size is used. 
             output_attentions=None, 
             output_hidden_states=None, 
-            sum_fraction=0.5,
-            segment_size=1022, 
+            segment_size=1024, 
             mode='train', 
-            prof=False,
             pos_mask=None,
             **kwargs
         ):
 
-        mask_size = self.rmt_config.get('mask_size') if mask_size is None else mask_size
+        mask_size = self.hmt_config.get('mask_size') if mask_size is None else mask_size
 
         memory_state = None
         prepend_state = None
+        memory_seq = None
         segment = None
         seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         seg_num = 0
 
         cell_outputs = []
-        n_cell_out = self.rmt_config.get('n_cell_out')
-        memory_seq = self.memory_cell.get_init_suf_memory_states(input_ids.shape[0]).cpu()
-
+        n_cell_out = self.hmt_config.get('n_cell_out')
         total_hist = []
-
+        
         while True:
-
             prepend_state = segment['input_ids'][:,-self.num_prepend:].cuda() if segment is not None and self.num_prepend > 0 else None
             segment = seg_iter.next(segment_size)
             if segment is None:
@@ -451,24 +440,27 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             
             if self.cross_attn is not None:
                 # attend to long-term memory
+                if memory_seq is None:
+                    memory_seq = self.memory_cell.get_init_pre_memory_states(input_ids.shape[0]).cpu()
+
                 memory_state, hist = self.cross_attn(
                     memory_seq,
                     memory_prompt,
                     mode,
                     seg_num if seg_num < self.mem_window_size else self.mem_window_size,
                 )
+                
+
+                memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                if memory_seq.shape[1] > self.mem_window_size:
+                    memory_seq = memory_seq[:,-self.mem_window_size:,:]
+
                 if hist is not None:
                     total_hist.extend(hist)
-
-                if memory_seq is None:
-                    memory_seq = memory_state.cpu()
-                else:
-                    memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > self.mem_window_size:
-                        memory_seq = memory_seq[:,-self.mem_window_size:,:]
-
-            if memory_state is not None:
-                self.manage_gradients(memory_state, seg_num)
+                
+                # to-do: if args.mem_mlp, add a mlp layer here to process memory_state
+                if self.mem_mlp is not None:
+                    memory_state = self.mem_mlp(memory_state)
 
             seg_num+=1
         
@@ -479,7 +471,7 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                                    mask_size=mask_size)
         return out, total_hist, metrics
     
-    def generate(self, input_ids, attention_mask, segment_size, mem_seq=None, sum_fraction=0.5, **generate_kwargs):
+    def generate(self, input_ids, attention_mask, segment_size=1024, mem_seq=None, **generate_kwargs):
         """Generate tokens by processing segments sequentially and rolling memory forward."""
         memory_state = None
         prepend_state = None
@@ -504,19 +496,22 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                 )
 
             if self.cross_attn is not None:
+                if memory_seq is None:
+                    memory_seq = self.memory_cell.get_init_pre_memory_states(input_ids.shape[0]).cpu()
+    
                 memory_state, _ = self.cross_attn(
                     memory_seq,
                     memory_prompt,
                     'generate',
                     seg_num if seg_num < self.mem_window_size else self.mem_window_size,
                 )
-            
-                if memory_seq is None:
-                    memory_seq = memory_state.cpu()
-                else:
-                    memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                    if memory_seq.shape[1] > self.mem_window_size:
-                        memory_seq = memory_seq[:, -self.mem_window_size:, :]
+                
+                memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                if memory_seq.shape[1] > self.mem_window_size:
+                    memory_seq = memory_seq[:, -self.mem_window_size:, :]
+
+                if self.mem_mlp is not None:
+                    memory_state = self.mem_mlp(memory_state)
 
             prev_input_ids = segment['input_ids'].cpu()
             for k, v in segment.items():
@@ -564,19 +559,21 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                     )
 
                 if self.cross_attn is not None:
+                    if memory_seq is None:
+                        memory_seq = self.memory_cell.get_init_pre_memory_states(input_ids.shape[0]).cpu()
+
                     memory_state, _ = self.cross_attn(
                         memory_seq,
                         memory_prompt,
                         'generate',
                         seg_num if seg_num < self.mem_window_size else self.mem_window_size,
                     )
+                    if self.mem_mlp is not None:
+                        memory_state = self.mem_mlp(memory_state)
 
-                    if memory_seq is None:
-                        memory_seq = memory_state.cpu()
-                    else:
-                        memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
-                        if memory_seq.shape[1] > self.mem_window_size:
-                            memory_seq = memory_seq[:, -self.mem_window_size:, :]
+                    memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                    if memory_seq.shape[1] > self.mem_window_size:
+                        memory_seq = memory_seq[:, -self.mem_window_size:, :]
 
                 if self.num_prepend > 0:
                     prepend_state = out[:, -self.num_prepend:].cuda()
@@ -672,9 +669,3 @@ class Memory_Only_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             out['hidden_states'] = full_hidden_states
 
         return out, metrics
-        
-    def manage_gradients(self, memory_state, seg_num):
-        if seg_num == 0:
-            return True
-        memory_state = memory_state.detach()
-        return False

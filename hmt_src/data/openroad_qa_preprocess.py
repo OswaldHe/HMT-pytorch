@@ -25,7 +25,8 @@ def OpenROAD(
     num_sensory=32,
     neg_sample=5,
     max_len=4096,
-    batch_size=1
+    batch_size=1,
+    include_train=True,
 ):
     dataset = datasets.load_dataset('json', data_files=ds_file)
     dataset = dataset['train']
@@ -158,13 +159,15 @@ def OpenROAD(
     
     column_names = valid_ds.column_names
 
-    train_tok = train_ds.map(
-        tokenize_function_train,
-        batched=True,
-        remove_columns=column_names,
-        desc='tokenize OpenROAD QA training dataset',
-        num_proc=8
-    )
+    train_tok = None
+    if include_train:
+        train_tok = train_ds.map(
+            tokenize_function_train,
+            batched=True,
+            remove_columns=column_names,
+            desc='tokenize OpenROAD QA training dataset',
+            num_proc=8
+        )
 
     valid_tok = valid_ds.map(
         tokenize_function_valid,
@@ -176,8 +179,10 @@ def OpenROAD(
 
     generator = torch.Generator()
     generator.manual_seed(42)
-    train_dataloader = DataLoader(train_tok, batch_size=batch_size, collate_fn=collate_fn,
-                                    shuffle=True, drop_last=False, generator=generator, pin_memory=True)
+    train_dataloader = None
+    if train_tok is not None:
+        train_dataloader = DataLoader(train_tok, batch_size=batch_size, collate_fn=collate_fn,
+                                        shuffle=True, drop_last=False, generator=generator, pin_memory=True)
 
     valid_dataloader = DataLoader(valid_tok, batch_size=batch_size, collate_fn=collate_fn,
                                     shuffle=False, drop_last=False, pin_memory=True)
