@@ -66,28 +66,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         memory_state = None
         prepend_state = None
         segment = None
-        dynamic_seg = bool(self.hmt_config.get('dynamic_seg', False))
-        if (
-            dynamic_seg
-            and input_ids is not None
-            and attention_mask is not None
-            and self.hmt_config.get('dynamic_seg_checkpoint') is not None
-            and self.hmt_config.get('lm_tokenizer') is not None
-        ):
-            seg_iter = Bert_SegmentIterator(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                segment_length=segment_size,
-                lm_tokenizer=self.hmt_config.get('lm_tokenizer'),
-                seg_checkpoint=self.hmt_config.get('dynamic_seg_checkpoint'),
-                debug=bool(self.hmt_config.get('dynamic_seg_debug', False)),
-            )
-            token_masks = []
-        else:
-            dynamic_seg = False
-            seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
-            token_masks = None
+        seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         seg_num = 0
 
         cell_outputs = []
@@ -99,18 +78,10 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         while True:
 
             prepend_state = segment['input_ids'][:,-self.num_prepend:].cuda() if segment is not None and self.num_prepend > 0 else None
-            if dynamic_seg:
-                iter_out = seg_iter.next(segment_size)
-                if iter_out is None:
-                    break
-                segment, real_segment_len, real_token_mask = iter_out
-                token_masks.append(real_token_mask)
-                current_segment_size = real_segment_len
-            else:
-                segment = seg_iter.next(segment_size)
-                if segment is None:
-                    break
-                current_segment_size = segment_size
+            segment = seg_iter.next(segment_size)
+            if segment is None:
+                break
+            current_segment_size = segment_size
 
             memory_prompt = None
             if self.cross_attn is not None:
@@ -143,8 +114,6 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
                 cell_outputs.pop(0)
-                if token_masks is not None and len(token_masks) > 0:
-                    token_masks.pop(0)
             
             if self.cross_attn is not None:
                 if memory_seq is None:
@@ -160,8 +129,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
                                    output_hidden_states=output_hidden_states,
-                                   mask_size=mask_size,
-                                   token_masks=token_masks)
+                                   mask_size=mask_size)
         return out, total_hist, metrics
     
     def generate(self, input_ids, attention_mask, segment_size=1024, mem_seq=None, sum_fraction=0.5, **generate_kwargs):
@@ -308,32 +276,18 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         return segments
 
     def process_outputs(self, cell_outputs, **kwargs):
-        out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
-        token_masks = kwargs.get('token_masks')
+        return self._build_output_and_metrics(
+            full_logits=full_logits,
+            full_hidden_states=full_hidden_states,
+            full_valid_mask=None,
+            **kwargs,
+        )
+
+    def _build_output_and_metrics(self, full_logits, full_hidden_states, full_valid_mask=None, **kwargs):
+        out = CausalLMOutputWithCrossAttentions()
         labels = kwargs.get('labels')
-        full_valid_mask = None
-        if token_masks:
-            full_token_mask = torch.cat(token_masks, dim=1).to(full_logits.device).bool()
-            max_valid_len = max(int(full_token_mask.sum(dim=1).max().item()), 1)
-            target_len = max_valid_len
-            full_logits = self._apply_token_mask_and_pad(full_logits, full_token_mask, target_len)
-            full_hidden_states = tuple(
-                self._apply_token_mask_and_pad(layer_hs, full_token_mask, target_len)
-                for layer_hs in full_hidden_states
-            )
-            full_valid_mask = torch.zeros(
-                full_logits.shape[:2],
-                dtype=torch.bool,
-                device=full_logits.device,
-            )
-            valid_counts = full_token_mask.sum(dim=1)
-            for bidx in range(full_valid_mask.shape[0]):
-                keep_len = min(int(valid_counts[bidx].item()), full_valid_mask.shape[1])
-                if keep_len > 0:
-                    full_valid_mask[bidx, :keep_len] = True
-        
         mask_size = kwargs.get('mask_size')
         metrics = {
             'loss': None,
@@ -359,11 +313,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                 metrics['f1'] = None
                 metrics['accuracy'] = None
                 out['logits'] = full_logits
-                segment_keys = ['loss', 'logits']
-                if kwargs.get('output_attentions'):
-                    segment_keys.append('attentions')
                 if kwargs.get('output_hidden_states'):
-                    segment_keys.append('hidden_states')
                     out['hidden_states'] = full_hidden_states
                 return out, metrics
 
@@ -416,11 +366,7 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             metrics['accuracy'] = None
 
         out['logits'] = full_logits
-        segment_keys = ['loss', 'logits']
-        if kwargs.get('output_attentions'):
-            segment_keys.append('attentions')
         if kwargs.get('output_hidden_states'):
-            segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states
 
         return out, metrics
@@ -438,6 +384,143 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             if copy_len > 0:
                 padded[bidx, :copy_len] = valid[:copy_len]
         return padded
+
+
+class Summary_Memory_RecurrentWrapper_Dynamic(Summary_Memory_RecurrentWrapper):
+    def forward(self, 
+            input_ids, 
+            labels=None, 
+            labels_mask=None, 
+            inputs_embeds=None, 
+            attention_mask=None, 
+            mask_size=None,  # Size of the attention mask used to compute the loss, it should be the length of the labels. If it's None, then self.mask_size is used. 
+            output_attentions=None, 
+            output_hidden_states=None, 
+            sum_fraction=0.5,
+            segment_size=1024, 
+            mode='train', 
+            pos_mask=None,
+            **kwargs
+        ):
+
+        mask_size = self.hmt_config.get('mask_size') if mask_size is None else mask_size
+        if input_ids is None or attention_mask is None:
+            raise ValueError("Summary_Memory_RecurrentWrapper_Dynamic requires input_ids and attention_mask")
+        if self.hmt_config.get('dynamic_seg_checkpoint') is None:
+            raise ValueError("dynamic_seg_checkpoint is required for Summary_Memory_RecurrentWrapper_Dynamic")
+        if self.hmt_config.get('lm_tokenizer') is None:
+            raise ValueError("lm_tokenizer is required for Summary_Memory_RecurrentWrapper_Dynamic")
+
+        memory_state = None
+        prepend_state = None
+        segment = None
+        seg_iter = Bert_SegmentIterator(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            segment_length=segment_size,
+            lm_tokenizer=self.hmt_config.get('lm_tokenizer'),
+            seg_checkpoint=self.hmt_config.get('dynamic_seg_checkpoint'),
+            debug=bool(self.hmt_config.get('dynamic_seg_debug', False)),
+        )
+        seg_num = 0
+
+        cell_outputs = []
+        n_cell_out = self.hmt_config.get('n_cell_out')
+        memory_seq = None
+        token_masks = []
+
+        total_hist = []
+
+        while True:
+
+            prepend_state = segment['input_ids'][:,-self.num_prepend:].cuda() if segment is not None and self.num_prepend > 0 else None
+            iter_out = seg_iter.next(segment_size)
+            if iter_out is None:
+                break
+            segment, real_segment_len, real_token_mask = iter_out
+            token_masks.append(real_token_mask)
+            current_segment_size = real_segment_len
+
+            memory_prompt = None
+            if self.cross_attn is not None:
+                seg = copy.deepcopy(segment)
+                cut_size = int(round(current_segment_size * sum_fraction))
+                cut_size = max(1, min(cut_size, seg['input_ids'].shape[1]))
+                seg['input_ids'] = seg['input_ids'][:, :cut_size]
+                seg['attention_mask'] = seg['attention_mask'][:, :cut_size]
+                summary_prompt = self.summary_cell(input_ids.shape[0]) if self.num_mem_embed > 0 else None
+                _, summary_state = self.memory_cell(**seg, pre_memory_state=summary_prompt)
+                memory_prompt, hist = self.cross_attn(
+                    memory_seq,
+                    summary_state,
+                    mode,
+                    seg_num if seg_num < self.mem_window_size else self.mem_window_size,
+                )
+                if hist is not None:
+                    total_hist.extend(hist)
+
+            cell_out, memory_state = self.memory_cell(
+                **segment,
+                pre_memory_state=memory_prompt,
+                prepend_state=prepend_state,
+                output_hidden_states=True,
+            )
+
+            cell_outputs.append(cell_out)
+            if len(cell_outputs) > n_cell_out:
+                cell_outputs.pop(0)
+                if len(token_masks) > 0:
+                    token_masks.pop(0)
+            
+            if self.cross_attn is not None:
+                if memory_seq is None:
+                    memory_seq = memory_state.cpu()
+                else:
+                    memory_seq = torch.cat([memory_seq, memory_state.cpu()], dim=1)
+                    if memory_seq.shape[1] > self.mem_window_size:
+                        memory_seq = memory_seq[:,-self.mem_window_size:,:]
+
+            seg_num += 1
+        
+        out, metrics = self.process_outputs(cell_outputs, labels=labels, 
+                                   labels_mask=labels_mask,
+                                   output_attentions=output_attentions, 
+                                   output_hidden_states=output_hidden_states,
+                                   mask_size=mask_size,
+                                   token_masks=token_masks)
+        return out, total_hist, metrics
+
+    def process_outputs(self, cell_outputs, **kwargs):
+        full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
+        full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
+        token_masks = kwargs.get('token_masks')
+        full_valid_mask = None
+        if token_masks:
+            full_token_mask = torch.cat(token_masks, dim=1).to(full_logits.device).bool()
+            max_valid_len = max(int(full_token_mask.sum(dim=1).max().item()), 1)
+            full_logits = self._apply_token_mask_and_pad(full_logits, full_token_mask, max_valid_len)
+            full_hidden_states = tuple(
+                self._apply_token_mask_and_pad(layer_hs, full_token_mask, max_valid_len)
+                for layer_hs in full_hidden_states
+            )
+            full_valid_mask = torch.zeros(
+                full_logits.shape[:2],
+                dtype=torch.bool,
+                device=full_logits.device,
+            )
+            valid_counts = full_token_mask.sum(dim=1)
+            for bidx in range(full_valid_mask.shape[0]):
+                keep_len = min(int(valid_counts[bidx].item()), full_valid_mask.shape[1])
+                if keep_len > 0:
+                    full_valid_mask[bidx, :keep_len] = True
+
+        return self._build_output_and_metrics(
+            full_logits=full_logits,
+            full_hidden_states=full_hidden_states,
+            full_valid_mask=full_valid_mask,
+            **kwargs,
+        )
 
 
 

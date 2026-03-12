@@ -1,7 +1,11 @@
 from copy import deepcopy
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from .language_modeling import Summary_Memory_RecurrentWrapper, Memory_Only_RecurrentWrapper
+from .language_modeling import (
+    Summary_Memory_RecurrentWrapper,
+    Summary_Memory_RecurrentWrapper_Dynamic,
+    Memory_Only_RecurrentWrapper,
+)
 from .memory_cell import MemoryCell
 
 
@@ -25,14 +29,30 @@ def generate_model(args, base_model, logger, tokenizer=None):
         mask_size = block_size
 
     logger.info("Preparing recurrent model wrapper...")
+    use_dynamic_summary = (
+        getattr(args, "recurrent_type") == "summary_memory"
+        and bool(getattr(args, "dynamic_seg", False))
+    )
     if getattr(args, "recurrent_type") == "summary_memory":
-        logger.info("Using Summary-Memory Recurrent Wrapper")
-        wrapper_cls = Summary_Memory_RecurrentWrapper
+        if use_dynamic_summary:
+            logger.info("Using Summary-Memory Recurrent Wrapper (Dynamic)")
+            wrapper_cls = Summary_Memory_RecurrentWrapper_Dynamic
+        else:
+            logger.info("Using Summary-Memory Recurrent Wrapper")
+            wrapper_cls = Summary_Memory_RecurrentWrapper
     elif getattr(args, "recurrent_type") == "memory_only":
         logger.info("Using Memory-Only Recurrent Wrapper")
         wrapper_cls = Memory_Only_RecurrentWrapper
     else:
         raise ValueError(f"Unknown recurrent_type: {getattr(args, 'recurrent_type')}")
+
+    dynamic_kwargs = {}
+    if use_dynamic_summary:
+        dynamic_kwargs = {
+            "dynamic_seg_checkpoint": getattr(args, "dynamic_seg_checkpoint", None),
+            "dynamic_seg_debug": bool(getattr(args, "dynamic_seg_debug", False)),
+            "lm_tokenizer": tokenizer,
+        }
 
     if args.rmt_only or args.baseline_only:
         model = wrapper_cls(
@@ -44,9 +64,7 @@ def generate_model(args, base_model, logger, tokenizer=None):
             n_cell_out=args.num_seg_save,
             rmt_only=args.rmt_only,
             baseline_only=args.baseline_only,
-            dynamic_seg=getattr(args, "dynamic_seg", False),
-            dynamic_seg_checkpoint=getattr(args, "dynamic_seg_checkpoint", None),
-            lm_tokenizer=tokenizer,
+            **dynamic_kwargs,
         )
     else:
         model = wrapper_cls(
@@ -60,9 +78,7 @@ def generate_model(args, base_model, logger, tokenizer=None):
             n_cell_out=args.num_seg_save,
             mem_mlp=args.mem_mlp,
             mem_mlp_hidden_dim=args.mem_mlp_hidden_dim,
-            dynamic_seg=getattr(args, "dynamic_seg", False),
-            dynamic_seg_checkpoint=getattr(args, "dynamic_seg_checkpoint", None),
-            lm_tokenizer=tokenizer,
+            **dynamic_kwargs,
         )
 
     if args.load_from_ckpt is not None:
