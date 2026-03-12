@@ -39,6 +39,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# checkout files
+checkpoints/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -160,3 +163,7 @@ generate.ipynb
 test__.py
 wandb_data/
 wandb_processing.ipynb
+
+models*/
+
+commands
