@@ -77,8 +77,8 @@ class MemoryCell(torch.nn.Module):
         
         seg_kwargs = self.process_input(input_ids, pre_memory_state, prepend_state, suf_memory_state, **kwargs)
         out = self.model(**seg_kwargs)
-        n_prepend = self.n_prepend
-        out, new_memory_state = self.process_output(out, 0 if prepend_state is None else n_prepend, **kwargs)
+        prepend_tokens = 0 if prepend_state is None else prepend_state.shape[1]
+        out, new_memory_state = self.process_output(out, prepend_tokens, **kwargs)
         input_ids = input_ids.cpu()
         for k, v in kwargs.items():
             if torch.is_tensor(v):
@@ -121,10 +121,11 @@ class MemoryCell(torch.nn.Module):
         if kwargs.get("attention_mask") is not None:
             # Do not reserve memory slots in the mask when no memory is attached.
             mem_tokens = pre_memory_state.shape[1] if pre_memory_state is not None else 0
+            prepend_tokens = 0 if prepend_state is None else prepend_state.shape[1]
             seg_kwargs["attention_mask"] = self.pad_attention_mask(
                 kwargs["attention_mask"],
                 inputs_embeds.shape,
-                0 if prepend_state is None else self.n_prepend,
+                prepend_tokens,
                 generate,
                 mem_tokens=mem_tokens,
             )

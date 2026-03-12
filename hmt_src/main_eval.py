@@ -164,7 +164,7 @@ def main():
     batch_size = args.batch_size
 
     model, block_size, history_size = generate_model(
-        args=args, base_model=model, logger=logger
+        args=args, base_model=model, logger=logger, tokenizer=tokenizer
     )
 
     """### Prepare dataset"""

@@ -1,5 +1,5 @@
 DATASET ?= longalign
-VARIANT ?= base
+VARIANT ?= base # summary_memory/memory_only
 
 MODEL ?= meta-llama/Llama-3.2-1B-Instruct
 CKPT_ROOT ?= /work1/jasoncong/jameszhang23/HMT-OPT-pytorch/checkpoints
@@ -18,8 +18,9 @@ TRAIN_ARGS :=
 EVAL_ARGS :=
 GEN_ARGS :=
 SAVE_CKPT :=
+LOAD_FROM_CKPT :=
 
-BATCH ?= 2
+BATCH ?= 1
 BPTT_DEP ?= 8
 
 SEG_LEN ?= 1024
@@ -29,6 +30,9 @@ NUM_SENSORY ?= 32
 TEST_MAX_LEN ?= 65536
 MAX_NEW_TOKEN ?= 16384
 
+DYNAMIC_SEG ?= 0
+DYNAMIC_SEG_CKPT ?= /work1/jasoncong/jameszhang23/HMT-OPT-pytorch/checkpoints/wiki727k_bert_small/best
+DYNAMIC_SEG_ARGS :=
 
 
 ifeq ($(DATASET),wikitext)
@@ -49,6 +53,7 @@ ifeq ($(VARIANT),base)
 	EVAL_ARGS := --batch_size=$(BATCH) --test_max_context_length=$(TEST_MAX_LEN)
 	GEN_ARGS := --chat --generate_prompt="$(PROMPT)" --max_new_tokens=$(MAX_NEW_TOKEN)
 	SAVE_CKPT := $(CKPT_ROOT)/$(MODEL)-$(VARIANT)-$(DATASET)-seg_$(SEG_LEN)/
+	LOAD_FROM_CKPT := $(SAVE_CKPT)
 endif
 
 ifneq (,$(filter $(VARIANT),mem_recall summary_memory))
@@ -57,6 +62,15 @@ ifneq (,$(filter $(VARIANT),mem_recall summary_memory))
 	EVAL_ARGS := --batch_size=$(BATCH) --bptt_depth=$(BPTT_DEP) --test_max_context_length=$(TEST_MAX_LEN)
 	GEN_ARGS := --chat --generate_prompt="$(PROMPT)" --max_new_tokens=$(MAX_NEW_TOKEN)
 	SAVE_CKPT := $(CKPT_ROOT)/$(MODEL)-$(VARIANT)-$(DATASET)-seg_$(SEG_LEN)-bptt_$(BPTT_DEP)-recall_$(MEM_REC_SIZE)/
+	LOAD_FROM_CKPT := $(SAVE_CKPT)
+endif
+
+ifneq ($(strip $(LOAD_FROM_CKPT)),)
+	LOAD_CKPT_ARG := --load_from_ckpt="$(LOAD_FROM_CKPT)"
+endif
+
+ifneq ($(strip $(DYNAMIC_SEG)),0)
+	DYNAMIC_SEG_ARGS := --dynamic_seg --dynamic_seg_checkpoint="$(DYNAMIC_SEG_CKPT)"
 endif
 
 
@@ -71,6 +85,7 @@ train:
 		--training_step=$(TRAIN_STEP) \
 		--eval_step=$(EVAL_STEP) \
 		--test_step=$(TEST_STEP) \
+		$(DYNAMIC_SEG_ARGS) \
 		$(TRAIN_ARGS) \
 		--save_ckpt="$(SAVE_CKPT)"
 
@@ -79,7 +94,8 @@ eval:
 		$(TASK_ARGS) \
 		--model_name=$(MODEL) \
 		$(MODEL_ARGS) \
-		--load_from_ckpt="$(SAVE_CKPT)" \
+		$(LOAD_CKPT_ARG) \
+		$(DYNAMIC_SEG_ARGS) \
 		--eval_step=$(EVAL_STEP) \
 		--test_step=$(TEST_STEP) \
 		$(EVAL_ARGS) \
@@ -89,6 +105,7 @@ generate:
 	accelerate launch hmt_src/main.py \
 		--model_name=$(MODEL) \
 		$(MODEL_ARGS) \
-		--load_from_ckpt="$(SAVE_CKPT)" \
+		$(LOAD_CKPT_ARG) \
+		$(DYNAMIC_SEG_ARGS) \
 		$(GEN_ARGS) \
 		--generate_only

@@ -7,7 +7,7 @@ from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from transformers import OPTConfig
 from .long_mem_cross_attn_vanilla import CrossAttentionMemory
 from .memory_cell import SummaryCell, MemoryCell
-from .utils import SegmentIterator
+from .segment_iter import SegmentIterator, Bert_SegmentIterator
 from accelerate.logging import get_logger
 from torch.profiler import profile, record_function, ProfilerActivity
 import random
@@ -66,7 +66,28 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         memory_state = None
         prepend_state = None
         segment = None
-        seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+        dynamic_seg = bool(self.hmt_config.get('dynamic_seg', False))
+        if (
+            dynamic_seg
+            and input_ids is not None
+            and attention_mask is not None
+            and self.hmt_config.get('dynamic_seg_checkpoint') is not None
+            and self.hmt_config.get('lm_tokenizer') is not None
+        ):
+            seg_iter = Bert_SegmentIterator(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                segment_length=segment_size,
+                lm_tokenizer=self.hmt_config.get('lm_tokenizer'),
+                seg_checkpoint=self.hmt_config.get('dynamic_seg_checkpoint'),
+                debug=bool(self.hmt_config.get('dynamic_seg_debug', False)),
+            )
+            token_masks = []
+        else:
+            dynamic_seg = False
+            seg_iter = SegmentIterator(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+            token_masks = None
         seg_num = 0
 
         cell_outputs = []
@@ -78,15 +99,26 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         while True:
 
             prepend_state = segment['input_ids'][:,-self.num_prepend:].cuda() if segment is not None and self.num_prepend > 0 else None
-            segment = seg_iter.next(segment_size)
-            if segment is None:
-                break
+            if dynamic_seg:
+                iter_out = seg_iter.next(segment_size)
+                if iter_out is None:
+                    break
+                segment, real_segment_len, real_token_mask = iter_out
+                token_masks.append(real_token_mask)
+                current_segment_size = real_segment_len
+            else:
+                segment = seg_iter.next(segment_size)
+                if segment is None:
+                    break
+                current_segment_size = segment_size
 
             memory_prompt = None
             if self.cross_attn is not None:
                 seg = copy.deepcopy(segment)
-                seg['input_ids'] = seg['input_ids'][:,:int(round(segment_size * sum_fraction))]
-                seg['attention_mask'] = seg['attention_mask'][:,:int(round(segment_size * sum_fraction))]
+                cut_size = int(round(current_segment_size * sum_fraction))
+                cut_size = max(1, min(cut_size, seg['input_ids'].shape[1]))
+                seg['input_ids'] = seg['input_ids'][:, :cut_size]
+                seg['attention_mask'] = seg['attention_mask'][:, :cut_size]
                 # summary current segment to get summrization
                 summary_prompt = self.summary_cell(input_ids.shape[0]) if self.num_mem_embed > 0 else None
                 _, summary_state = self.memory_cell(**seg, pre_memory_state=summary_prompt)
@@ -111,6 +143,8 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             cell_outputs.append(cell_out)
             if len(cell_outputs) > n_cell_out:
                 cell_outputs.pop(0)
+                if token_masks is not None and len(token_masks) > 0:
+                    token_masks.pop(0)
             
             if self.cross_attn is not None:
                 if memory_seq is None:
@@ -126,7 +160,8 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
                                    output_hidden_states=output_hidden_states,
-                                   mask_size=mask_size)
+                                   mask_size=mask_size,
+                                   token_masks=token_masks)
         return out, total_hist, metrics
     
     def generate(self, input_ids, attention_mask, segment_size=1024, mem_seq=None, sum_fraction=0.5, **generate_kwargs):
@@ -276,6 +311,28 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
+        token_masks = kwargs.get('token_masks')
+        labels = kwargs.get('labels')
+        full_valid_mask = None
+        if token_masks:
+            full_token_mask = torch.cat(token_masks, dim=1).to(full_logits.device).bool()
+            max_valid_len = max(int(full_token_mask.sum(dim=1).max().item()), 1)
+            target_len = max_valid_len
+            full_logits = self._apply_token_mask_and_pad(full_logits, full_token_mask, target_len)
+            full_hidden_states = tuple(
+                self._apply_token_mask_and_pad(layer_hs, full_token_mask, target_len)
+                for layer_hs in full_hidden_states
+            )
+            full_valid_mask = torch.zeros(
+                full_logits.shape[:2],
+                dtype=torch.bool,
+                device=full_logits.device,
+            )
+            valid_counts = full_token_mask.sum(dim=1)
+            for bidx in range(full_valid_mask.shape[0]):
+                keep_len = min(int(valid_counts[bidx].item()), full_valid_mask.shape[1])
+                if keep_len > 0:
+                    full_valid_mask[bidx, :keep_len] = True
         
         mask_size = kwargs.get('mask_size')
         metrics = {
@@ -286,22 +343,47 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             'f1': None,
             'accuracy': None
         }
-
-        labels = kwargs.get('labels')
-        if labels.shape[1] <= mask_size:
-            mask_size = labels.shape[1]-1
         
         if labels is not None:
-            shift_labels = labels[..., -mask_size:].contiguous()
-            shift_logits = full_logits[..., -(mask_size+1):-1, :].contiguous()
+            labels_len = labels.shape[1]
+            logits_len = full_logits.shape[1]
+            if mask_size is None:
+                mask_size = labels_len
+            effective_mask_size = min(mask_size, labels_len, logits_len - 1)
+
+            if effective_mask_size <= 0:
+                gen_loss = full_logits.new_zeros(())
+                out['loss'] = gen_loss
+                metrics['loss'] = 0.0
+                metrics['ppl'] = None
+                metrics['f1'] = None
+                metrics['accuracy'] = None
+                out['logits'] = full_logits
+                segment_keys = ['loss', 'logits']
+                if kwargs.get('output_attentions'):
+                    segment_keys.append('attentions')
+                if kwargs.get('output_hidden_states'):
+                    segment_keys.append('hidden_states')
+                    out['hidden_states'] = full_hidden_states
+                return out, metrics
+
+            shift_labels = labels[..., -effective_mask_size:].contiguous()
+            shift_logits = full_logits[..., -(effective_mask_size+1):-1, :].contiguous()
+            if full_valid_mask is not None:
+                shift_valid_mask = full_valid_mask[..., -(effective_mask_size+1):-1].to(shift_labels.device).contiguous()
+                shift_labels = shift_labels.masked_fill(~shift_valid_mask, IGNORE_INDEX)
             flat_labels = shift_labels.view(-1)
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             
-            loss_fct = CrossEntropyLoss(ignore_index=IGNORE_INDEX)
-            gen_loss = loss_fct(flat_logits.cuda(), flat_labels.cuda())
+            if (flat_labels != IGNORE_INDEX).any():
+                loss_fct = CrossEntropyLoss(ignore_index=IGNORE_INDEX)
+                gen_loss = loss_fct(flat_logits.to(full_logits.device), flat_labels.to(full_logits.device))
+                metrics['ppl'] = torch.exp(gen_loss.detach()).item()
+            else:
+                gen_loss = flat_logits.new_zeros(())
+                metrics['ppl'] = None
             out['loss'] = gen_loss
             metrics['loss'] = out['loss'].detach().item()
-            metrics['ppl'] = torch.exp(gen_loss.detach()).item()
 
             # filter ignore_index before computing metrics
             flat_labels_cpu = flat_labels.detach().cpu()
@@ -342,6 +424,20 @@ class Summary_Memory_RecurrentWrapper(torch.nn.Module, PyTorchModelHubMixin):
             out['hidden_states'] = full_hidden_states
 
         return out, metrics
+
+    def _apply_token_mask_and_pad(self, tensor, token_mask, target_len):
+        target_len = max(int(target_len), 1)
+        if tensor.dim() < 2:
+            return tensor
+        batch_size = tensor.shape[0]
+        output_shape = (batch_size, target_len) + tuple(tensor.shape[2:])
+        padded = tensor.new_zeros(output_shape)
+        for bidx in range(batch_size):
+            valid = tensor[bidx][token_mask[bidx]]
+            copy_len = min(valid.shape[0], target_len)
+            if copy_len > 0:
+                padded[bidx, :copy_len] = valid[:copy_len]
+        return padded
 
 
 

@@ -5,7 +5,7 @@ from .language_modeling import Summary_Memory_RecurrentWrapper, Memory_Only_Recu
 from .memory_cell import MemoryCell
 
 
-def generate_model(args, base_model, logger):
+def generate_model(args, base_model, logger, tokenizer=None):
     """Configure the recurrent model wrapper and return it with sequence parameters."""
     if args.baseline_only:
         logger.warning(
@@ -21,7 +21,7 @@ def generate_model(args, base_model, logger):
         block_size = args.segment_length
         # block_size -= 2 * num_mem_embed
         # block_size -= args.num_sensory
-        history_size = (n_segments - 1) * block_size
+        history_size = n_segments * block_size
         mask_size = block_size
 
     logger.info("Preparing recurrent model wrapper...")
@@ -44,6 +44,9 @@ def generate_model(args, base_model, logger):
             n_cell_out=args.num_seg_save,
             rmt_only=args.rmt_only,
             baseline_only=args.baseline_only,
+            dynamic_seg=getattr(args, "dynamic_seg", False),
+            dynamic_seg_checkpoint=getattr(args, "dynamic_seg_checkpoint", None),
+            lm_tokenizer=tokenizer,
         )
     else:
         model = wrapper_cls(
@@ -57,6 +60,9 @@ def generate_model(args, base_model, logger):
             n_cell_out=args.num_seg_save,
             mem_mlp=args.mem_mlp,
             mem_mlp_hidden_dim=args.mem_mlp_hidden_dim,
+            dynamic_seg=getattr(args, "dynamic_seg", False),
+            dynamic_seg_checkpoint=getattr(args, "dynamic_seg_checkpoint", None),
+            lm_tokenizer=tokenizer,
         )
 
     if args.load_from_ckpt is not None:

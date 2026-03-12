@@ -96,6 +96,8 @@ parser.add_argument('--load_from_ckpt', type=str, default=None, help='load the c
 parser.add_argument('--recurrent_type', type=str, default='summary_memory', choices=['summary_memory', 'memory_only'], help='choose recurrent wrapper type')
 parser.add_argument('--model_name', type=str, default='facebook/opt-2.7b', help='transformer model name for backbone of HMT')
 parser.add_argument('--segment_length', type=int, default=1024, help='segment length of HMT')
+parser.add_argument('--dynamic_seg', action='store_true', default=False, help='use frozen BERT segmentation model for dynamic context segmentation')
+parser.add_argument('--dynamic_seg_checkpoint', type=str, default=None, help='path to trained segmentation checkpoint used by --dynamic_seg')
 parser.add_argument('--num_seg_save', type=int, default=4, help='max number of segment inference results saved on GPU')
 parser.add_argument('--bptt_depth', type=int, default=8, help='number of segments unrolled in bptt')
 parser.add_argument('--test_max_context_length', type=int, default=None, help='max context length of input to test')
@@ -130,6 +132,9 @@ def main():
     global torch
 
     args = parser.parse_args()
+    if args.dynamic_seg and not args.dynamic_seg_checkpoint:
+        raise ValueError("--dynamic_seg requires --dynamic_seg_checkpoint")
+
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with="wandb")
     device = accelerator.device
@@ -141,7 +146,14 @@ def main():
             return None
         if not torch.is_tensor(value):
             value = torch.tensor(value, device=accelerator.device)
-        value = value.detach()
+        else:
+            value = value.detach()
+            if value.device != accelerator.device:
+                value = value.to(accelerator.device)
+            if value.is_sparse:
+                value = value.to_dense()
+        if value.dim() == 0:
+            value = value.unsqueeze(0)
         gathered = accelerator.gather_for_metrics(value)
         return gathered.float().mean().item()
 
@@ -185,7 +197,7 @@ def main():
         model.print_trainable_parameters()
 
     model, block_size, history_size = generate_model(
-        args=args, base_model=model, logger=logger
+        args=args, base_model=model, logger=logger, tokenizer=tokenizer
     )
 
     """### Prepare dataset"""

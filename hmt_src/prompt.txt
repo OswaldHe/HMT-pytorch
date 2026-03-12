@@ -341,5 +341,4 @@ This story has been updated with additional developments.
 
 
 ---
-TASK (Summarization)
-summary ARTICLE-1.
+Question: how many artical in total?
